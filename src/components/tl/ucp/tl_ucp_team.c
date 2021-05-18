@@ -37,6 +37,12 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
         /* exchange started but not complete return UCC_OK from post */
         status = UCC_OK;
     }
+
+    if (params->params.mask & UCC_TEAM_PARAM_FIELD_ONESIDED) {
+        self->eps = params->params.eps;
+        self->rkeys = params->params.rkeys;
+        self->remote_addrs = params->params.remote_addrs;
+    }
     tl_info(tl_context->lib, "posted tl team: %p", self);
     return status;
 }

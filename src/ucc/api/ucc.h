@@ -933,6 +933,7 @@ enum ucc_team_params_field {
     UCC_TEAM_PARAM_FIELD_MEM_PARAMS             = UCC_BIT(9),
     UCC_TEAM_PARAM_FIELD_EP_MAP                 = UCC_BIT(10),
     UCC_TEAM_PARAM_FIELD_ID                     = UCC_BIT(11),
+    UCC_TEAM_PARAM_FIELD_ONESIDED               = UCC_BIT(12),
 };
 
 /**
@@ -1112,6 +1113,9 @@ typedef struct ucc_team_params {
     ucc_mem_map_params_t    mem_params;
     ucc_ep_map_t            ep_map;
     uint64_t                id;
+    void *                  rkeys;
+    void *                  eps;
+    uint64_t *              remote_addrs;
 } ucc_team_params_t;
 
 /**

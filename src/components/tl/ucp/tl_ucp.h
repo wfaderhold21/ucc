@@ -79,6 +79,9 @@ typedef struct ucc_tl_ucp_team {
     uint32_t                   scope;
     uint32_t                   scope_id;
     uint32_t                   seq_num;
+    void *                     rkeys;
+    void *                     eps;
+    uint64_t *                 remote_addrs;
     ucc_tl_ucp_task_t         *preconnect_task;
 } ucc_tl_ucp_team_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_team_t, ucc_base_context_t *,
