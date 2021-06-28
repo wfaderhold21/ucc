@@ -61,6 +61,7 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_team_t)
     if (self->addr_storage) {
         ucc_tl_ucp_addr_storage_free(self->addr_storage);
     }
+
     tl_info(self->super.super.context->lib, "finalizing tl team: %p", self);
 }
 
@@ -114,8 +115,8 @@ static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
                                                  ucc_tl_ucp_context_t * ctx)
 {
     ucc_tl_ucp_remote_info_t   **remote_info;
-    // loop over all PEs in the team and populate the context's rma 
-    // information if does not exist
+
+    /* only populate this hash IFF it has not already been populated */
     if (ctx->rinfo_hash == NULL) {
         ctx->rinfo_hash = kh_init(tl_ucp_rinfo_hash);
         remote_info = (ucc_tl_ucp_remote_info_t **) 

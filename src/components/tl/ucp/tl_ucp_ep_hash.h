@@ -102,4 +102,22 @@ static inline void* tl_ucp_hash_pop(tl_ucp_ep_hash_t *h)
     }
     return ep;
 }
+
+static inline void** tl_ucp_hash_rinfo_pop(tl_ucp_rinfo_hash_t *h)
+{
+    void    ** rinfo = NULL;
+    khiter_t k;
+    k = kh_begin(h);
+    while (k != kh_end(h)) {
+        if (kh_exist(h, k)) {
+            rinfo = kh_value(h, k);
+            break;
+        }
+        k++;
+    }
+    if (rinfo) {
+        kh_del(tl_ucp_rinfo_hash, h, k);
+    }
+    return rinfo;
+}
 #endif

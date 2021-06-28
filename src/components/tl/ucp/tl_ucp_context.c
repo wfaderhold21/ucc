@@ -164,6 +164,7 @@ static void ucc_tl_ucp_context_barrier(ucc_tl_ucp_context_t *ctx,
     }
     ucc_free(rbuf);
 }
+ucc_status_t ucc_tl_ucp_rinfo_destroy(ucc_tl_ucp_context_t *ctx);
 
 UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
 {
@@ -179,9 +180,14 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
         }
     }
     kh_destroy(tl_ucp_ep_hash, self->ep_hash);
+    printf("freeing rinfo hash\n");
+    
+    ucc_tl_ucp_rinfo_destroy(self);
+    kh_destroy(tl_ucp_rinfo_hash, self->rinfo_hash);
     if (UCC_TL_CTX_HAS_OOB(self)) {
         ucc_tl_ucp_context_barrier(self, &UCC_TL_CTX_OOB(self));
     }
+
     ucc_context_progress_deregister(
         self->super.super.ucc_context,
         (ucc_context_progress_fn_t)ucp_worker_progress, self->ucp_worker);

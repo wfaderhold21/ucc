@@ -96,12 +96,12 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
                                              ucc_tl_ucp_team_t * team,
 											 ucc_tl_ucp_task_t * task)
 {
-    ucp_request_param_t req_param;
-    ucs_status_ptr_t    ucp_status;
+//    ucp_request_param_t req_param;
+//    ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
     ucp_rkey_h          rkey;
-    uint64_t            rva, lva;
+    uint64_t            rva;
     ucc_tl_ucp_remote_info_t *rinfo, *linfo;
 
     // get the endpoint or create if doesn't exist
