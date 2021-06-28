@@ -12,6 +12,11 @@
 #include "utils/ucc_malloc.h"
 #include "coll_score/ucc_coll_score.h"
 
+static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
+                                                 ucc_team_p2p_conn_t p2p_conn,
+                                                 ucc_tl_ucp_context_t * ctx);
+
+
 UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
                     const ucc_base_team_params_t *params)
 {
@@ -23,6 +28,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
              if all the necessary ranks mappings are provided */
     self->addr_storage       = NULL;
     self->preconnect_task    = NULL;
+    self->pSync              = NULL;
     self->size               = params->params.oob.participants;
     self->scope              = params->scope;
     self->scope_id           = params->scope_id;
@@ -30,6 +36,15 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
     self->id                 = params->id;
     self->seq_num            = 0;
     self->status             = UCC_INPROGRESS;
+
+    if (params->params.mask & UCC_TEAM_PARAM_FIELD_P2P_CONN) {
+        self->p2p_conn = params->params.p2p_conn;
+    }
+
+    if (params->params.mask & UCC_TEAM_PARAM_FIELD_MEM_PARAMS) {
+        self->pSync = params->params.mem_params.address;
+    } 
+
     status                   = ucc_tl_ucp_addr_exchange_start(ctx,
                                                    params->params.oob,
                                                   &self->addr_storage);
@@ -94,6 +109,38 @@ static ucc_status_t ucc_tl_ucp_team_preconnect(ucc_tl_ucp_team_t *team)
     return UCC_OK;
 }
 
+static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
+                                                 ucc_team_p2p_conn_t p2p_conn,
+                                                 ucc_tl_ucp_context_t * ctx)
+{
+    ucc_tl_ucp_remote_info_t   **remote_info;
+    // loop over all PEs in the team and populate the context's rma 
+    // information if does not exist
+    if (ctx->rinfo_hash == NULL) {
+        ctx->rinfo_hash = kh_init(tl_ucp_rinfo_hash);
+        remote_info = (ucc_tl_ucp_remote_info_t **) 
+                            malloc(sizeof(ucc_tl_ucp_remote_info_t *) * team->size);
+        
+        for (int i = 0; i < team->size; i++) {
+            ucc_context_id_t key = ucc_tl_ucp_get_rank_key(team, i);
+            
+            remote_info[i] = (ucc_tl_ucp_remote_info_t *) malloc(sizeof(ucc_tl_ucp_remote_info_t) * 2);
+
+            // TODO: fix with non-null values
+            p2p_conn.conn_info_lookup(NULL, i, (void ***) &remote_info, NULL);
+            
+            // set rkey to NULL here... it'll be unpacked later
+            remote_info[i][0].rkey = NULL;
+            remote_info[i][1].rkey = NULL;
+
+            // populate the hash
+            tl_ucp_rinfo_hash_put(ctx->rinfo_hash, key, (void **) &remote_info[i]);
+        }
+        ctx->remote_info = remote_info;
+    }
+    return UCC_OK;
+}
+
 ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
 {
     ucc_tl_ucp_team_t    *team = ucc_derived_of(tl_team, ucc_tl_ucp_team_t);
@@ -119,6 +166,16 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
             goto err_preconnect;
         }
     }
+
+    if (team->pSync) {
+        status = ucc_tl_ucp_team_p2p_populate(team,
+                                              team->p2p_conn,
+                                              ctx);
+        if (UCC_OK != status) {
+            return status;
+        }
+    }
+   
 
     tl_info(tl_team->context->lib, "initialized tl team: %p", team);
     team->status = UCC_OK;

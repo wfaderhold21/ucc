@@ -35,6 +35,150 @@ ucc_tl_ucp_get_rank_key(ucc_tl_ucp_team_t *team, ucc_rank_t rank)
     return address->id;
 }
 
+static inline ucc_status_t ucc_tl_ucp_get_rkey(ucc_tl_ucp_team_t *team,
+                                               ucc_rank_t rank,
+                                               ucp_rkey_h *rkey)
+{
+    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
+    ucc_context_id_t      key = ucc_tl_ucp_get_rank_key(team, rank);
+    ucc_tl_ucp_remote_info_t   **remote_info;
+
+    remote_info = (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key);
+    *rkey = (ucp_rkey_h) remote_info[0]->rkey; //TODO: switch from 0 to segment
+    return UCC_OK;
+}
+
+static inline ucc_status_t ucc_tl_ucp_rinfo_hash_update(ucc_tl_ucp_team_t *team, 
+                                                        ucc_rank_t rank)
+{
+    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
+    team->p2p_conn.conn_info_lookup(NULL, rank, (void ***) &ctx->remote_info, NULL);
+    if (NULL == ctx->remote_info[rank]->packed_key) {
+        return UCC_ERR_NO_MESSAGE;
+    }
+
+    return UCC_OK;
+}
+
+static inline ucc_status_t ucc_tl_ucp_get_bva(ucc_tl_ucp_team_t *team,
+                                                       ucc_rank_t rank,
+                                                       uint64_t * va)
+{
+    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
+    ucc_context_id_t      key = ucc_tl_ucp_get_rank_key(team, rank);
+    ucc_tl_ucp_remote_info_t   **remote_info;
+    ucc_status_t status;
+
+    remote_info = (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key);
+    if (NULL == remote_info[0]->va_base) {
+        ucc_rank_t global_rank = ((ptrdiff_t) remote_info - (ptrdiff_t) &ctx->remote_info[0]) >> 3;
+
+        status = ucc_tl_ucp_rinfo_hash_update(team, global_rank);
+        if (UCC_OK != status) {
+            return status;
+        }
+    } 
+
+    if (remote_info[0][0].va_base < remote_info[0][1].va_base) {
+        if (*va < (ptrdiff_t) remote_info[0][1].va_base) {
+            *va = (uint64_t) remote_info[0][0].va_base;
+        } else {
+            *va = (uint64_t) remote_info[0][1].va_base;
+        }
+    } else {
+        if (*va < (ptrdiff_t) remote_info[0][0].va_base) {
+            *va = (uint64_t) remote_info[0][1].va_base;
+        } else {
+            *va = (uint64_t) remote_info[0][0].va_base;
+        }
+    }
+
+    return UCC_OK;
+}
+
+
+
+static inline ucc_status_t ucc_tl_ucp_ep_unpack_rkey(ucc_tl_ucp_team_t *team,
+                                                     ucc_rank_t rank,
+                                                     ucp_ep_h *ep,
+                                                     ucp_rkey_h *rkey)
+{
+    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
+    ucc_context_id_t      key = ucc_tl_ucp_get_rank_key(team, rank);
+    ucc_tl_ucp_remote_info_t   **remote_info;
+    ucc_status_t status;
+
+    remote_info = (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key);
+    if (NULL == remote_info[0]->packed_key) {
+        ucc_rank_t global_rank = ((ptrdiff_t) remote_info - (ptrdiff_t) &ctx->remote_info[0]) >> 3;
+
+        status = ucc_tl_ucp_rinfo_hash_update(team, global_rank);
+        if (UCC_OK != status) {
+            return status;
+        }
+    }
+
+    ucp_ep_rkey_unpack(*ep,
+                       remote_info[0]->packed_key,
+                       (ucp_rkey_h *) &remote_info[0]->rkey);
+    *rkey = (ucp_rkey_h) remote_info[0]->rkey;
+    return UCC_OK;
+}
+
+static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
+                                                            void * va,
+                                                            ucp_ep_h * ep,
+                                                            ucc_rank_t peer,
+                                                            ucc_tl_ucp_remote_info_t ** rinfo,
+                                                            ucc_tl_ucp_remote_info_t ** linfo)
+{
+    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
+    ucc_context_id_t      rkey = ucc_tl_ucp_get_rank_key(team, peer);
+    ucc_context_id_t      lkey = ucc_tl_ucp_get_rank_key(team, team->rank);
+    ucc_tl_ucp_remote_info_t   **remote_info, **local_info;
+    ucc_status_t status;
+    int segment;
+
+    local_info = (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, lkey);
+    remote_info = (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, rkey);
+    
+    /* do we have good info yet? */
+    if (NULL == remote_info[0]->va_base) {
+        ucc_rank_t global_rank = ((ptrdiff_t) remote_info - (ptrdiff_t) &ctx->remote_info[0]) >> 3;
+
+        printf("calling p2p conn info\n");
+        status = ucc_tl_ucp_rinfo_hash_update(team, global_rank);
+        if (UCC_OK != status) {
+            return status;
+        }
+    } 
+
+//    printf("(va: %p) remote_info: va_base[0]: %p, va_base[1]: %p\n", va, local_info[0][0].va_base, local_info[0][1].va_base);
+    /* which segment? */
+    if (local_info[0][0].va_base < local_info[0][1].va_base) {
+        if (va >= local_info[0][0].va_base && va < local_info[0][1].va_base) {
+            segment = 0;
+        } else {
+            segment = 1;
+        }
+    }
+
+    /* is the rkey unpacked? */
+    if (NULL == remote_info[0][segment].rkey) {
+        /* we just looked things up, the packed_key should be present */
+        
+        ucp_ep_rkey_unpack(*ep,
+                           remote_info[0][segment].packed_key,
+                           (ucp_rkey_h *) &remote_info[0][segment].rkey);
+  
+    }
+
+    *rinfo = &remote_info[0][segment];
+    *linfo = &local_info[0][segment];
+//    printf("(va: %p) rinfo: va_base: %p, rkey: %p\n", va, rinfo->va_base, rinfo->rkey);
+    return UCC_OK;
+}
+
 static inline ucc_status_t ucc_tl_ucp_get_ep(ucc_tl_ucp_team_t *team, ucc_rank_t rank,
                                              ucp_ep_h *ep)
 {

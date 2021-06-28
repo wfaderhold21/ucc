@@ -58,6 +58,12 @@ typedef struct ucc_tl_ucp_ep_close_state {
     void      *close_req;
 } ucc_tl_ucp_ep_close_state_t;
 
+typedef struct ucc_tl_ucp_remote_info {
+    void * va_base;
+    void * packed_key;
+    void * rkey;
+} ucc_tl_ucp_remote_info_t;
+
 typedef struct ucc_tl_ucp_context {
     ucc_tl_context_t            super;
     ucc_tl_ucp_context_config_t cfg;
@@ -68,6 +74,8 @@ typedef struct ucc_tl_ucp_context {
     ucc_tl_ucp_ep_close_state_t ep_close_state;
     ucc_mpool_t                 req_mp;
     tl_ucp_ep_hash_t           *ep_hash;
+    tl_ucp_rinfo_hash_t         *rinfo_hash; 
+    ucc_tl_ucp_remote_info_t  **remote_info;
 } ucc_tl_ucp_context_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_context_t, const ucc_base_context_params_t *,
                   const ucc_base_config_t *);
@@ -84,6 +92,8 @@ typedef struct ucc_tl_ucp_team {
     uint32_t                   scope_id;
     uint32_t                   seq_num;
     ucc_tl_ucp_task_t         *preconnect_task;
+    ucc_team_p2p_conn_t        p2p_conn;
+    void                      *pSync;
 } ucc_tl_ucp_team_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_team_t, ucc_base_context_t *,
                   const ucc_base_team_params_t *);
