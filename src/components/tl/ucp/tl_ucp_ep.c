@@ -73,24 +73,6 @@ ucc_status_t ucc_tl_ucp_rinfo_destroy(ucc_tl_ucp_context_t *ctx)
     }
     
     return UCC_OK;
-/*
-    if (self->super.service_team == self) {
-        ucc_tl_ucp_context_t *ctx  = UCC_TL_UCP_TEAM_CTX(self);
-        printf("freeing service team\n");
-        
-        if (ctx->remote_info) {
-            printf("freeing rkeys and buffers\n");
-            for (int i = 0; i < self->size; i++) {
-                for (int j = 0; j < 2; j++) {
-                    ucp_rkey_buffer_release(ctx->remote_info[i][j].packed_key);
-                    ucp_rkey_destroy(ctx->remote_info[i][j].rkey);
-                }
-                free(ctx->remote_info[i]);
-            }
-            free(ctx->remote_info);
-            ctx->remote_info = NULL;
-        }
-    }*/
 }
 
 

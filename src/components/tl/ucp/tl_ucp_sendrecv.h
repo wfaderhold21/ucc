@@ -121,7 +121,6 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
-    ucp_rkey_h          rkey;
     uint64_t            rva;
     ucc_tl_ucp_remote_info_t *rinfo, *linfo;
 
@@ -139,30 +138,22 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
     }
 
     rva = (uint64_t) rinfo->va_base;
-    rkey = rinfo->rkey;
 
     // compute offset
     rva = rva + ((uint64_t )target - (uint64_t)linfo->va_base);
 
     //printf("[%d] performing put on %d @ %lx with rkey %p\n", team->rank, dest_group_rank, rva, rkey);
 
-#if 1
     req_param.op_attr_mask =
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA ;
     req_param.cb.send     = ucc_tl_ucp_send_completion_cb;
     req_param.user_data   = (void *)task;
-#endif
     // issue operation
-    ucp_status = ucp_put_nbx(ep, buffer, msglen, rva, rkey, &req_param);
-    //status = ucp_put_nbi(ep, buffer, msglen, rva, rkey);
+    ucp_status = ucp_put_nbx(ep, buffer, msglen, rva, rinfo->rkey, &req_param);
 
-    task->send_posted++;
     if (UCC_OK != ucp_status) {
-    //    printf("error on put\n");
         UCC_TL_UCP_CHECK_REQ_STATUS();
-    } else {
-        task->send_completed++;
-    }
+    } 
     return UCC_OK;
 }
 
@@ -207,7 +198,6 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
-    ucp_rkey_h          rkey;
     uint64_t            rva;
     ucc_tl_ucp_remote_info_t *rinfo, *linfo;
 
@@ -224,7 +214,6 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
     }
 
     rva = (uint64_t) rinfo->va_base;
-    rkey = rinfo->rkey;
 
     // compute offset
     rva = rva + ((uint64_t )target - (uint64_t)linfo->va_base);
@@ -235,14 +224,11 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
     req_param.user_data   = (void *)task;
 
     // issue operation
-    ucp_status = ucp_get_nbx(ep, buffer, msglen, rva, rkey, &req_param);
+    ucp_status = ucp_get_nbx(ep, buffer, msglen, rva, rinfo->rkey, &req_param);
 
-    task->send_posted++;
-    if (UCC_OK != status) {
+    if (UCC_OK != ucp_status) {
         UCC_TL_UCP_CHECK_REQ_STATUS();
-    } else {
-        task->send_completed++;
-    }
+    } 
     return UCC_OK;
 }
 
