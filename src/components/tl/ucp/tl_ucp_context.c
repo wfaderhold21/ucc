@@ -124,6 +124,8 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
         goto err_thread_mode;
     }
     self->ep_hash = kh_init(tl_ucp_ep_hash);
+
+    /* delay creation until team creation */
     self->rinfo_hash = NULL;
     tl_info(self->super.super.lib, "initialized tl context: %p", self);
     return UCC_OK;
@@ -180,7 +182,6 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
         }
     }
     kh_destroy(tl_ucp_ep_hash, self->ep_hash);
-    printf("freeing rinfo hash\n");
     
     ucc_tl_ucp_rinfo_destroy(self);
     kh_destroy(tl_ucp_rinfo_hash, self->rinfo_hash);

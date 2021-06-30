@@ -89,6 +89,27 @@ static inline ucc_status_t ucc_tl_ucp_send_nb(void *buffer, size_t msglen,
     return UCC_OK;
 }
 
+static inline ucc_status_t ucc_tl_ucp_ep_flush(ucc_rank_t dest_group_rank,
+                                               ucc_tl_ucp_team_t *team,
+                                               ucc_tl_ucp_task_t *task)
+{
+    ucc_status_t status;
+    ucp_request_param_t req_param;
+    ucs_status_ptr_t ucp_status;
+    ucp_ep_h ep;
+    
+    status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
+    if (ucc_unlikely(UCC_OK != status)) {
+        return status;
+    }
+
+    ucp_status = ucp_ep_flush_nbx(ep, &req_param);
+    if (UCC_OK != ucp_status) {
+        UCC_TL_UCP_CHECK_REQ_STATUS();
+    }
+    return UCC_OK;
+}
+
 static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer, 
                                              void * target,
                                              size_t msglen,
@@ -96,8 +117,8 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
                                              ucc_tl_ucp_team_t * team,
 											 ucc_tl_ucp_task_t * task)
 {
-//    ucp_request_param_t req_param;
-//    ucs_status_ptr_t    ucp_status;
+    ucp_request_param_t req_param;
+    ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
     ucp_rkey_h          rkey;
@@ -109,7 +130,9 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
     }
+    //printf("[%d] endpoint (%p) to %d\n", team->rank, ep, dest_group_rank);
 
+    /* resolve the p2p info */
     status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rinfo, &linfo);
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
@@ -118,73 +141,25 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
     rva = (uint64_t) rinfo->va_base;
     rkey = rinfo->rkey;
 
-    // get local base virtual address to compute offset on 
-    // remote virtual address
-    /*
-    lva = (uint64_t) target;
-    status = ucc_tl_ucp_get_bva(team,
-                                team->rank,
-                                (uint64_t *) &lva);
-    if (ucc_unlikely(UCC_OK != status)) {
-        return status;
-    }
-*/
-#if 0
-    // get the rkey for an endpoint, if doesn't exist unpack rkey
-    // to endpoint
-    status = ucc_tl_ucp_get_rkey(team,
-                                 dest_group_rank,
-                                &rkey);
-    if (ucc_unlikely(UCC_OK != status)) {
-        return status;
-    }
-
-    if (NULL == rkey) {
-        status = ucc_tl_ucp_ep_unpack_rkey(team,
-                                           dest_group_rank,
-                                           &ep,
-                                           &rkey);
-        if (ucc_unlikely(UCC_OK != status)) {
-            return status;
-        }
-    }
-                                      
-    // get remote base virtual address for upcoming operation
-    status = ucc_tl_ucp_get_bva(team,
-                                dest_group_rank,
-                                (uint64_t *) &rva);
-    if (ucc_unlikely(UCC_OK != status)) {
-        return status;
-    }
-
-    // get local base virtual address to compute offset on 
-    // remote virtual address
-    status = ucc_tl_ucp_get_bva(team,
-                                team->rank,
-                                (uint64_t *) &lva);
-    if (ucc_unlikely(UCC_OK != status)) {
-        return status;
-    }
-#endif
-
     // compute offset
     rva = rva + ((uint64_t )target - (uint64_t)linfo->va_base);
-#if 0
+
+    //printf("[%d] performing put on %d @ %lx with rkey %p\n", team->rank, dest_group_rank, rva, rkey);
+
+#if 1
     req_param.op_attr_mask =
-        UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_DATATYPE |
-        UCP_OP_ATTR_FIELD_USER_DATA ;
-    req_param.datatype    = ucp_dt_make_contig(msglen);
+        UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA ;
     req_param.cb.send     = ucc_tl_ucp_send_completion_cb;
     req_param.user_data   = (void *)task;
 #endif
     // issue operation
-//    ucp_status = ucp_put_nbx(ep, buffer, 1, rva, rkey, &req_param);
-    status = ucp_put_nbi(ep, buffer, msglen, rva, rkey);
-
+    ucp_status = ucp_put_nbx(ep, buffer, msglen, rva, rkey, &req_param);
+    //status = ucp_put_nbi(ep, buffer, msglen, rva, rkey);
 
     task->send_posted++;
-    if (UCC_OK != status) {
-//        UCC_TL_UCP_CHECK_REQ_STATUS();
+    if (UCC_OK != ucp_status) {
+    //    printf("error on put\n");
+        UCC_TL_UCP_CHECK_REQ_STATUS();
     } else {
         task->send_completed++;
     }
@@ -226,70 +201,44 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
                                              size_t msglen,
                                              ucc_rank_t dest_group_rank,
                                              ucc_tl_ucp_team_t * team,
-											 ucc_tl_ucp_task_t * task)
+                                             ucc_tl_ucp_task_t * task)
 {
     ucp_request_param_t req_param;
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
     ucp_rkey_h          rkey;
-    uint64_t            rva, lva;
+    uint64_t            rva;
+    ucc_tl_ucp_remote_info_t *rinfo, *linfo;
 
     // get the endpoint or create if doesn't exist
     status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
     }
-    
-    // get the rkey for an endpoint, if doesn't exist unpack rkey
-    // to endpoint
-    status = ucc_tl_ucp_get_rkey(team,
-                                 dest_group_rank,
-                                &rkey);
+
+    /* resolve the p2p info */
+    status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rinfo, &linfo);
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
     }
 
-    if (NULL == rkey) {
-        status = ucc_tl_ucp_ep_unpack_rkey(team,
-                                           dest_group_rank,
-                                           &ep,
-                                           &rkey);
-        if (ucc_unlikely(UCC_OK != status)) {
-            return status;
-        }
-    }
-                                      
-    // get remote base virtual address for upcoming operation
-    status = ucc_tl_ucp_get_bva(team,
-                                dest_group_rank,
-                                (uint64_t *) &rva);
-    if (ucc_unlikely(UCC_OK != status)) {
-        return status;
-    }
-
-    // get local base virtual address to compute offset on 
-    // remote virtual address
-    status = ucc_tl_ucp_get_bva(team,
-                                team->rank,
-                                (uint64_t *) &lva);
-    if (ucc_unlikely(UCC_OK != status)) {
-        return status;
-    }
+    rva = (uint64_t) rinfo->va_base;
+    rkey = rinfo->rkey;
 
     // compute offset
-    rva = rva + ((uint64_t )target - lva);
+    rva = rva + ((uint64_t )target - (uint64_t)linfo->va_base);
 
     req_param.op_attr_mask =
-        UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_DATATYPE |
-        UCP_OP_ATTR_FIELD_USER_DATA ;
-    req_param.datatype    = ucp_dt_make_contig(msglen);
+        UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA ;
     req_param.cb.send     = ucc_tl_ucp_send_completion_cb;
     req_param.user_data   = (void *)task;
-    ucp_status = ucp_get_nbx(ep, buffer, 1, rva, rkey, &req_param);
+
+    // issue operation
+    ucp_status = ucp_get_nbx(ep, buffer, msglen, rva, rkey, &req_param);
 
     task->send_posted++;
-    if (UCC_OK != ucp_status) {
+    if (UCC_OK != status) {
         UCC_TL_UCP_CHECK_REQ_STATUS();
     } else {
         task->send_completed++;

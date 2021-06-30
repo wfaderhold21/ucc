@@ -137,23 +137,23 @@ static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
     ucc_context_id_t      lkey = ucc_tl_ucp_get_rank_key(team, team->rank);
     ucc_tl_ucp_remote_info_t   **remote_info, **local_info;
     ucc_status_t status;
-    int segment;
+    ucc_rank_t global_rank = peer;
+    int segment = 0;
 
     local_info = (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, lkey);
     remote_info = (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, rkey);
-    
+
     /* do we have good info yet? */
     if (NULL == remote_info[0]->va_base) {
-        ucc_rank_t global_rank = ((ptrdiff_t) remote_info - (ptrdiff_t) &ctx->remote_info[0]) >> 3;
+        global_rank = ((ptrdiff_t) remote_info - (ptrdiff_t) &ctx->remote_info[0]) >> 3;
+       // printf("[%d] looking up good info on %d\n", team->rank, peer);
 
-        printf("calling p2p conn info\n");
         status = ucc_tl_ucp_rinfo_hash_update(team, global_rank);
         if (UCC_OK != status) {
             return status;
         }
     } 
 
-//    printf("(va: %p) remote_info: va_base[0]: %p, va_base[1]: %p\n", va, local_info[0][0].va_base, local_info[0][1].va_base);
     /* which segment? */
     if (local_info[0][0].va_base < local_info[0][1].va_base) {
         if (va >= local_info[0][0].va_base && va < local_info[0][1].va_base) {
@@ -161,21 +161,27 @@ static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
         } else {
             segment = 1;
         }
+    } else {
+        if (va >= local_info[0][1].va_base && va < local_info[0][0].va_base) {
+            segment = 1;
+        } else {
+            segment = 0;
+        }
     }
 
     /* is the rkey unpacked? */
     if (NULL == remote_info[0][segment].rkey) {
         /* we just looked things up, the packed_key should be present */
-        
+     //   printf("[%d:segment %d] unpacking rkey from %d\n", team->rank, segment, peer);
         ucp_ep_rkey_unpack(*ep,
                            remote_info[0][segment].packed_key,
                            (ucp_rkey_h *) &remote_info[0][segment].rkey);
   
+    //    printf("[%d:segment %d] packed_key: %p rkey: %p\n", team->rank, segment, remote_info[0][segment].packed_key, remote_info[0][segment].rkey);
     }
 
     *rinfo = &remote_info[0][segment];
     *linfo = &local_info[0][segment];
-//    printf("(va: %p) rinfo: va_base: %p, rkey: %p\n", va, rinfo->va_base, rinfo->rkey);
     return UCC_OK;
 }
 
