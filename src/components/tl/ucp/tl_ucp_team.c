@@ -37,10 +37,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
     self->seq_num            = 0;
     self->status             = UCC_INPROGRESS;
 
-    if (params->params.mask & UCC_TEAM_PARAM_FIELD_P2P_CONN) {
-        self->p2p_conn = params->params.p2p_conn;
-    }
-
+ 
     if (params->params.mask & UCC_TEAM_PARAM_FIELD_MEM_PARAMS) {
         self->pSync = params->params.mem_params.address;
     } 
@@ -52,6 +49,17 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
         /* exchange started but not complete return UCC_OK from post */
         status = UCC_OK;
     }
+
+    if (params->params.mask & UCC_TEAM_PARAM_FIELD_P2P_CONN) {
+        status = ucc_tl_ucp_team_p2p_populate(self,
+                                              params->params.p2p_conn,
+                                              ctx);
+        if (UCC_OK != status) {
+            printf("error on p2p_populate\n");
+            return status;
+        }
+    }
+
     tl_info(tl_context->lib, "posted tl team: %p", self);
     return status;
 }
@@ -123,9 +131,10 @@ static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
                             malloc(sizeof(ucc_tl_ucp_remote_info_t *) * team->size);
         
         for (int i = 0; i < team->size; i++) {
-            ucc_context_id_t key = ucc_tl_ucp_get_rank_key(team, i);
+//            ucc_context_id_t key = ucc_tl_ucp_get_rank_key(team, i);
             
             remote_info[i] = (ucc_tl_ucp_remote_info_t *) malloc(sizeof(ucc_tl_ucp_remote_info_t) * 2);
+            memset(remote_info[i], 0, sizeof(ucc_tl_ucp_remote_info_t) * 2);
 
             // TODO: fix with non-null values
             p2p_conn.conn_info_lookup(NULL, i, (void ***) &remote_info, NULL);
@@ -134,8 +143,13 @@ static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
             remote_info[i][0].rkey = NULL;
             remote_info[i][1].rkey = NULL;
 
+            if (i == team->rank) {
+                team->va_base[0] = remote_info[i][0].va_base;
+                team->va_base[1] = remote_info[i][1].va_base;
+            }
+
             // populate the hash
-            tl_ucp_rinfo_hash_put(ctx->rinfo_hash, key, (void **) &remote_info[i]);
+//            tl_ucp_rinfo_hash_put(ctx->rinfo_hash, key, (void **) &remote_info[i]);
         }
         ctx->remote_info = remote_info;
     }
@@ -168,15 +182,17 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
         }
     }
 
-    if (team->pSync) {
-        status = ucc_tl_ucp_team_p2p_populate(team,
-                                              team->p2p_conn,
-                                              ctx);
-        if (UCC_OK != status) {
-            return status;
+    if (team->addr_storage->state == UCC_TL_UCP_ADDR_EXCHANGE_COMPLETE &&
+        ctx->remote_info) {
+        ucc_context_id_t key = ucc_tl_ucp_get_rank_key(team, 0);
+        if (NULL == tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key)) {
+            for (int i = 0; i < team->size; i++) {
+                tl_ucp_rinfo_hash_put(ctx->rinfo_hash, key, (void **) &ctx->remote_info[i]);
+                key = ucc_tl_ucp_get_rank_key(team, i + 1);
+            }
         }
     }
-   
+       
 
     tl_info(tl_team->context->lib, "initialized tl team: %p", team);
     team->status = UCC_OK;

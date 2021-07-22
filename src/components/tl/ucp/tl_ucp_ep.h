@@ -34,7 +34,7 @@ ucc_tl_ucp_get_rank_key(ucc_tl_ucp_team_t *team, ucc_rank_t rank)
                                                         max_addrlen * rank);
     return address->id;
 }
-
+#if 0
 static inline ucc_status_t ucc_tl_ucp_rinfo_hash_update(ucc_tl_ucp_team_t *team, 
                                                         ucc_rank_t rank)
 {
@@ -46,6 +46,7 @@ static inline ucc_status_t ucc_tl_ucp_rinfo_hash_update(ucc_tl_ucp_team_t *team,
 
     return UCC_OK;
 }
+#endif
 
 // TODO: fix this code 
 static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
@@ -53,21 +54,17 @@ static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
                                                         ucp_ep_h * ep,
                                                         ucc_rank_t peer,
                                                         ucc_tl_ucp_remote_info_t ** rinfo,
-                                                        ucc_tl_ucp_remote_info_t ** linfo)
+                                                        int *segment)
 {
     ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
-    ucc_context_id_t      rkey = ucc_tl_ucp_get_rank_key(team, peer);
-    ucc_context_id_t      lkey = ucc_tl_ucp_get_rank_key(team, team->rank);
-    ucc_tl_ucp_remote_info_t   **remote_info, **local_info;
-    ucc_status_t status;
-    ucc_rank_t global_rank = peer;
-    int segment = 0;
+    ucc_context_id_t      key = ucc_tl_ucp_get_rank_key(team, peer);
+    ucc_tl_ucp_remote_info_t   **remote_info;
+    *segment = 0;
 
-    local_info = 
-        (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, lkey);
     remote_info = 
-        (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, rkey);
+        (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key);
 
+#if 0
     /* do we have good info yet? */
     if (NULL == remote_info[0]->va_base) {
         global_rank = 
@@ -80,26 +77,21 @@ static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
             return status;
         }
     } 
-
+#endif
     /* which segment? TODO: update to actual number of segments */
-    for (int i = 0; i < 2; i++) {
-        if (va >= local_info[0][i].va_base 
-            && va < local_info[0][i + 1].va_base) {
-            segment = i;
-            break;
-        }
+    if (va >= team->va_base[1]) {
+        *segment = 1;
     }
 
     /* is the rkey unpacked? */
-    if (NULL == remote_info[0][segment].rkey) {
+    if (NULL == remote_info[0][*segment].rkey) {
         /* we just looked things up, the packed_key should be present */
         ucp_ep_rkey_unpack(*ep,
-                           remote_info[0][segment].packed_key,
-                           (ucp_rkey_h *) &remote_info[0][segment].rkey);
+                           remote_info[0][*segment].packed_key,
+                           (ucp_rkey_h *) &remote_info[0][*segment].rkey);
     }
 
-    *rinfo = &remote_info[0][segment];
-    *linfo = &local_info[0][segment];
+    *rinfo = &remote_info[0][*segment];
     return UCC_OK;
 }
 
