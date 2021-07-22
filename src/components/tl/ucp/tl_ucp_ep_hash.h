@@ -29,19 +29,30 @@ static inline khint32_t tl_ucp_ctx_id_hash_fn(ucc_context_id_t k)
     return (khint32_t)h;
 }
 
+static inline khint32_t tl_ucp_rkey_hash_fn(uint64_t rkey)
+{
+    uint32_t h = 0;
+
+    h = tl_ucp_ctx_id_hash_fn_impl(h, rkey >> 32);
+    h = tl_ucp_ctx_id_hash_fn_impl(h, rkey & 0xffffffff);
+    return (khint32_t) h;
+}
+
 #define tl_ucp_ctx_id_equal_fn(_a, _b) (((_a).host_id == (_b).host_id) && \
                                         ((_a).pid == (_b).pid) &&       \
                                         ((_a).seq_num == (_b).seq_num))
 
 
+#define tl_ucp_rkey_equal_fn(_a, _b) ((_a) == (_b))
+
 KHASH_INIT(tl_ucp_ep_hash, ucc_context_id_t, void*, 1, \
            tl_ucp_ctx_id_hash_fn, tl_ucp_ctx_id_equal_fn);
 
-KHASH_INIT(tl_ucp_rinfo_hash, ucc_context_id_t, void **, 1, \
-           tl_ucp_ctx_id_hash_fn, tl_ucp_ctx_id_equal_fn);
+KHASH_INIT(tl_ucp_rkey_hash, uint64_t, void *, 1, \
+           tl_ucp_rkey_hash_fn, tl_ucp_rkey_equal_fn);
 
 #define tl_ucp_ep_hash_t khash_t(tl_ucp_ep_hash)
-#define tl_ucp_rinfo_hash_t khash_t(tl_ucp_rinfo_hash)
+#define tl_ucp_rkey_hash_t khash_t(tl_ucp_rkey_hash)
 
 static inline void* tl_ucp_hash_get(tl_ucp_ep_hash_t *h, ucc_context_id_t key)
 {
@@ -64,11 +75,11 @@ static inline void tl_ucp_hash_put(tl_ucp_ep_hash_t *h, ucc_context_id_t key,
     kh_value(h, k) = value;
 }
 
-static inline void** tl_ucp_rinfo_hash_get(tl_ucp_rinfo_hash_t *h, ucc_context_id_t key)
+static inline void* tl_ucp_rkey_hash_get(tl_ucp_rkey_hash_t *h, uint64_t key)
 {
     khiter_t k;
     void    *value;
-    k = kh_get(tl_ucp_rinfo_hash, h , key);
+    k = kh_get(tl_ucp_rkey_hash, h , key);
     if (k == kh_end(h)) {
         return NULL;
     }
@@ -76,12 +87,12 @@ static inline void** tl_ucp_rinfo_hash_get(tl_ucp_rinfo_hash_t *h, ucc_context_i
     return value;
 }
 
-static inline void tl_ucp_rinfo_hash_put(tl_ucp_rinfo_hash_t *h, ucc_context_id_t key,
-                                   void **value)
+static inline void tl_ucp_rkey_hash_put(tl_ucp_rkey_hash_t *h, uint64_t key,
+                                   void *value)
 {
     int ret;
     khiter_t k;
-    k = kh_put(tl_ucp_rinfo_hash, h, key, &ret);
+    k = kh_put(tl_ucp_rkey_hash, h, key, &ret);
     kh_value(h, k) = value;
 }
 
@@ -103,21 +114,21 @@ static inline void* tl_ucp_hash_pop(tl_ucp_ep_hash_t *h)
     return ep;
 }
 
-static inline void** tl_ucp_hash_rinfo_pop(tl_ucp_rinfo_hash_t *h)
+static inline void* tl_ucp_hash_rkey_pop(tl_ucp_rkey_hash_t *h)
 {
-    void    ** rinfo = NULL;
+    void    * rkey = NULL;
     khiter_t k;
     k = kh_begin(h);
     while (k != kh_end(h)) {
         if (kh_exist(h, k)) {
-            rinfo = kh_value(h, k);
+            rkey = kh_value(h, k);
             break;
         }
         k++;
     }
-    if (rinfo) {
-        kh_del(tl_ucp_rinfo_hash, h, k);
+    if (rkey) {
+        kh_del(tl_ucp_rkey_hash, h, k);
     }
-    return rinfo;
+    return rkey;
 }
 #endif

@@ -124,9 +124,9 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
         goto err_thread_mode;
     }
     self->ep_hash = kh_init(tl_ucp_ep_hash);
+    self->rkey_hash = kh_init(tl_ucp_rkey_hash);
 
     /* delay creation until team creation */
-    self->rinfo_hash = NULL;
     tl_info(self->super.super.lib, "initialized tl context: %p", self);
     return UCC_OK;
 
@@ -166,7 +166,6 @@ static void ucc_tl_ucp_context_barrier(ucc_tl_ucp_context_t *ctx,
     }
     ucc_free(rbuf);
 }
-ucc_status_t ucc_tl_ucp_rinfo_destroy(ucc_tl_ucp_context_t *ctx);
 
 UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
 {
@@ -182,9 +181,13 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
         }
     }
     kh_destroy(tl_ucp_ep_hash, self->ep_hash);
-    
-    ucc_tl_ucp_rinfo_destroy(self);
-    kh_destroy(tl_ucp_rinfo_hash, self->rinfo_hash);
+   
+    ucp_rkey_h rkey = (ucp_rkey_h) tl_ucp_hash_rkey_pop(self->rkey_hash);
+    while (rkey != NULL) {
+        ucp_rkey_destroy(rkey);
+        rkey = (ucp_rkey_h) tl_ucp_hash_rkey_pop(self->rkey_hash);
+    }
+    kh_destroy(tl_ucp_rkey_hash, self->rkey_hash);
     if (UCC_TL_CTX_HAS_OOB(self)) {
         ucc_tl_ucp_context_barrier(self, &UCC_TL_CTX_OOB(self));
     }

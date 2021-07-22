@@ -35,71 +35,32 @@ ucc_tl_ucp_get_rank_key(ucc_tl_ucp_team_t *team, ucc_rank_t rank)
     return address->id;
 }
 
-static inline ucc_status_t ucc_tl_ucp_rinfo_hash_update(ucc_tl_ucp_team_t *team, 
-                                                        ucc_rank_t rank)
+// FIXME: move to better location?
+static inline ucc_status_t ucc_tl_ucp_resolve_info(ucc_tl_ucp_team_t *team, 
+                                                   ucc_rank_t rank, 
+                                                   ucc_context_id_t key, 
+                                                   uint64_t target_va, 
+                                                   uint64_t * rva, 
+                                                   ucp_rkey_h * rkey)
 {
-    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
-    team->p2p_conn.conn_info_lookup(NULL, rank, (void ***) &ctx->remote_info, NULL);
-    if (NULL == ctx->remote_info[rank]->packed_key) {
+    ucc_tl_ucp_remote_info_t p2p_info;
+    ucc_tl_ucp_remote_info_t * p2p_info_p = &p2p_info;
+    ucc_tl_ucp_remote_info_t ** p2p_info_pp = &p2p_info_p;
+
+    p2p_info.va = (void *) target_va;
+    p2p_info.rva = NULL;
+    p2p_info.packed_key = NULL;
+
+    team->p2p_conn.conn_info_lookup(NULL, rank, (void ***) &p2p_info_pp, NULL);
+    
+    if (p2p_info.rva == NULL) {
         return UCC_ERR_NO_MESSAGE;
     }
 
-    return UCC_OK;
-}
-
-// TODO: fix this code 
-static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
-                                                        void * va,
-                                                        ucp_ep_h * ep,
-                                                        ucc_rank_t peer,
-                                                        ucc_tl_ucp_remote_info_t ** rinfo,
-                                                        ucc_tl_ucp_remote_info_t ** linfo)
-{
-    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
-    ucc_context_id_t      rkey = ucc_tl_ucp_get_rank_key(team, peer);
-    ucc_context_id_t      lkey = ucc_tl_ucp_get_rank_key(team, team->rank);
-    ucc_tl_ucp_remote_info_t   **remote_info, **local_info;
-    ucc_status_t status;
-    ucc_rank_t global_rank = peer;
-    int segment = 0;
-
-    local_info = 
-        (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, lkey);
-    remote_info = 
-        (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, rkey);
-
-    /* do we have good info yet? */
-    if (NULL == remote_info[0]->va_base) {
-        global_rank = 
-            ((ptrdiff_t) remote_info - (ptrdiff_t) &ctx->remote_info[0]) >> 3;
-
-        /* This is rare. Only happens if p2p information is 
-         * setup AFTER collectives */
-        status = ucc_tl_ucp_rinfo_hash_update(team, global_rank);
-        if (UCC_OK != status) {
-            return status;
-        }
-    } 
-
-    /* which segment? TODO: update to actual number of segments */
-    for (int i = 0; i < 2; i++) {
-        if (va >= local_info[0][i].va_base 
-            && va < local_info[0][i + 1].va_base) {
-            segment = i;
-            break;
-        }
+    *rva = (uint64_t) p2p_info.rva;
+    if (rkey != NULL) {
+        *rkey = p2p_info.packed_key;
     }
-
-    /* is the rkey unpacked? */
-    if (NULL == remote_info[0][segment].rkey) {
-        /* we just looked things up, the packed_key should be present */
-        ucp_ep_rkey_unpack(*ep,
-                           remote_info[0][segment].packed_key,
-                           (ucp_rkey_h *) &remote_info[0][segment].rkey);
-    }
-
-    *rinfo = &remote_info[0][segment];
-    *linfo = &local_info[0][segment];
     return UCC_OK;
 }
 
@@ -122,5 +83,42 @@ static inline ucc_status_t ucc_tl_ucp_get_ep(ucc_tl_ucp_team_t *team, ucc_rank_t
     }
     return UCC_OK;
 }
+
+/*
+ * target_va -> local target address [in]
+ * rva -> calc'd remote va [out]
+ * rkey -> rkey based on target/va [out]
+ */
+static inline ucc_status_t ucc_tl_ucp_get_rinfo(ucc_tl_ucp_team_t *team, ucc_rank_t rank,
+                                               ucp_ep_h ep,
+                                               uint64_t target_va, uint64_t * rva, 
+                                               ucp_rkey_h *rkey)
+{
+    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
+    ucc_context_id_t      key = ucc_tl_ucp_get_rank_key(team, rank);
+    ucc_status_t          status;
+    ucp_rkey_h rkey2;
+        
+    status = ucc_tl_ucp_resolve_info(team, rank, key, target_va, rva, &rkey2);
+    if (UCC_OK != status) {
+        tl_error(UCC_TL_TEAM_LIB(team), "failed to obtain rkey");
+        *rkey = NULL;
+        *rva = 0;
+        return status;
+    }
+
+    *rkey = tl_ucp_rkey_hash_get(ctx->rkey_hash, (uint64_t) rkey2);
+    if (NULL == (*rkey)) {
+//        printf("[%d] unpacking (tva: %lx, rva: %lx, rkey: %p, rank: %d)\n", team->rank, target_va, *rva, rkey2, rank);
+        ucp_ep_rkey_unpack(ep,
+                           rkey2,
+                           rkey);
+        tl_ucp_rkey_hash_put(ctx->rkey_hash, (uint64_t) rkey2, *rkey);
+    }
+
+    return UCC_OK;
+}
+
+
 
 #endif

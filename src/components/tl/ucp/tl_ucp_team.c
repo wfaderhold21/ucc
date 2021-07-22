@@ -12,10 +12,10 @@
 #include "utils/ucc_malloc.h"
 #include "coll_score/ucc_coll_score.h"
 
-static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
+/*static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
                                                  ucc_team_p2p_conn_t p2p_conn,
                                                  ucc_tl_ucp_context_t * ctx);
-
+*/
 
 UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
                     const ucc_base_team_params_t *params)
@@ -110,6 +110,7 @@ static ucc_status_t ucc_tl_ucp_team_preconnect(ucc_tl_ucp_team_t *team)
     return UCC_OK;
 }
 
+#if 0
 static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
                                                  ucc_team_p2p_conn_t p2p_conn,
                                                  ucc_tl_ucp_context_t * ctx)
@@ -126,14 +127,18 @@ static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
             ucc_context_id_t key = ucc_tl_ucp_get_rank_key(team, i);
             
             remote_info[i] = (ucc_tl_ucp_remote_info_t *) malloc(sizeof(ucc_tl_ucp_remote_info_t) * 2);
-
+            memset(remote_info[i], 0, sizeof(ucc_tl_ucp_remote_info_t) * 2);
+            if (i == team->rank) {
+                p2p_conn.conn_info_lookup(NULL, i, (void ***) &remote_info, NULL);
+            }
+/*
             // TODO: fix with non-null values
             p2p_conn.conn_info_lookup(NULL, i, (void ***) &remote_info, NULL);
             
             // set rkey to NULL here... it'll be unpacked later
             remote_info[i][0].rkey = NULL;
             remote_info[i][1].rkey = NULL;
-
+*/
             // populate the hash
             tl_ucp_rinfo_hash_put(ctx->rinfo_hash, key, (void **) &remote_info[i]);
         }
@@ -141,6 +146,7 @@ static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
     }
     return UCC_OK;
 }
+#endif
 
 ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
 {
@@ -167,7 +173,7 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
             goto err_preconnect;
         }
     }
-
+#if 0
     if (team->pSync) {
         status = ucc_tl_ucp_team_p2p_populate(team,
                                               team->p2p_conn,
@@ -176,7 +182,7 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
             return status;
         }
     }
-   
+   #endif
 
     tl_info(tl_team->context->lib, "initialized tl team: %p", team);
     team->status = UCC_OK;

@@ -59,9 +59,9 @@ typedef struct ucc_tl_ucp_ep_close_state {
 } ucc_tl_ucp_ep_close_state_t;
 
 typedef struct ucc_tl_ucp_remote_info {
-    void * va_base;
+    void * va;
+    void * rva;
     void * packed_key;
-    void * rkey;
 } ucc_tl_ucp_remote_info_t;
 
 typedef struct ucc_tl_ucp_context {
@@ -74,8 +74,7 @@ typedef struct ucc_tl_ucp_context {
     ucc_tl_ucp_ep_close_state_t ep_close_state;
     ucc_mpool_t                 req_mp;
     tl_ucp_ep_hash_t           *ep_hash;
-    tl_ucp_rinfo_hash_t        *rinfo_hash; 
-    ucc_tl_ucp_remote_info_t  **remote_info;
+    tl_ucp_rkey_hash_t        *rkey_hash; 
 } ucc_tl_ucp_context_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_context_t, const ucc_base_context_params_t *,
                   const ucc_base_config_t *);
