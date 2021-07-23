@@ -184,12 +184,16 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
 
     if (team->addr_storage->state == UCC_TL_UCP_ADDR_EXCHANGE_COMPLETE &&
         ctx->remote_info) {
-        ucc_context_id_t key = ucc_tl_ucp_get_rank_key(team, 0);
-        if (NULL == tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key)) {
+        ucc_context_id_t key = ucc_tl_ucp_get_rank_key(team, team->rank);
+        ucc_tl_ucp_remote_info_t ** local = (ucc_tl_ucp_remote_info_t **)tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key);
+        if (NULL == local) {
             for (int i = 0; i < team->size; i++) {
+                key = ucc_tl_ucp_get_rank_key(team, i);
                 tl_ucp_rinfo_hash_put(ctx->rinfo_hash, key, (void **) &ctx->remote_info[i]);
-                key = ucc_tl_ucp_get_rank_key(team, i + 1);
             }
+        } else {
+            team->va_base[0] = local[0][0].va_base;
+            team->va_base[1] = local[0][1].va_base;
         }
     }
        

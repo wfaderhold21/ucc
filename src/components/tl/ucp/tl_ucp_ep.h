@@ -34,19 +34,6 @@ ucc_tl_ucp_get_rank_key(ucc_tl_ucp_team_t *team, ucc_rank_t rank)
                                                         max_addrlen * rank);
     return address->id;
 }
-#if 0
-static inline ucc_status_t ucc_tl_ucp_rinfo_hash_update(ucc_tl_ucp_team_t *team, 
-                                                        ucc_rank_t rank)
-{
-    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
-    team->p2p_conn.conn_info_lookup(NULL, rank, (void ***) &ctx->remote_info, NULL);
-    if (NULL == ctx->remote_info[rank]->packed_key) {
-        return UCC_ERR_NO_MESSAGE;
-    }
-
-    return UCC_OK;
-}
-#endif
 
 // TODO: fix this code 
 static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
@@ -64,20 +51,6 @@ static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
     remote_info = 
         (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key);
 
-#if 0
-    /* do we have good info yet? */
-    if (NULL == remote_info[0]->va_base) {
-        global_rank = 
-            ((ptrdiff_t) remote_info - (ptrdiff_t) &ctx->remote_info[0]) >> 3;
-
-        /* This is rare. Only happens if p2p information is 
-         * setup AFTER collectives */
-        status = ucc_tl_ucp_rinfo_hash_update(team, global_rank);
-        if (UCC_OK != status) {
-            return status;
-        }
-    } 
-#endif
     /* which segment? TODO: update to actual number of segments */
     if (va >= team->va_base[1]) {
         *segment = 1;

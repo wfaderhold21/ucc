@@ -109,6 +109,7 @@ static inline ucc_status_t ucc_tl_ucp_ep_flush(ucc_rank_t dest_group_rank,
     ucs_status_ptr_t ucp_status;
     ucp_ep_h ep;
     
+    // TODO: is this broke?
     status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
@@ -141,7 +142,6 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
     }
-    //printf("[%d] endpoint (%p) to %d\n", team->rank, ep, dest_group_rank);
 
     /* resolve the p2p info */
     status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rinfo, &segment);
@@ -151,12 +151,11 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
 
     rva = (uint64_t) rinfo->va_base + ((ptrdiff_t) target - (ptrdiff_t) team->va_base[segment]); 
 
-    printf("[%d] performing put on %d @ %lx with rkey %p\n", team->rank, dest_group_rank, rva, rinfo->rkey);
-
     req_param.op_attr_mask =
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA ;
     req_param.cb.send     = ucc_tl_ucp_send_completion_cb;
     req_param.user_data   = (void *)task;
+
     // issue operation
     ucp_status = ucp_put_nbx(ep, buffer, msglen, rva, rinfo->rkey, &req_param);
 
@@ -208,7 +207,8 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
     ucc_status_t        status;
     ucp_ep_h            ep;
     uint64_t            rva;
-    ucc_tl_ucp_remote_info_t *rinfo, *linfo;
+    ucc_tl_ucp_remote_info_t *rinfo;
+    int segment = 0;
 
     // get the endpoint or create if doesn't exist
     status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
@@ -217,15 +217,12 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
     }
 
     /* resolve the p2p info */
-    //status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rinfo, &linfo);
-    //if (ucc_unlikely(UCC_OK != status)) {
-    //    return status;
-    //}
+    status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rinfo, &segment);
+    if (ucc_unlikely(UCC_OK != status)) {
+        return status;
+    }
 
-    rva = (uint64_t) rinfo->va_base;
-
-    // compute offset
-    rva = rva + ((uint64_t )target - (uint64_t)linfo->va_base);
+    rva = (uint64_t) rinfo->va_base + ((ptrdiff_t) target - (ptrdiff_t) team->va_base[segment]); 
 
     req_param.op_attr_mask =
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA ;
