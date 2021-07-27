@@ -68,7 +68,7 @@ ucc_status_t ucc_tl_ucp_rinfo_destroy(ucc_tl_ucp_context_t *ctx)
                 ucp_rkey_destroy(rinfo[0][i].rkey);
             }
         }
-        free(rinfo[0]);
+//        free(rinfo[0]);
         rinfo = (ucc_tl_ucp_remote_info_t **) tl_ucp_hash_rinfo_pop(ctx->rinfo_hash);
     }
     

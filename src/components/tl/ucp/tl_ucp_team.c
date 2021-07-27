@@ -194,6 +194,8 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
         } else {
             team->va_base[0] = local[0][0].va_base;
             team->va_base[1] = local[0][1].va_base;
+            team->base_length[0] = local[0][0].len;
+            team->base_length[1] = local[0][1].len;
         }
     }
        

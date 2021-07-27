@@ -133,8 +133,9 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
+    ucp_rkey_h          rkey;
     uint64_t            rva;
-    ucc_tl_ucp_remote_info_t *rinfo;
+//    ucc_tl_ucp_remote_info_t *rinfo;
     int segment = 0;
 
     // get the endpoint or create if doesn't exist
@@ -144,20 +145,22 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
     }
 
     /* resolve the p2p info */
-    status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rinfo, &segment);
+    status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rva, &rkey, &segment);
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
     }
 
-    rva = (uint64_t) rinfo->va_base + ((ptrdiff_t) target - (ptrdiff_t) team->va_base[segment]); 
+    rva = rva + ((ptrdiff_t) target - (ptrdiff_t) team->va_base[segment]); 
 
     req_param.op_attr_mask =
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA ;
     req_param.cb.send     = ucc_tl_ucp_send_completion_cb;
     req_param.user_data   = (void *)task;
 
+//    printf("[%d] put to %d (%p[seg %d] -> %p (base rva + offset: %lx)) with size %lu rkey %p\n", team->rank, dest_group_rank, team->va_base[segment], segment, target, rva, msglen, rkey);
+
     // issue operation
-    ucp_status = ucp_put_nbx(ep, buffer, msglen, rva, rinfo->rkey, &req_param);
+    ucp_status = ucp_put_nbx(ep, buffer, msglen, rva, rkey, &req_param);
 
     if (UCC_OK != ucp_status) {
         UCC_TL_UCP_CHECK_REQ_STATUS();
@@ -202,6 +205,7 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
                                              ucc_tl_ucp_team_t * team,
                                              ucc_tl_ucp_task_t * task)
 {
+#if 0
     ucp_request_param_t req_param;
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
@@ -234,7 +238,8 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
 
     if (UCC_OK != ucp_status) {
         UCC_TL_UCP_CHECK_REQ_STATUS();
-    } 
+    }
+#endif 
     return UCC_OK;
 }
 
