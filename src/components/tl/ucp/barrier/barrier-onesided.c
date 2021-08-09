@@ -9,21 +9,10 @@
 
 #include "tl_ucp_sendrecv.h"
 
-
-ucc_status_t ucc_tl_ucp_barrier_knomial_start(ucc_coll_task_t *task);
-ucc_status_t ucc_tl_ucp_barrier_knomial_progress(ucc_coll_task_t *task);
-#if 0
-ucc_status_t ucc_tl_ucp_barrier_init(ucc_tl_ucp_task_t *task)
-{
-    task->super.post     = ucc_tl_ucp_barrier_knomial_start;
-    task->super.progress = ucc_tl_ucp_barrier_knomial_progress;
-    return UCC_OK;
-}
-#endif
 ucc_status_t ucc_tl_ucp_barrier_start(ucc_coll_task_t * task);
 ucc_status_t ucc_tl_ucp_barrier_progress(ucc_coll_task_t * task);
 
-ucc_status_t ucc_tl_ucp_barrier_init(ucc_tl_ucp_task_t *task)
+ucc_status_t ucc_tl_ucp_barrier_one_sided_init_2(ucc_tl_ucp_task_t *task)
 {
     task->super.post     = ucc_tl_ucp_barrier_start;
     task->super.progress = ucc_tl_ucp_barrier_progress;
@@ -49,11 +38,11 @@ ucc_status_t ucc_tl_ucp_barrier_start(ucc_coll_task_t * coll_task)
     return UCC_OK;
 }
 
-ucc_status_t ucc_tl_ucp_barrier_common_progress(ucc_coll_task_t *coll_task,
-                                                long * pSync)
+ucc_status_t ucc_tl_ucp_barrier_progress(ucc_coll_task_t *coll_task)
 {
     ucc_tl_ucp_task_t     *task       = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
     ucc_tl_ucp_team_t     *team       = task->team;
+    long * pSync = task->args.src.info.buffer;
 	int * iter = &task->barrier.phase;
 	int lc, rc;
 	int parent;
@@ -79,12 +68,13 @@ ucc_status_t ucc_tl_ucp_barrier_common_progress(ucc_coll_task_t *coll_task,
         *pSync = (long) 1;
         if (lc < team->size) {
     		ucc_tl_ucp_put_nb(pSync, pSync, sizeof(long), lc, team, task);
+            ucc_tl_ucp_ep_flush(lc, team, task);
         }
         if (rc < team->size) {
             ucc_tl_ucp_put_nb(pSync, pSync, sizeof(long), rc, team, task);
+            ucc_tl_ucp_ep_flush(lc, team, task);
         }
         *iter = *iter + 1;
-        //ucc_tl_ucp_flush(team);
     } 
     
     if (*iter == 2) {
@@ -126,26 +116,9 @@ ucc_status_t ucc_tl_ucp_barrier_common_progress(ucc_coll_task_t *coll_task,
             }         
         }
     }
-
-    return UCC_OK;
-}
-
-ucc_status_t ucc_tl_ucp_barrier_progress(ucc_coll_task_t *coll_task)
-{
-    ucc_tl_ucp_task_t     *task       = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
-    long * pSync = task->args.src.info.buffer;
-    ucc_status_t status;
-
-    status = ucc_tl_ucp_barrier_common_progress(coll_task, pSync);
-    if (status == UCC_INPROGRESS) {
-        return status;
-    }
-
-    pSync[0] = -1;
-    pSync[1] = -1;
        
-    task->super.super.status = status;
+    task->super.super.status = UCC_OK;
     ucc_task_complete(coll_task);
-    return status;
+    return UCC_OK;
 }
 

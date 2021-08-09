@@ -146,12 +146,28 @@ static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
             if (i == team->rank) {
                 team->va_base[0] = remote_info[i][0].va_base;
                 team->va_base[1] = remote_info[i][1].va_base;
+/*                
+                ucp_rkey_pack(ctx->ucp_context, remote_info[i][0].packed_key, &packed[i], &packed_size);
+                ucp_rkey_pack(ctx->ucp_context, remote_info[i][1].packed_key, &packed2[i], &packed_size);
+                for (int j = 0; j < team->size; j++) {
+                    if (j == i) {
+                        continue;
+                    }
+
+*/
             }
 
             // populate the hash
 //            tl_ucp_rinfo_hash_put(ctx->rinfo_hash, key, (void **) &remote_info[i]);
         }
         ctx->remote_info = remote_info;
+
+//        perform an allgather here to obtain packed keys
+        //1. pack keys
+//        for (int i = 0; i < 2; i++) {
+        //2. exchange 
+        //3. unpack keys
+
     }
     return UCC_OK;
 }
