@@ -152,6 +152,8 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
 
     rva = rva + ((ptrdiff_t) target - (ptrdiff_t) team->va_base[segment]); 
 
+//    printf("[%d] target rva: 0x%lx\n", team->rank, rva);
+
     req_param.op_attr_mask =
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA ;
     req_param.cb.send     = ucc_tl_ucp_send_completion_cb;
