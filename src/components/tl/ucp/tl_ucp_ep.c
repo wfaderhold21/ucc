@@ -62,13 +62,13 @@ ucc_status_t ucc_tl_ucp_rinfo_destroy(ucc_tl_ucp_context_t *ctx)
     /* issue: va_base/packed_key are from user. do not free them */
     rinfo = (ucc_tl_ucp_remote_info_t **) tl_ucp_hash_rinfo_pop(ctx->rinfo_hash);
     while (rinfo) {
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 3; i++) {
             /* we don't have rkeys for self */
             if (rinfo[0][i].rkey) {
                 ucp_rkey_destroy(rinfo[0][i].rkey);
             }
         }
-//        free(rinfo[0]);
+        free(rinfo[0]);
         rinfo = (ucc_tl_ucp_remote_info_t **) tl_ucp_hash_rinfo_pop(ctx->rinfo_hash);
     }
     

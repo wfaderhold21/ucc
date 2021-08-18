@@ -133,8 +133,8 @@ static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
         for (int i = 0; i < team->size; i++) {
 //            ucc_context_id_t key = ucc_tl_ucp_get_rank_key(team, i);
             
-            remote_info[i] = (ucc_tl_ucp_remote_info_t *) malloc(sizeof(ucc_tl_ucp_remote_info_t) * 2);
-            memset(remote_info[i], 0, sizeof(ucc_tl_ucp_remote_info_t) * 2);
+            remote_info[i] = (ucc_tl_ucp_remote_info_t *) malloc(sizeof(ucc_tl_ucp_remote_info_t) * 3);
+            memset(remote_info[i], 0, sizeof(ucc_tl_ucp_remote_info_t) * 3);
 
             // TODO: fix with non-null values
             p2p_conn.conn_info_lookup(NULL, i, (void ***) &remote_info, NULL);
@@ -142,10 +142,16 @@ static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
             // set rkey to NULL here... it'll be unpacked later
             remote_info[i][0].rkey = NULL;
             remote_info[i][1].rkey = NULL;
+            remote_info[i][2].rkey = NULL;
 
             if (i == team->rank) {
                 team->va_base[0] = remote_info[i][0].va_base;
                 team->va_base[1] = remote_info[i][1].va_base;
+                team->va_base[2] = remote_info[i][2].va_base;
+                printf("[%d] team->va_base[0]: %p\n", team->rank, team->va_base[0]);
+                printf("[%d] team->va_base[1]: %p\n", team->rank, team->va_base[1]);
+                printf("[%d] team->va_base[2]: %p\n", team->rank, team->va_base[2]);
+
 /*                
                 ucp_rkey_pack(ctx->ucp_context, remote_info[i][0].packed_key, &packed[i], &packed_size);
                 ucp_rkey_pack(ctx->ucp_context, remote_info[i][1].packed_key, &packed2[i], &packed_size);

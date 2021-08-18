@@ -11,6 +11,6 @@
 ucc_status_t ucc_tl_ucp_barrier_init(ucc_tl_ucp_task_t *task);
 
 ucc_status_t ucc_tl_ucp_barrier_common_progress(ucc_coll_task_t *coll_task,
-                                                long offset);
+                                                long * offset);
 
 #endif

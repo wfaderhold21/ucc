@@ -12,6 +12,15 @@
 #include "tl_ucp_sendrecv.h"
 #include "barrier/barrier.h"
 
+// a % b
+static inline int p2_mod(int a, int b)
+{
+    if ((b & (b - 1)) == 0) {
+        return a & (b - 1);
+    } else {
+        return a % b;
+    }
+}
 ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
 {
     ucc_tl_ucp_task_t     *task      = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
@@ -27,6 +36,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
         ucc_progress_enqueue(UCC_TL_CORE_CTX(team)->pq, &task->super);
         return UCC_OK;
     }
+    task->super.super.status = status;
     ucc_task_complete(ctask);
 
     return UCC_OK;
@@ -59,23 +69,17 @@ static inline void bruck_phase1_rotate(void * src, void * dst, size_t count, siz
     uint64_t * d = (uint64_t *) dst;
     uint64_t * s = (uint64_t *) src;
 
-    memcpy(dst, src, rank * count);
+    // copy from src + rank to end
+    for (int i = 0; i < (count - rank); i++) {
+        d[i] = s[i + rank];
+    }
 
-    for (int i = 0; i < rank; i++) {
-        s[i] = s[i + rank];
-    }
-    for (int i = rank; i < rank + 1; i++) {
-        s[i] = d[0 + i - rank];
-    }
-    //memcpy(src, src + rank * datasize, (count - rank) * datasize);
+    memcpy(d + (count - rank), s, rank * datasize);
 /*
-    for (int i = 0; i < count - rank; i++) {
-        src[i] = src[i + rank];
+    for (int i = 0; i < (count - rank); i++) {
+        d[i] = s[i + rank];
     }
 */
-
-    //memcpy(src + rank * datasize, dst, rank * datasize);
-//    memcpy(dst, src, count * datasize);
 }
 
 static inline void bruck_phase2_comm(void * src, 
@@ -86,37 +90,30 @@ static inline void bruck_phase2_comm(void * src,
                                      ucc_tl_ucp_task_t * task)
 {
     int npes = team->size;
-//    int rounds = (npes & 1) ? log2(npes) + 1 : log2(npes);
-    int low_index = 0;
-    int high_index = npes - 1;
+    int rounds = (count & 1) ? log2(count) + 1 : log2(count);
+    int low_index = 1;
+    int high_index = count - 1;
+    uint64_t * s = (uint64_t *) src;
+    uint64_t * d = (uint64_t *) dst;
 
-    for (int i = 1; i < team->size; i<<=1) {
-        int low_peer = (team->rank + low_index) % npes;
-        int high_peer = (team->rank + high_index) % npes;
+    for (int i = 0; i < rounds; i++) {
+        int low_peer = p2_mod(team->rank + low_index, npes);
+        int high_peer = p2_mod(team->rank + high_index, npes);
 
-        printf("[%d] low %d, high %d\n", team->rank, low_peer, high_peer);
-
-        ucc_tl_ucp_put_nb((void *)((ptrdiff_t) src + (ptrdiff_t) low_index * count * datasize), 
-                          (void *)((ptrdiff_t) dst + (ptrdiff_t) low_index * count * datasize), 
-                          datasize, low_peer, team, task);
-
-        ucc_tl_ucp_put_nb((void *)((ptrdiff_t) src + (ptrdiff_t) high_index *count* datasize), 
-                          (void *)((ptrdiff_t) dst + (ptrdiff_t) high_index *count* datasize), 
-                          datasize, high_peer, team, task);
-
+        ucc_tl_ucp_put_nb(&s[low_index], &d[low_index], sizeof(uint64_t), low_peer, team, task);
+        ucc_tl_ucp_put_nb(&s[high_index], &d[high_index], sizeof(uint64_t), high_peer, team, task);
 
         ++low_index;
         --high_index;
     }
 }
 
-static inline void invert(void * block, size_t datasize, int low, int high)
+static inline void invert(uint64_t * block, size_t datasize, int low, int high)
 {
-    for (; low < high; ++low, --high) {
-        uint64_t tmp;
-        memcpy(&tmp, block + low * datasize, datasize);
-        memcpy(block + low * datasize, block + high * datasize, datasize);
-        memcpy(block + high * datasize, &tmp, datasize);
+    for (; low < high; low++, high--) {
+        uint64_t tmp = block[low];
+        block[low] = block[high];
+        block[high] = tmp;
     }
 }
 
@@ -133,78 +130,52 @@ ucc_status_t ucc_tl_ucp_alltoall_os_bruck_progress(ucc_coll_task_t *ctask)
     ucc_tl_ucp_team_t * team = task->team;
     void * src = task->args.src.info.buffer;
     void * dst = task->args.dst.info.buffer;
-    size_t nelems = task->args.src.info.count;
-    size_t datasize = sizeof(uint64_t); //(task->args.src.info.datatype == UCC_DT_INT64) ? sizeof(uint64_t) : sizeof(uint32_t); // FIXME
+    size_t datasize = (task->args.src.info.datatype == UCC_DT_INT64) ? sizeof(uint64_t) : sizeof(uint32_t); // FIXME
+    size_t nelems = task->args.src.info.count / datasize;
     long * pSync = team->pSync;
+    int * phase = &task->barrier.phase;
     ucc_status_t status = UCC_INPROGRESS; 
+    void * tmp = NULL;
 
-    printf("count: %lu\n", nelems);
-
-    // FIXME: convert to non-blocking...
+    if (*phase == 1 || *phase == 2) {
+        goto phase2;
+    } else if (*phase == 3) {
+        goto phase3;
+    }
+    
+    tmp = malloc(task->args.src.info.count);
 
     if (team->rank != 0) {
-        bruck_phase1_rotate(src, dst, nelems, datasize, team);
+        bruck_phase1_rotate(src, tmp, nelems, datasize, team);
+        memcpy(dst, tmp, nelems * datasize);
+    } else {
+        memcpy(dst, src, nelems * datasize);
+        memcpy(tmp, src, nelems * datasize);
     }
-    bruck_phase2_comm(src, dst, nelems, datasize, team, task);
-    while (UCC_INPROGRESS == (status = ucc_tl_ucp_barrier_common_progress(ctask, 2)));
-    pSync[0] = -1;
-    pSync[1] = -1;
+
+    bruck_phase2_comm(tmp, dst, nelems, datasize, team, task);
+    ucc_tl_ucp_flush(team);
+    if (tmp) {
+        free(tmp);
+    }
+
+    *phase = 2;
+    return UCC_INPROGRESS;
+phase2:
+    status = ucc_tl_ucp_barrier_common_progress(ctask, pSync);
+    if (status == UCC_INPROGRESS) {
+        return status;
+    }
+    *phase = 3;
+    return UCC_INPROGRESS;
+phase3:
     bruck_phase3_invert(dst, nelems, datasize, team, task);
 
     task->super.super.status = UCC_OK;
     ucc_task_complete(ctask);
     return UCC_OK;
 }
-#if 0
-/*
- * linear 
- */
-ucc_status_t ucc_tl_ucp_alltoall_onesided_progress_sync_entry(ucc_coll_task_t *ctask)
-{
-    ucc_tl_ucp_task_t     *task      = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
-    ucc_tl_ucp_team_t * team = task->team;
-    ptrdiff_t src = (ptrdiff_t) task->args.src.info.buffer;
-    ptrdiff_t dest = (ptrdiff_t) task->args.dst.info.buffer;
-    size_t nelems = task->args.src.info.count;
-    long * pSync = team->pSync; 
-    ucc_rank_t mype = team->rank;
-    ucc_rank_t npes = team->size;
-    ucc_status_t status = UCC_INPROGRESS;
 
-    if (nelems > 0) {
-    // put most of the work here
-    // alltoall
-        ucc_rank_t peer;
-        dest = dest + mype * nelems;
-        ucc_rank_t start = (mype + 1) % npes;
-        peer = start;
-        do {
-            ucc_tl_ucp_put_nb((void *)(src + peer * nelems), (void *)dest, nelems, peer, team, task);
-            ++peer;
-            peer = peer % npes;
-        } while (peer != start);
-
-        task->args.src.info.count = 0;
-    }
-
-    // locally check for completion 
-
-/*
-    // barrier
-    status = ucc_tl_ucp_barrier_common_progress(ctask, pSync);
-//    status = UCC_OK;
-    if (status == UCC_INPROGRESS) {
-        return status;
-    }
-
-    pSync[0] = -1;
-    pSync[1] = -1;
-*/
-    task->super.super.status = status;
-    ucc_task_complete(ctask);
-    return status;
-}
-#endif
 //ucc_status_t ucc_tl_ucp_barrier_knomial_progress(ucc_coll_task_t *coll_task);
 
 #define SAVE_STATE(_phase)                                            \
@@ -297,6 +268,8 @@ out:
     abort();
 }
 
+
+
 /*
  * linear 
  */
@@ -304,7 +277,6 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask)
 {
     ucc_tl_ucp_task_t     *task      = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
     ucc_tl_ucp_team_t * team = task->team;
-    //ucc_tl_ucp_context_t *ctx  = UCC_TL_UCP_TEAM_CTX(team);
     ptrdiff_t src = (ptrdiff_t) task->args.src.info.buffer;
     ptrdiff_t dest = (ptrdiff_t) task->args.dst.info.buffer;
     size_t nelems = task->args.src.info.count;
@@ -317,49 +289,21 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask)
     // put most of the work here
     // alltoall
         dest = dest + mype * nelems;
-        ucc_rank_t start = (mype + 1) % npes;
+        ucc_rank_t start = p2_mod(mype + 1, npes);
         peer = start;
         do {
             ucc_tl_ucp_put_nb((void *)(src + peer * nelems), (void *)dest, nelems, peer, team, task);
-            ++peer;
-            peer = peer % npes;
+            peer = p2_mod(peer + 1, npes);
         } while (peer != start);
-      //  ucc_tl_ucp_flush(team);
-
 
         task->args.src.info.count = 0;
-    //    task->barrier.phase = 0;//UCC_KN_PHASE_INIT;
-/*        ucc_knomial_pattern_init(team->size, team->rank,
-                             ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
-                                     cfg.barrier_kn_radix, team->size),
-                             &task->barrier.p);
-*/
     }
-#if 1
     // barrier
-    status = ucc_tl_ucp_barrier_common_progress(ctask, 0);
-    if (status == UCC_INPROGRESS) {
-     //   ucc_tl_ucp_flush(team);
-        return status;
-    }
-/*
-    status = ucc_tl_ucp_barrier_a2a_knomial_progress(&task->super);
+    status = ucc_tl_ucp_barrier_common_progress(ctask, team->pSync);
     if (status == UCC_INPROGRESS) {
         return status;
     }
-*/
-/*
-    while (UCC_INPROGRESS == (status = ucc_tl_ucp_barrier_a2a_knomial_progress(ctask))) {
-        ucc_context_progress((ucc_context_h) ctx->super.super.ucc_context);
-    }
-  */  
-    
-#else
-    task->barrier.phase = 0;
-    while (UCC_INPROGRESS == (status = ucc_tl_ucp_barrier_common_progress(ctask, 2)));
-    long * pSync = team->pSync; 
-    pSync[2] = pSync[3] = -1;
-#endif
+   
     task->super.super.status = UCC_OK;
     ucc_task_complete(ctask);
     return UCC_OK;

@@ -93,8 +93,8 @@ typedef struct ucc_tl_ucp_team {
     uint32_t                   scope_id;
     uint32_t                   seq_num;
     ucc_tl_ucp_task_t         *preconnect_task;
-    void                      *va_base[2];
-    size_t                     base_length[2];
+    void                      *va_base[3];
+    size_t                     base_length[3];
     void                      *pSync;
 } ucc_tl_ucp_team_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_team_t, ucc_base_context_t *,

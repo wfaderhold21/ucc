@@ -46,10 +46,10 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     }
 
     ucp_params.field_mask =
-        UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_TAG_SENDER_MASK;
+        UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_TAG_SENDER_MASK | UCP_PARAM_FIELD_MT_WORKERS_SHARED;
     ucp_params.features        = UCP_FEATURE_TAG | UCP_FEATURE_RMA | UCP_FEATURE_AMO32 | UCP_FEATURE_AMO64;
     ucp_params.tag_sender_mask = UCC_TL_UCP_TAG_SENDER_MASK;
-/*
+
     if (params->estimated_num_ppn > 0) {
         ucp_params.field_mask |= UCP_PARAM_FIELD_ESTIMATED_NUM_PPN;
         ucp_params.estimated_num_ppn = params->estimated_num_ppn;
@@ -59,7 +59,9 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
         ucp_params.field_mask |= UCP_PARAM_FIELD_ESTIMATED_NUM_EPS;
         ucp_params.estimated_num_eps = params->estimated_num_eps;
     }
-*/
+
+    ucp_params.mt_workers_shared = 0;
+
     status = ucp_init(&ucp_params, ucp_config, &ucp_context);
     ucp_config_release(ucp_config);
     if (UCS_OK != status) {

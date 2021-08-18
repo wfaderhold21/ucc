@@ -52,7 +52,7 @@ static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
     remote_info = 
         (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key);
 
-    for (int i = 1; i < 2; i++) {
+    for (int i = 1; i < 3; i++) {
         if (va >= team->va_base[i] &&
             va < team->va_base[i] + team->base_length[i]) {
             *segment = i;
