@@ -11,6 +11,7 @@
 enum {
     UCC_TL_UCP_BCAST_ALG_KNOMIAL,
     UCC_TL_UCP_BCAST_ALG_SAG_KNOMIAL,
+    UCC_TL_UCP_BCAST_ALG_ONESIDED,
     UCC_TL_UCP_BCAST_ALG_LAST
 };
 
@@ -26,6 +27,18 @@ ucc_tl_ucp_bcast_sag_knomial_init(ucc_base_coll_args_t *coll_args,
 
 #define UCC_TL_UCP_BCAST_DEFAULT_ALG_SELECT_STR              \
     "bcast:0-32k:@0#bcast:32k-inf:@1"
+
+//ucc_status_t ucc_tl_ucp_bcast_os_init(ucc_tl_ucp_task_t *task);
+ucc_status_t ucc_tl_ucp_bcast_os_init(ucc_base_coll_args_t *coll_args,
+                                   ucc_base_team_t *     team,
+                                   ucc_coll_task_t **    task_h);
+
+ucc_status_t ucc_tl_ucp_bcast_common_progress(void * buffer,
+                                              size_t elem_size,
+                                              int root,
+                                              ucc_tl_ucp_team_t * team,
+                                              ucc_tl_ucp_task_t *task);
+
 
 static inline int ucc_tl_ucp_bcast_alg_from_str(const char *str)
 {
