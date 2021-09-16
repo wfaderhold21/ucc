@@ -620,7 +620,8 @@ enum ucc_context_params_field {
     UCC_CONTEXT_PARAM_FIELD_TYPE              = UCC_BIT(0),
     UCC_CONTEXT_PARAM_FIELD_SYNC_TYPE         = UCC_BIT(1),
     UCC_CONTEXT_PARAM_FIELD_OOB               = UCC_BIT(2),
-    UCC_CONTEXT_PARAM_FIELD_ID                = UCC_BIT(3)
+    UCC_CONTEXT_PARAM_FIELD_ID                = UCC_BIT(3),
+    UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS        = UCC_BIT(4)
 };
 
 /**
@@ -659,6 +660,50 @@ typedef struct ucc_oob_coll {
 
 typedef ucc_oob_coll_t ucc_context_oob_coll_t;
 typedef ucc_oob_coll_t ucc_team_oob_coll_t;
+
+/**
+ *
+ *  @ingroup UCC_CONTEXT_DT
+ */
+typedef enum  {
+    UCC_MEM_CONSTRAINT_SYMMETRIC   = UCC_BIT(0),
+    UCC_MEM_CONSTRAINT_PERSISTENT  = UCC_BIT(1),
+    UCC_MEM_CONSTRAINT_ALIGN32     = UCC_BIT(2),
+    UCC_MEM_CONSTRAINT_ALIGN64     = UCC_BIT(3),
+    UCC_MEM_CONSTRAINT_ALIGN128    = UCC_BIT(4),
+} ucc_mem_constraints_t;
+
+/**
+ *
+ *  @ingroup UCC_CONTEXT_DT
+ */
+typedef enum {
+    UCC_MEM_HINT_REMOTE_ATOMICS    = 0,
+    UCC_MEM_HINT_REMOTE_COUNTERS
+} ucc_mem_hints_t;
+
+
+/**
+ *
+ *  @ingroup UCC_CONTEXT_DT
+ */
+typedef struct ucc_mem_map {
+    void                    *address;
+    size_t                  len;
+    ucc_mem_hints_t         hints;
+    ucc_mem_constraints_t   constraints;
+} ucc_mem_map_t;
+
+/**
+ *
+ *  @ingroup UCC_CONTEXT_DT
+ */
+typedef struct ucc_mem_map_params {
+    ucc_mem_map_t          *maps;
+    uint64_t                n_maps;
+} ucc_mem_map_params_t;
+
+
 /**
  *
  *  @ingroup UCC_CONTEXT_DT
@@ -687,6 +732,7 @@ typedef struct ucc_context_params {
     ucc_coll_sync_type_t    sync_type;
     ucc_context_oob_coll_t  oob;
     uint64_t                ctx_id;
+    ucc_mem_map_params_t    mem_params;
 } ucc_context_params_t;
 
 /**
@@ -963,37 +1009,7 @@ enum ucc_team_attr_field {
     UCC_TEAM_ATTR_FIELD_MEM_PARAMS             = UCC_BIT(5)
 };
 
-/**
- *
- *  @ingroup UCC_TEAM_DT
- */
-typedef enum  {
-    UCC_MEM_CONSTRAINT_SYMMETRIC   = UCC_BIT(0),
-    UCC_MEM_CONSTRAINT_PERSISTENT  = UCC_BIT(1),
-    UCC_MEM_CONSTRAINT_ALIGN32     = UCC_BIT(2),
-    UCC_MEM_CONSTRAINT_ALIGN64     = UCC_BIT(3),
-    UCC_MEM_CONSTRAINT_ALIGN128    = UCC_BIT(4),
-} ucc_mem_constraints_t;
 
-/**
- *
- *  @ingroup UCC_TEAM_DT
- */
-typedef enum {
-    UCC_MEM_HINT_REMOTE_ATOMICS    = 0,
-    UCC_MEM_HINT_REMOTE_COUNTERS
-} ucc_mem_hints_t;
-
-/**
- *
- *  @ingroup UCC_TEAM_DT
- */
-typedef struct ucc_mem_map_params {
-    void                    *address;
-    size_t                  len;
-    ucc_mem_hints_t         hints;
-    ucc_mem_constraints_t   constraints;
-} ucc_mem_map_params_t;
 
 /**
  *
@@ -1519,7 +1535,7 @@ typedef enum {
                                                             Particularly, useful
                                                             for alltoallv
                                                             operation. */
-    UCC_COLL_ARGS_FLAG_TIMEOUT              = UCC_BIT(6)  /*!<If set and the elapsed
+    UCC_COLL_ARGS_FLAG_TIMEOUT              = UCC_BIT(6),  /*!<If set and the elapsed
                                                             time after @ref ucc_collective_post
                                                             (or @ref ucc_collective_triggered_post)
                                                             is greater than @ref ucc_coll_args_t.timeout,
@@ -1528,6 +1544,7 @@ typedef enum {
                                                             Note, the status is not guaranteed
                                                             to be global on all the processes
                                                             participating in the collective.*/
+    UCC_COLL_ARGS_FLAG_SYMMETRIC_MEM        = UCC_BIT(7)
 } ucc_coll_args_flags_t;
 
 /**
@@ -1651,6 +1668,7 @@ typedef struct ucc_coll_args {
                                              collectives */
     ucc_error_type_t                error_type; /*!< Error type */
     ucc_coll_id_t                   tag; /*!< Used for ordering collectives */
+    void                           *pSync;
     ucc_coll_callback_t             cb;
     double                          timeout; /*!< Timeout in seconds */
 } ucc_coll_args_t;
