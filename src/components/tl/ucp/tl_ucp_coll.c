@@ -274,11 +274,11 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
             break;
         case UCC_COLL_TYPE_ALLTOALL:
             switch (alg_id) {
-                case UCC_TL_UCP_ALLTOALL_ALG_PAIRWISE:
-                    *init = ucc_tl_ucp_alltoall_pairwise_init;
-                    break;
                 case UCC_TL_UCP_ALLTOALL_ALG_ONESIDED:
                     *init = ucc_tl_ucp_alltoall_onesided_init;
+                    break;
+                case UCC_TL_UCP_ALLTOALL_ALG_PAIRWISE:
+                    *init = ucc_tl_ucp_alltoall_pairwise_init;
                     break;
                 case UCC_TL_UCP_ALLTOALL_ALG_OS_BRUCK:
                     *init = ucc_tl_ucp_alltoall_os_bruck_init; 

@@ -148,9 +148,6 @@ static ucc_status_t ucc_tl_ucp_team_p2p_populate(ucc_tl_ucp_team_t * team,
                 team->va_base[0] = remote_info[i][0].va_base;
                 team->va_base[1] = remote_info[i][1].va_base;
                 team->va_base[2] = remote_info[i][2].va_base;
-                printf("[%d] team->va_base[0]: %p\n", team->rank, team->va_base[0]);
-                printf("[%d] team->va_base[1]: %p\n", team->rank, team->va_base[1]);
-                printf("[%d] team->va_base[2]: %p\n", team->rank, team->va_base[2]);
 
 /*                
                 ucp_rkey_pack(ctx->ucp_context, remote_info[i][0].packed_key, &packed[i], &packed_size);

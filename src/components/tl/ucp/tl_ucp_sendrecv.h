@@ -129,13 +129,12 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
                                              ucc_tl_ucp_team_t * team,
 											 ucc_tl_ucp_task_t * task)
 {
-    ucp_request_param_t req_param;
+    ucp_request_param_t req_param = {0};
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
     ucp_rkey_h          rkey;
     uint64_t            rva;
-//    ucc_tl_ucp_remote_info_t *rinfo;
     int segment = 0;
 
     // get the endpoint or create if doesn't exist
@@ -152,20 +151,11 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void * buffer,
 
     rva = rva + ((ptrdiff_t) target - (ptrdiff_t) team->va_base[segment]); 
 
-//    printf("[%d] target rva: 0x%lx\n", team->rank, rva);
-
-    req_param.op_attr_mask =
-        UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA ;
-    req_param.cb.send     = ucc_tl_ucp_send_completion_cb;
-    req_param.user_data   = (void *)task;
-
-//    printf("[%d] put to %d (%p[seg %d] -> %p (base rva + offset: %lx)) with size %lu rkey %p\n", team->rank, dest_group_rank, team->va_base[segment], segment, target, rva, msglen, rkey);
-
     // issue operation
     ucp_status = ucp_put_nbx(ep, buffer, msglen, rva, rkey, &req_param);
 
     if (UCC_OK != ucp_status) {
-        UCC_TL_UCP_CHECK_REQ_STATUS();
+        ucp_request_free(ucp_status);
     } 
     return UCC_OK;
 }
@@ -207,13 +197,12 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
                                              ucc_tl_ucp_team_t * team,
                                              ucc_tl_ucp_task_t * task)
 {
-#if 0
-    ucp_request_param_t req_param;
+    ucp_request_param_t req_param = {0};
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
+    ucp_rkey_h          rkey;
     uint64_t            rva;
-    ucc_tl_ucp_remote_info_t *rinfo;
     int segment = 0;
 
     // get the endpoint or create if doesn't exist
@@ -223,27 +212,73 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void * buffer,
     }
 
     /* resolve the p2p info */
-    status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rinfo, &segment);
+    status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rva, &rkey, &segment);
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
     }
 
-    rva = (uint64_t) rinfo->va_base + ((ptrdiff_t) target - (ptrdiff_t) team->va_base[segment]); 
-
-    req_param.op_attr_mask =
-        UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA ;
-    req_param.cb.send     = ucc_tl_ucp_send_completion_cb;
-    req_param.user_data   = (void *)task;
+    rva = rva + ((ptrdiff_t) target - (ptrdiff_t) team->va_base[segment]); 
 
     // issue operation
-    ucp_status = ucp_get_nbx(ep, buffer, msglen, rva, rinfo->rkey, &req_param);
+    ucp_status = ucp_get_nbx(ep, buffer, msglen, rva, rkey, &req_param);
 
     if (UCC_OK != ucp_status) {
-        UCC_TL_UCP_CHECK_REQ_STATUS();
+        if (UCS_PTR_IS_ERR(ucp_status)) {
+            abort();
+        } else {
+            ucp_request_free(ucp_status);
+        } 
     }
-#endif 
     return UCC_OK;
 }
+
+static inline ucc_status_t ucc_tl_ucp_atomic_inc(void * target, 
+                                                 ucc_rank_t dest_group_rank,
+                                                 ucc_tl_ucp_team_t * team,
+                                                 ucc_tl_ucp_task_t * task)
+{
+    ucp_request_param_t req_param = {0};
+    ucs_status_ptr_t    ucp_status;
+    ucc_status_t        status;
+    ucp_ep_h            ep;
+    ucp_rkey_h          rkey;
+    uint64_t            rva;
+    int segment = 0;
+    uint64_t            one = 1;
+
+    // get the endpoint or create if doesn't exist
+    status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
+    if (ucc_unlikely(UCC_OK != status)) {
+        return status;
+    }
+
+    /* resolve the p2p info */
+    status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank, &rva, &rkey, &segment);
+    if (ucc_unlikely(UCC_OK != status)) {
+        return status;
+    }
+
+    rva = rva + ((ptrdiff_t) target - (ptrdiff_t) team->va_base[segment]); 
+
+    req_param.op_attr_mask =
+        UCP_OP_ATTR_FIELD_DATATYPE;
+    req_param.datatype    = ucp_dt_make_contig(sizeof(uint64_t));
+
+    // issue operation
+    // 
+    ucp_status = ucp_atomic_op_nbx(ep, UCP_ATOMIC_OP_ADD, &one,
+                  1, rva, rkey, &req_param);
+
+    if (UCC_OK != ucp_status) {
+        if (UCS_PTR_IS_ERR(ucp_status)) {
+            abort();
+        } else {
+            ucp_request_free(ucp_status);
+        } 
+    }
+    return UCC_OK;
+}
+
 
 #define UCPCHECK_GOTO(_cmd, _task, _label)                                     \
     do {                                                                       \

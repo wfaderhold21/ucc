@@ -52,7 +52,7 @@ static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
     remote_info = 
         (ucc_tl_ucp_remote_info_t **) tl_ucp_rinfo_hash_get(ctx->rinfo_hash, key);
 
-    for (int i = 1; i < 3; i++) {
+    for (int i = 0; i < 3; i++) {
         if (va >= team->va_base[i] &&
             va < team->va_base[i] + team->base_length[i]) {
             *segment = i;
@@ -62,6 +62,7 @@ static inline ucc_status_t ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team,
 
     /* is the rkey unpacked? */
     if (NULL == remote_info[0][*segment].rkey) {
+//        printf("[%d] unpacking rkey for %d on seg %d\n", team->rank, peer, *segment);
         /* we just looked things up, the packed_key should be present */
         ucp_ep_rkey_unpack(*ep,
                            remote_info[0][*segment].packed_key,
@@ -81,6 +82,7 @@ static inline ucc_status_t ucc_tl_ucp_get_ep(ucc_tl_ucp_team_t *team, ucc_rank_t
 
     *ep = tl_ucp_hash_get(ctx->ep_hash, key);
     if (NULL == (*ep)) {
+//        printf("[%d] creating endpoint to %d\n", team->rank, rank);
         /* Not connected yet */
         status = ucc_tl_ucp_connect_team_ep(team, rank, key, ep);
         if (ucc_unlikely(UCC_OK != status)) {
