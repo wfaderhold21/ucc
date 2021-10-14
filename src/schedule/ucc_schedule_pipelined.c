@@ -14,7 +14,6 @@ static ucc_status_t ucc_frag_start_handler(ucc_coll_task_t *parent,
     ucc_schedule_t *frag               = ucc_derived_of(task, ucc_schedule_t);
     ucc_status_t    status;
 
-    task->start_time = parent->start_time;
     if (schedule->frag_setup) {
         status =
             schedule->frag_setup(schedule, frag, schedule->n_frags_started);
@@ -131,18 +130,12 @@ ucc_status_t ucc_schedule_pipelined_init(
     ucc_status_t     status;
     ucc_schedule_t **frags;
 
-    if (ucc_unlikely(n_frags > UCC_SCHEDULE_PIPELINED_MAX_FRAGS)) {
+    if (n_frags > UCC_SCHEDULE_PIPELINED_MAX_FRAGS) {
         ucc_error("n_frags %d exceeds max limit of %d",
                   n_frags, UCC_SCHEDULE_PIPELINED_MAX_FRAGS);
         return UCC_ERR_INVALID_PARAM;
     }
-
-    status = ucc_schedule_init(&schedule->super, coll_args, team);
-    if (ucc_unlikely(status != UCC_OK)) {
-        ucc_error("failed to init pipelined schedule");
-        return status;
-    }
-
+    ucc_schedule_init(&schedule->super, coll_args, team);
     schedule->super.n_tasks        = n_frags_total;
     schedule->n_frags              = n_frags;
     schedule->sequential           = sequential;
@@ -186,7 +179,7 @@ err:
     return status;
 }
 
-ucc_status_t ucc_dependency_handler(ucc_coll_task_t *parent,
+ucc_status_t ucc_dependency_handler(ucc_coll_task_t *parent, /* NOLINT */
                                     ucc_coll_task_t *task)
 {
     ucc_status_t status;
@@ -195,7 +188,6 @@ ucc_status_t ucc_dependency_handler(ucc_coll_task_t *parent,
     ucc_trace_req("task %p, n_deps %d, satisfied %d", task, task->n_deps,
                   task->n_deps_satisfied);
     if (task->n_deps == task->n_deps_satisfied) {
-        task->start_time = parent->start_time;
         status = task->post(task);
         if (status >= 0) {
             ucc_event_manager_notify(task, UCC_EVENT_TASK_STARTED);
