@@ -10,8 +10,8 @@ barrier =                     \
 alltoall =                       \
 	alltoall/alltoall.h          \
 	alltoall/alltoall.c          \
-	alltoall/alltoall_onesided.c \
-	alltoall/alltoall_pairwise.c
+	alltoall/alltoall_pairwise.c \
+	alltoall/alltoall_onesided.c 
 
 alltoallv =                        \
 	alltoallv/alltoallv.h          \

@@ -8,9 +8,6 @@
 #include "tl_ucp.h"
 #include "alltoall.h"
 
-ucc_status_t ucc_tl_ucp_alltoall_pairwise_start(ucc_coll_task_t *task);
-ucc_status_t ucc_tl_ucp_alltoall_pairwise_progress(ucc_coll_task_t *task);
-
 ucc_base_coll_alg_info_t
     ucc_tl_ucp_alltoall_algs[UCC_TL_UCP_ALLTOALL_ALG_LAST + 1] = {
         [UCC_TL_UCP_ALLTOALL_ALG_PAIRWISE] =
@@ -57,15 +54,15 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
     task    = ucc_tl_ucp_init_task(coll_args, team);
     *task_h = &task->super;
 
-    if ((task->args.mask & UCC_COLL_ARGS_FIELD_FLAGS) &&
-        (task->args.flags & UCC_COLL_ARGS_FLAG_IN_PLACE)) {
-        tl_debug(UCC_TL_TEAM_LIB(task->team),
+    if ((TASK_ARGS(task).mask & UCC_COLL_ARGS_FIELD_FLAGS) &&
+        (TASK_ARGS(task).flags & UCC_COLL_ARGS_FLAG_IN_PLACE)) {
+        tl_debug(UCC_TL_TEAM_LIB(TASK_TEAM(task)),
                  "inplace alltoall is not supported");
         return UCC_ERR_NOT_SUPPORTED;
     }
-    if ((task->args.src.info.datatype == UCC_DT_USERDEFINED) ||
-        (task->args.dst.info.datatype == UCC_DT_USERDEFINED)) {
-        tl_debug(UCC_TL_TEAM_LIB(task->team),
+    if ((TASK_ARGS(task).src.info.datatype == UCC_DT_USERDEFINED) ||
+        (TASK_ARGS(task).dst.info.datatype == UCC_DT_USERDEFINED)) {
+        tl_debug(UCC_TL_TEAM_LIB(TASK_TEAM(task)),
                  "user defined datatype is not supported");
         return UCC_ERR_NOT_SUPPORTED;
     }

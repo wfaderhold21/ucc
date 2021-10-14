@@ -19,8 +19,9 @@
 const char
     *ucc_tl_ucp_default_alg_select_str[UCC_TL_UCP_N_DEFAULT_ALG_SELECT_STR] = {
         UCC_TL_UCP_ALLREDUCE_DEFAULT_ALG_SELECT_STR,
-        UCC_TL_UCP_BCAST_DEFAULT_ALG_SELECT_STR,
-        UCC_TL_UCP_ALLTOALL_DEFAULT_ALG_SELECT_STR};
+        UCC_TL_UCP_ALLTOALL_DEFAULT_ALG_SELECT_STR,
+        UCC_TL_UCP_BCAST_DEFAULT_ALG_SELECT_STR
+        };
 
 void ucc_tl_ucp_send_completion_cb(void *request, ucs_status_t status,
                                    void *user_data)
@@ -302,6 +303,7 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
             status = UCC_ERR_INVALID_PARAM;
             break;
         }
+        break;
     default:
         status = UCC_ERR_NOT_SUPPORTED;
         break;
