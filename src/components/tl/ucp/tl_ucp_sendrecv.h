@@ -180,7 +180,12 @@ ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team, void *va, ucp_ep_h *ep,
                            (ucp_rkey_h *)&remote_info[0][*segment].rkey);
     }
     *rkey = remote_info[0][*segment].rkey;
-    *rva  = (uint64_t)remote_info[0][*segment].va_base;
+    if (*segment != 1) {
+        *rva  = (uint64_t)remote_info[0][*segment].va_base;
+    } else {
+        *rva  = (uint64_t)remote_info[0][*segment].va_base + team->super.super.team->psync_offsets[peer];
+    }
+        
     return UCC_OK;
 }
 
@@ -327,8 +332,10 @@ static inline ucc_status_t ucc_tl_ucp_atomic_inc(void *     target,
         return status;
     }
 
-    rva = (uint64_t)PTR_OFFSET(
-        rva, ((ptrdiff_t)target - (ptrdiff_t)team->va_base[segment]));
+    if (segment != 1) {
+        rva = (uint64_t)PTR_OFFSET(
+            rva, ((ptrdiff_t)target - (ptrdiff_t)team->va_base[segment]));
+    } 
 
     req_param.op_attr_mask = UCP_OP_ATTR_FIELD_DATATYPE;
     req_param.datatype     = ucp_dt_make_contig(sizeof(uint64_t));

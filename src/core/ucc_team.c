@@ -290,6 +290,12 @@ ucc_team_create_cls(ucc_context_t *context, ucc_team_t *team)
     return UCC_OK;
 }
 
+size_t ucc_context_alloc_psync(ucc_context_t *);
+
+void ucc_context_free_psync(size_t offset, 
+                                   ucc_context_t * ctx);
+
+
 static inline ucc_status_t ucc_team_exchange(ucc_context_t *context,
                                              ucc_team_t *   team)
 {
@@ -315,9 +321,52 @@ static inline ucc_status_t ucc_team_exchange(ucc_context_t *context,
                           team->size * sizeof(ucc_rank_t));
                 return UCC_ERR_NO_MEMORY;
             }
-            status =
-                oob.allgather(&context->rank, team->ctx_ranks, sizeof(ucc_rank_t),
-                              oob.coll_info, &team->oob_req);
+            if (context->params.mask & UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS) {
+                void * data = malloc(sizeof(ucc_rank_t) * team->size + sizeof(uint64_t) * team->size);
+                void * sbuf = malloc(sizeof(ucc_rank_t) + sizeof(uint64_t));
+                uint64_t * psync_offsets;
+                size_t offset;
+                ucc_rank_t * p = (ucc_rank_t *) sbuf;
+                uint64_t * v = (uint64_t *)((ptrdiff_t) sbuf + sizeof(ucc_rank_t));//PTR_OFFSET(sbuf, sizeof(ucc_rank_t));
+                *p = context->rank;
+                
+                offset = ucc_context_alloc_psync(context);
+                psync_offsets = (uint64_t *) ucc_malloc(sizeof(uint64_t) * team->size, "team_psync_offsets");
+                *v = offset; 
+
+                status =
+                    oob.allgather(sbuf, data, sizeof(ucc_rank_t) + sizeof(uint64_t),
+                                  oob.coll_info, &team->oob_req);
+                if (UCC_OK != status) {
+                    ucc_error("failed to start oob allgather for proc info + scratch buffer exchange");
+                    ucc_free(team->ctx_ranks);
+                    return status;
+                }
+
+                while (UCC_INPROGRESS == (status = oob.req_test(team->oob_req)));
+                oob.req_free(team->oob_req);
+
+                for (int i = 0; i < team->size; i++) {
+                    uint64_t * ptr = (uint64_t *) PTR_OFFSET(data, i * (sizeof(ucc_rank_t) + sizeof(uint64_t)) + sizeof(ucc_rank_t));
+                    team->ctx_ranks[i] = *((ucc_rank_t *)PTR_OFFSET(data, i * (sizeof(ucc_rank_t) + sizeof(uint64_t))));//set the data 
+                    if (*ptr < 0) {
+                        ucc_free(psync_offsets);
+                        ucc_free(team->ctx_ranks);
+                        ucc_error("at least one process unable to allocate scratch buffer");
+                        return UCC_ERR_NO_MEMORY;
+                    }
+                    psync_offsets[i] = *ptr;
+                }
+                team->psync_offsets = psync_offsets;
+                team->ctx_map = ucc_ep_map_from_array(&team->ctx_ranks, team->size,
+                                                      context->addr_storage.size, 1);
+                return UCC_OK;
+
+            } else {
+                status =
+                    oob.allgather(&context->rank, team->ctx_ranks, sizeof(ucc_rank_t),
+                                  oob.coll_info, &team->oob_req);
+            }
             if (UCC_OK != status) {
                 ucc_error("failed to start oob allgather for proc info exchange");
                 ucc_free(team->ctx_ranks);

@@ -47,6 +47,7 @@ typedef struct ucc_team {
                                   type is global (oob provided) */
     ucc_team_topo_t        *topo;
     ucc_score_map_t        *score_map; /*< score map of CLs */
+    uint64_t                *psync_offsets;
     uint32_t                seq_num;
 } ucc_team_t;
 

@@ -665,33 +665,9 @@ typedef ucc_oob_coll_t ucc_team_oob_coll_t;
  *
  *  @ingroup UCC_CONTEXT_DT
  */
-typedef enum  {
-    UCC_MEM_CONSTRAINT_SYMMETRIC   = UCC_BIT(0),
-    UCC_MEM_CONSTRAINT_PERSISTENT  = UCC_BIT(1),
-    UCC_MEM_CONSTRAINT_ALIGN32     = UCC_BIT(2),
-    UCC_MEM_CONSTRAINT_ALIGN64     = UCC_BIT(3),
-    UCC_MEM_CONSTRAINT_ALIGN128    = UCC_BIT(4),
-} ucc_mem_constraints_t;
-
-/**
- *
- *  @ingroup UCC_CONTEXT_DT
- */
-typedef enum {
-    UCC_MEM_HINT_REMOTE_ATOMICS    = 0,
-    UCC_MEM_HINT_REMOTE_COUNTERS
-} ucc_mem_hints_t;
-
-
-/**
- *
- *  @ingroup UCC_CONTEXT_DT
- */
 typedef struct ucc_mem_map {
     void                    *address;
     size_t                  len;
-    ucc_mem_hints_t         hints;
-    ucc_mem_constraints_t   constraints;
 } ucc_mem_map_t;
 
 /**
@@ -1668,7 +1644,6 @@ typedef struct ucc_coll_args {
                                              collectives */
     ucc_error_type_t                error_type; /*!< Error type */
     ucc_coll_id_t                   tag; /*!< Used for ordering collectives */
-    void                           *pSync;
     ucc_coll_callback_t             cb;
     double                          timeout; /*!< Timeout in seconds */
 } ucc_coll_args_t;

@@ -12,6 +12,9 @@
 #include "utils/ucc_proc_info.h"
 #include "ucc_topo.h"
 
+#define SYNC_SIZE 8
+#define REDUCE_SIZE 2
+
 typedef struct ucc_lib_info          ucc_lib_info_t;
 typedef struct ucc_cl_context        ucc_cl_context_t;
 typedef struct ucc_tl_context        ucc_tl_context_t;
@@ -67,6 +70,8 @@ typedef struct ucc_context {
     ucc_topo_t              *topo;
     uint64_t                 cl_flags;
     ucc_tl_team_t           *service_team;
+    uint64_t                 psync_bitmap;
+    uint64_t                 psync_lock;
 } ucc_context_t;
 
 typedef struct ucc_context_config {

@@ -67,11 +67,6 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
                      "inplace alltoall is not supported");
             return UCC_ERR_NOT_SUPPORTED;
         }
-        if (!(TASK_ARGS(task).flags & UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS)) {
-            tl_debug(UCC_TL_TEAM_LIB(TASK_TEAM(task)),
-                     "non memory mapped buffers are not supported");
-            return UCC_ERR_NOT_SUPPORTED;
-        }
     }
     if ((TASK_ARGS(task).src.info.datatype == UCC_DT_USERDEFINED) ||
         (TASK_ARGS(task).dst.info.datatype == UCC_DT_USERDEFINED)) {

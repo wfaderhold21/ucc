@@ -106,6 +106,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     self->ucp_context = ucp_context;
     self->ucp_worker  = ucp_worker;
     self->worker_address = NULL;
+//    self->psync_bitmap = ~0UL;
 
     ucc_status = ucc_mpool_init(
         &self->req_mp, 0,
@@ -276,11 +277,12 @@ ucc_status_t ucc_tl_ucp_populate_rcache(void *addr, size_t length,
 }
 
 static size_t ucc_tl_ucp_ctx_remote_pack(ucc_mem_map_params_t map,
+                                         uint64_t psync_addr, uint64_t psync_len,
                                          uint32_t rank, uint32_t size,
                                          void **my_pack, size_t *my_pack_sizes,
                                          void **pack)
 {
-    uint64_t  nsegs          = map.n_maps;
+    uint64_t  nsegs          = map.n_maps + 1;
     uint64_t  offset         = 0;
     size_t    total          = 0;
     size_t    pack_size      = 0;
@@ -308,8 +310,13 @@ static size_t ucc_tl_ucp_ctx_remote_pack(ucc_mem_map_params_t map,
     keys      = base + (section_offset * 3);
 
     for (int i = 0; i < nsegs; i++) {
-        rvas[i]      = (uint64_t)map.maps[i].address;
-        lens[i]      = map.maps[i].len;
+        if (i == 1) {
+            rvas[i] = psync_addr;
+            lens[i] = psync_len;
+        } else {
+            rvas[i]      = (uint64_t)map.maps[i].address;
+            lens[i]      = map.maps[i].len;
+        }
         key_sizes[i] = my_pack_sizes[i];
         memcpy(keys + offset, my_pack[i], my_pack_sizes[i]);
         offset += my_pack_sizes[i];
@@ -354,7 +361,8 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t *ctx,
 {
     uint32_t                   rank  = oob.oob_ep;
     uint32_t                   size  = oob.n_oob_eps;
-    uint64_t                   nsegs = map.n_maps;
+    uint64_t                   nsegs = map.n_maps + 1;
+    uint64_t                   curr_seg = 0;
     size_t                     total = 0;
     ucc_tl_ucp_remote_info_t **remote_info;
     ucp_mem_map_params_t       mmap_params;
@@ -364,6 +372,13 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t *ctx,
     void *                     packed_data;
     void *                     my_pack[nsegs];
     size_t                     my_pack_sizes[nsegs];
+    uint64_t                   psync_len = (SYNC_SIZE + REDUCE_SIZE) * MAX_TEAMS_PER_CTX;;
+    uint64_t                   psync_addr = (uint64_t)malloc(psync_len);
+
+    char * pv = (char *)psync_addr;
+    for (int i = 0; i < psync_len; i++) {
+        pv[i] = -1;
+    }
 
     ctx->rinfo_hash = kh_init(tl_ucp_rinfo_hash);
     remote_info     = (ucc_tl_ucp_remote_info_t **)malloc(
@@ -373,15 +388,21 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t *ctx,
         nsegs, sizeof(ucc_tl_ucp_remote_info_t));
 
     for (int i = 0; i < nsegs; i++) {
-        void *addr = map.maps[i].address;
+        void * addr;
+        size_t length;
 
-        /* TODO: perform allocation based on hints/constraints if addr NULL */
-
+        if (i != 1) {
+            addr = map.maps[curr_seg].address;
+            length = map.maps[curr_seg++].len;
+        } else {
+            length = psync_len;
+            addr = (void *)psync_addr;
+        }
         mmap_params.field_mask =
             UCP_MEM_MAP_PARAM_FIELD_ADDRESS | UCP_MEM_MAP_PARAM_FIELD_LENGTH;
         mmap_params.address = addr;
-        mmap_params.length  = map.maps[i].len;
-
+        mmap_params.length  = length;
+            
         status = ucp_mem_map(ctx->ucp_context, &mmap_params, &mh);
         remote_info[rank][i].mem_h = (void *)mh;
 
@@ -394,7 +415,7 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t *ctx,
         }
     }
 
-    total = ucc_tl_ucp_ctx_remote_pack(map, rank, size, my_pack, my_pack_sizes,
+    total = ucc_tl_ucp_ctx_remote_pack(map, psync_addr, psync_len, rank, size, my_pack, my_pack_sizes,
                                        &packed_data);
 
     ucc_status = ucc_tl_ucp_ctx_exchange_data(packed_data + rank * total,

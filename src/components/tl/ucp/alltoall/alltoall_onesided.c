@@ -10,6 +10,7 @@
 #include "core/ucc_progress_queue.h"
 #include "utils/ucc_math.h"
 #include "tl_ucp_sendrecv.h"
+ucc_status_t ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask);
 
 ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
 {
@@ -41,8 +42,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask)
     ucc_rank_t         mype   = team->rank;
     ucc_rank_t         npes   = team->size;
     int *              phase  = &task->barrier.phase;
-    ucc_status_t       status = UCC_INPROGRESS;
-    long *             pSync  = TASK_ARGS(task).pSync;
+    long *             pSync  = PTR_OFFSET(UCC_TL_UCP_TEAM_CTX(team)->remote_info[mype][1].va_base, team->super.super.team->psync_offsets[mype]); 
     ucc_rank_t         peer;
 
     if (*phase == 1) {

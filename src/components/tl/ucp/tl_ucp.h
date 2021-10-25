@@ -30,6 +30,9 @@
 #define UCC_TL_UCP_PROFILE_REQUEST_FREE UCC_PROFILE_REQUEST_FREE
 
 #define MAX_NR_SEGMENTS 32
+#define SYNC_SIZE       8
+#define REDUCE_SIZE     2
+#define MAX_TEAMS_PER_CTX 64
 
 typedef struct ucc_tl_ucp_iface {
     ucc_tl_iface_t super;

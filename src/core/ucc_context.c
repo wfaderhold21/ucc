@@ -479,6 +479,7 @@ ucc_status_t ucc_context_create(ucc_lib_h lib,
     ctx->rank          = UCC_RANK_MAX;
     ctx->lib           = lib;
     ctx->ids.pool_size = config->team_ids_pool_size;
+    ctx->psync_bitmap = ~0UL;
     ucc_list_head_init(&ctx->progress_list);
     ucc_copy_context_params(&ctx->params, params);
     ucc_copy_context_params(&b_params.params, params);
@@ -665,6 +666,40 @@ static ucc_status_t ucc_context_free_attr(ucc_context_attr_t *context_attr)
         ucc_free(context_attr->ctx_addr);
     }
     return UCC_OK;
+}
+
+size_t ucc_context_alloc_psync(ucc_context_t *ctx)
+{
+    uint64_t prev;
+
+    if (ctx->psync_bitmap == 0) {
+        return -1;
+    }
+
+    while (1 == (prev = ucc_atomic_cswap64(&ctx->psync_lock, 0, 1)));
+    
+    // check bit map, find unused chunk, return offset
+    for (int i = 0; i < 64; i++) {
+        if (((1 << i) & ctx->psync_bitmap) > 0) {
+            ctx->psync_bitmap ^= (1 << i);
+            ctx->psync_lock = 0;
+            
+            return i * (SYNC_SIZE + REDUCE_SIZE);
+        }
+    }
+    ctx->psync_lock = 0;
+    return -1;
+}
+
+void ucc_context_free_psync(size_t offset, 
+                            ucc_context_t * ctx)
+{
+    int index = offset / (SYNC_SIZE + REDUCE_SIZE);
+    uint64_t prev;
+
+    while (1 == (prev = ucc_atomic_cswap64(&ctx->psync_lock, 0, 1)));
+    ctx->psync_bitmap ^= (1 << index);
+    ctx->psync_lock = 0;
 }
 
 ucc_status_t ucc_context_destroy(ucc_context_t *context)
