@@ -632,7 +632,8 @@ enum ucc_context_attr_field {
     UCC_CONTEXT_ATTR_FIELD_TYPE               = UCC_BIT(0),
     UCC_CONTEXT_ATTR_FIELD_SYNC_TYPE          = UCC_BIT(1),
     UCC_CONTEXT_ATTR_FIELD_CTX_ADDR           = UCC_BIT(2),
-    UCC_CONTEXT_ATTR_FIELD_CTX_ADDR_LEN       = UCC_BIT(3)
+    UCC_CONTEXT_ATTR_FIELD_CTX_ADDR_LEN       = UCC_BIT(3),
+    UCC_CONTEXT_ATTR_FIELD_WORK_BUFFER_SIZE   = UCC_BIT(4)
 };
 
 /**
@@ -760,6 +761,7 @@ typedef struct ucc_context_attr {
     ucc_coll_sync_type_t    sync_type;
     ucc_context_addr_h      ctx_addr;
     ucc_context_addr_len_t  ctx_addr_len;
+    uint64_t                global_work_buffer_size;
 } ucc_context_attr_t;
 
 /**
@@ -1608,7 +1610,8 @@ enum ucc_coll_args_field {
     UCC_COLL_ARGS_FIELD_PREDEFINED_REDUCTIONS           = UCC_BIT(1),
     UCC_COLL_ARGS_FIELD_USERDEFINED_REDUCTIONS          = UCC_BIT(2),
     UCC_COLL_ARGS_FIELD_TAG                             = UCC_BIT(3),
-    UCC_COLL_ARGS_FIELD_CB                              = UCC_BIT(4)
+    UCC_COLL_ARGS_FIELD_CB                              = UCC_BIT(4),
+    UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER              = UCC_BIT(5)
 };
 
 /**
@@ -1668,7 +1671,7 @@ typedef struct ucc_coll_args {
                                              collectives */
     ucc_error_type_t                error_type; /*!< Error type */
     ucc_coll_id_t                   tag; /*!< Used for ordering collectives */
-    void                           *pSync;
+    void                           *global_work_buffer;
     ucc_coll_callback_t             cb;
     double                          timeout; /*!< Timeout in seconds */
 } ucc_coll_args_t;
