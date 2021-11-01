@@ -277,7 +277,7 @@ static ucc_status_t ucc_tl_ucp_ctx_remote_pack(
     ucc_mem_map_params_t map, void **my_pack, size_t *my_pack_sizes,
     size_t max_pack_size, size_t *total, void **pack, ucc_tl_ucp_context_t *ctx)
 {
-    uint64_t  nsegs          = map.n_maps;
+    uint64_t  nsegs          = map.n_segments;
     uint64_t  offset         = 0;
     size_t    section_offset = sizeof(uint64_t) * nsegs;
     void *    packed_data;
@@ -303,8 +303,8 @@ static ucc_status_t ucc_tl_ucp_ctx_remote_pack(
     keys      = PTR_OFFSET(packed_data, (section_offset * 3));
 
     for (i = 0; i < nsegs; i++) {
-        rvas[i]      = (uint64_t)map.maps[i].address;
-        lens[i]      = map.maps[i].len;
+        rvas[i]      = (uint64_t)map.segments[i].address;
+        lens[i]      = map.segments[i].len;
         key_sizes[i] = my_pack_sizes[i];
         memcpy(PTR_OFFSET(keys, offset), my_pack[i], my_pack_sizes[i]);
         offset += my_pack_sizes[i];
@@ -349,7 +349,7 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
 {
     uint32_t                   rank             = oob.oob_ep;
     uint32_t                   size             = oob.n_oob_eps;
-    uint64_t                   nsegs            = map.n_maps;
+    uint64_t                   nsegs            = map.n_segments;
     size_t                     total            = 0;
     size_t                     local_pack_size  = 0;
     void *                     global_pack_data = NULL;
@@ -383,12 +383,12 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
     }
 
     for (i = 0; i < nsegs; i++) {
-        void *addr = map.maps[i].address;
+        void *addr = map.segments[i].address;
 
         mmap_params.field_mask =
             UCP_MEM_MAP_PARAM_FIELD_ADDRESS | UCP_MEM_MAP_PARAM_FIELD_LENGTH;
         mmap_params.address = addr;
-        mmap_params.length  = map.maps[i].len;
+        mmap_params.length  = map.segments[i].len;
 
         status = ucp_mem_map(ctx->ucp_context, &mmap_params, &mh);
         if (UCS_OK != status) {
