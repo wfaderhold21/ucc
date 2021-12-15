@@ -164,14 +164,18 @@ typedef struct ucc_test_team {
 class UccTestMpi {
     ucc_thread_mode_t      tm;
     ucc_context_h          ctx;
+    ucc_context_h          onesided_ctx;
     ucc_lib_h              lib;
     ucc_test_mpi_inplace_t inplace;
     ucc_test_mpi_root_t    root_type;
     int                    root_value;
     int                    iterations;
+    void *                 onesided_recv_buffer;
+    void *                 onesided_send_buffer;
     void create_team(ucc_test_mpi_team_t t);
     void destroy_team(ucc_test_team_t &team);
     ucc_team_h create_ucc_team(MPI_Comm comm);
+    ucc_team_h create_onesided_ucc_team(MPI_Comm comm);
     std::vector<size_t> msgsizes;
     std::vector<ucc_memory_type_t> mtypes;
     std::vector<ucc_datatype_t> dtypes;

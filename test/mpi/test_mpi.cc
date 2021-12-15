@@ -42,6 +42,8 @@ UccTestMpi::UccTestMpi(int argc, char *argv[], ucc_thread_mode_t _tm, int is_loc
     ucc_lib_config_h lib_config;
     ucc_context_config_h ctx_config;
     int size, rank;
+    //size_t sync_size;
+    ucc_mem_map_t segments[2];
 
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -56,6 +58,8 @@ UccTestMpi::UccTestMpi(int argc, char *argv[], ucc_thread_mode_t _tm, int is_loc
     /* Init ucc context for a specified UCC_TEST_TLS */
     ucc_context_params_t ctx_params = {
     };
+    ucc_context_params_t onesided_ctx_params = {
+    };
     if (!is_local) {
         ctx_params.mask            |= UCC_CONTEXT_PARAM_FIELD_OOB;
         ctx_params.oob.allgather = oob_allgather;
@@ -64,6 +68,20 @@ UccTestMpi::UccTestMpi(int argc, char *argv[], ucc_thread_mode_t _tm, int is_loc
         ctx_params.oob.coll_info = (void*)MPI_COMM_WORLD;
         ctx_params.oob.n_oob_eps = size;
         ctx_params.oob.oob_ep    = rank;
+
+        onesided_ctx_params = ctx_params;
+        onesided_recv_buffer = malloc(1<<21 * size);
+        onesided_send_buffer = malloc(1<<21);
+        segments[0].address = onesided_recv_buffer;
+        segments[0].len = 2<<21 * size;
+        segments[1].address = onesided_send_buffer;
+        segments[1].len = 1<<21;
+        onesided_ctx_params.mask |= UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS;
+        onesided_ctx_params.mem_params.segments = segments;
+        onesided_ctx_params.mem_params.n_segments = 2;
+    } else {
+        onesided_recv_buffer = NULL;
+        onesided_send_buffer = NULL;
     }
     UCC_CHECK(ucc_lib_config_read(NULL, NULL, &lib_config));
     UCC_CHECK(ucc_init(&lib_params, lib_config, &lib));
@@ -71,6 +89,7 @@ UccTestMpi::UccTestMpi(int argc, char *argv[], ucc_thread_mode_t _tm, int is_loc
 
     UCC_CHECK(ucc_context_config_read(lib, NULL, &ctx_config));
     UCC_CHECK(ucc_context_create(lib, &ctx_params, ctx_config, &ctx));
+    UCC_CHECK(ucc_context_create(lib, &onesided_ctx_params, ctx_config, &onesided_ctx));
     ucc_context_config_release(ctx_config);
     set_msgsizes(8, ((1ULL) << 21), 8);
     dtypes = {UCC_DT_INT32, UCC_DT_INT64, UCC_DT_FLOAT32, UCC_DT_FLOAT64};
@@ -111,7 +130,12 @@ UccTestMpi::~UccTestMpi()
     for (auto &t : teams) {
         destroy_team(t);
     }
+    if (onesided_recv_buffer) {
+        free(onesided_recv_buffer);
+        free(onesided_send_buffer);
+    }
     UCC_CHECK(ucc_context_destroy(ctx));
+    UCC_CHECK(ucc_context_destroy(onesided_ctx));
     UCC_CHECK(ucc_finalize(lib));
 }
 
@@ -154,6 +178,44 @@ ucc_team_h UccTestMpi::create_ucc_team(MPI_Comm comm)
     return team;
 }
 
+ucc_team_h UccTestMpi::create_onesided_ucc_team(MPI_Comm comm)
+{
+    int               rank, size;
+    ucc_team_h        team;
+    ucc_team_params_t team_params;
+    ucc_status_t      status;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    /* Create UCC TEAM for comm world */
+    team_params.mask               = UCC_TEAM_PARAM_FIELD_EP       |
+        UCC_TEAM_PARAM_FIELD_EP_RANGE |
+        UCC_TEAM_PARAM_FIELD_OOB;
+    team_params.oob.allgather = oob_allgather;
+    team_params.oob.req_test  = oob_allgather_test;
+    team_params.oob.req_free  = oob_allgather_free;
+    team_params.oob.coll_info = (void*)comm;
+    team_params.oob.n_oob_eps = size;
+    team_params.oob.oob_ep    = rank;
+    team_params.ep            = rank;
+    team_params.ep_range      = UCC_COLLECTIVE_EP_RANGE_CONTIG;
+
+    UCC_CHECK(ucc_team_create_post(&ctx, 1, &team_params, &team));
+    MPI_Request req;
+    int tmp;
+    int completed;
+    MPI_Irecv(&tmp, 1, MPI_INT, rank, 123, comm, &req);
+    while (UCC_INPROGRESS == (status = ucc_team_create_test(team))) {
+        ucc_context_progress(ctx);
+        MPI_Test(&req, &completed, MPI_STATUS_IGNORE);
+    };
+    MPI_Send(&tmp, 1, MPI_INT, rank, 123, comm);
+    if (status < 0) {
+        std::cerr << "*** UCC TEST FAIL: ucc_team_create_test failed\n";
+        MPI_Abort(MPI_COMM_WORLD, -1);
+    }
+    return team;
+}
 
 void UccTestMpi::create_team(ucc_test_mpi_team_t t)
 {
