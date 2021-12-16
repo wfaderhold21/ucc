@@ -16,7 +16,9 @@ std::shared_ptr<TestCase> TestCase::init(ucc_coll_type_t _type,
                                          ucc_datatype_t dt,
                                          ucc_reduction_op_t op,
                                          ucc_test_vsize_flag_t count_bits,
-                                         ucc_test_vsize_flag_t displ_bits)
+                                         ucc_test_vsize_flag_t displ_bits,
+                                         void * onesided_buffers[3],
+                                         bool is_onesided)
 {
     switch(_type) {
     case UCC_COLL_TYPE_BARRIER:
@@ -40,8 +42,13 @@ std::shared_ptr<TestCase> TestCase::init(ucc_coll_type_t _type,
         return std::make_shared<TestReduce>(msgsize, inplace, dt, op, mt, root,
                                            _team, max_size);
     case UCC_COLL_TYPE_ALLTOALL:
-        return std::make_shared<TestAlltoall>(msgsize, inplace, mt, _team,
-                                              max_size);
+        if (is_onesided) {
+            return std::make_shared<TestAlltoall>(msgsize, inplace, mt, _team,
+                                                  max_size, onesided_buffers);
+        } else {
+            return std::make_shared<TestAlltoall>(msgsize, inplace, mt, _team,
+                                                  max_size);
+        }
     case UCC_COLL_TYPE_ALLTOALLV:
         return std::make_shared<TestAlltoallv>(msgsize, inplace, mt, _team,
                                                max_size, count_bits, displ_bits);
@@ -143,14 +150,16 @@ TestCase::TestCase(ucc_test_team_t &_team, ucc_memory_type_t _mem_type,
     team(_team), mem_type(_mem_type),  msgsize(_msgsize), inplace(_inplace),
     test_max_size(_max_size)
 {
+    sbuf           = NULL;
+    rbuf           = NULL;
+    sbuf_mc_header = NULL;
+    rbuf_mc_header = NULL;
+    check_sbuf     = NULL;
+    check_rbuf     = NULL;
+    test_skip      = TEST_SKIP_NONE;
+    args.flags     = 0;
+    args.mask      = 0;
     int rank;
-    sbuf      = NULL;
-    rbuf      = NULL;
-    check_sbuf = NULL;
-    check_rbuf = NULL;
-    test_skip = TEST_SKIP_NONE;
-    args.flags = 0;
-    args.mask = 0;
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Irecv((void*)progress_buf, 1, MPI_CHAR, rank, 0, MPI_COMM_WORLD,
@@ -167,10 +176,14 @@ TestCase::~TestCase()
         UCC_CHECK(ucc_collective_finalize(req));
     }
     if (sbuf) {
-        UCC_CHECK(ucc_mc_free(sbuf_mc_header));
+        if (sbuf_mc_header) {
+            UCC_CHECK(ucc_mc_free(sbuf_mc_header));
+        }
     }
     if (rbuf) {
-        UCC_CHECK(ucc_mc_free(rbuf_mc_header));
+        if (rbuf_mc_header) {
+            UCC_CHECK(ucc_mc_free(rbuf_mc_header));
+        }
     }
     if (check_sbuf) {
         UCC_CHECK(ucc_mc_free(check_sbuf_mc_header));

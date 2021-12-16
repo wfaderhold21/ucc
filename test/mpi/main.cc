@@ -470,6 +470,7 @@ int main(int argc, char *argv[])
         }
     }
     test->create_teams(teams);
+    test->create_teams(teams, true);
     test->set_iter(iterations);
     test->set_colls(colls);
     test->set_dtypes(dtypes);
