@@ -129,6 +129,7 @@ public:
     };
     ucc_lib_h            lib_h;
     ucc_context_h        ctx_h;
+    void *               onesided_buf[3];
     int                  job_rank;
     UccProcess(int _job_rank,
                const ucc_lib_params_t &lp = default_lib_params,
@@ -201,7 +202,6 @@ public:
     static UccJob* getStaticJob();
     static const std::vector<UccTeam_h> &getStaticTeams();
     int n_procs;
-    void * onesided_buf;
     UccJob(int _n_procs = 2, ucc_job_ctx_mode_t _ctx_mode = UCC_JOB_CTX_GLOBAL,
            ucc_job_env_t vars = ucc_job_env_t());
     ~UccJob();
