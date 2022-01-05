@@ -289,9 +289,12 @@ ucc_status_t ucc_tl_ucp_populate_rcache(void *addr, size_t length,
     return UCC_OK;
 }
 
-static ucc_status_t ucc_tl_ucp_ctx_remote_pack(
-    ucc_mem_map_params_t map, void **my_pack, size_t *my_pack_sizes,
-    size_t max_pack_size, size_t *total, void **pack, ucc_tl_ucp_context_t *ctx)
+UCC_TL_UCP_PROFILE_FUNC(ucc_status_t, ucc_tl_ucp_ctx_remote_pack,
+                        (map, my_pack, my_pack_sizes, max_pack_size, total,
+                         pack, ctx),
+                        ucc_mem_map_params_t map, void **my_pack,
+                        size_t *my_pack_sizes, size_t max_pack_size,
+                        size_t *total, void **pack, ucc_tl_ucp_context_t *ctx)
 {
     uint64_t  nsegs          = map.n_segments;
     uint64_t  offset         = 0;
@@ -330,10 +333,10 @@ static ucc_status_t ucc_tl_ucp_ctx_remote_pack(
     return UCC_OK;
 }
 
-static ucc_status_t ucc_tl_ucp_ctx_exchange_data(void *sbuf, void *rbuf,
-                                                 size_t                msg_size,
-                                                 ucc_tl_ucp_context_t *ctx,
-                                                 ucc_team_oob_coll_t   oob)
+UCC_TL_UCP_PROFILE_FUNC(ucc_status_t, ucc_tl_ucp_ctx_exchange_data,
+                        (sbuf, rbuf, msg_size, ctx, oob), void *sbuf,
+                        void *rbuf, size_t msg_size, ucc_tl_ucp_context_t *ctx,
+                        ucc_team_oob_coll_t oob)
 {
     void *       req;
     ucc_status_t ucc_status;
@@ -357,9 +360,9 @@ static ucc_status_t ucc_tl_ucp_ctx_exchange_data(void *sbuf, void *rbuf,
     return ucc_status;
 }
 
-ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
-                                            ucc_mem_map_params_t   map,
-                                            ucc_context_oob_coll_t oob)
+UCC_TL_UCP_PROFILE_FUNC(ucc_status_t, ucc_tl_ucp_ctx_remote_populate,
+                        (ctx, map, oob), ucc_tl_ucp_context_t *ctx,
+                        ucc_mem_map_params_t map, ucc_context_oob_coll_t oob)
 {
     uint32_t                   rank             = oob.oob_ep;
     uint32_t                   size             = oob.n_oob_eps;
