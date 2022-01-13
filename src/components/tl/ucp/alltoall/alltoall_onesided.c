@@ -54,9 +54,17 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_barrier_start(ucc_coll_task_t *ctask)
 {
     ucc_tl_ucp_task_t *task = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
     ucc_tl_ucp_team_t *team = TASK_TEAM(task);
+    ucc_rank_t rank = UCC_TL_TEAM_RANK(team);
+    ucc_rank_t size = UCC_TL_TEAM_SIZE(team);
     ucc_status_t       status;
 
-    task->barrier.phase = 0;
+    task->barrier.phase = UCC_KN_PHASE_INIT;
+        ucc_knomial_pattern_init(size, rank,
+                                 ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
+                                         cfg.barrier_kn_radix, size),
+                                 &task->barrier.p);
+
+
     task->super.super.status = UCC_INPROGRESS;
     status = ucc_tl_ucp_alltoall_onesided_barrier_progress(&task->super);
     if (UCC_INPROGRESS == status) {
@@ -73,9 +81,16 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_get_start(ucc_coll_task_t *ctask)
 {
     ucc_tl_ucp_task_t *task = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
     ucc_tl_ucp_team_t *team = TASK_TEAM(task);
+    ucc_rank_t rank = UCC_TL_TEAM_RANK(team);
+    ucc_rank_t size = UCC_TL_TEAM_SIZE(team);
     ucc_status_t       status;
 
     task->barrier.phase = 0;
+        ucc_knomial_pattern_init(size, rank,
+                                 ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
+                                         cfg.barrier_kn_radix, size),
+                                 &task->barrier.p);
+
     task->super.super.status = UCC_INPROGRESS;
     status = ucc_tl_ucp_alltoall_onesided_get_progress(&task->super);
     if (UCC_INPROGRESS == status) {
@@ -120,13 +135,14 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_barrier_progress(ucc_coll_task_t *ctas
     ucc_status_t       status;
 
     if (task->send_posted > 0) {
-        if (task->send_completed < task->send_posted) {
+        if (task->send_completed < gsize) {
             ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
             return UCC_INPROGRESS;
         }
 
         status = ucc_tl_ucp_barrier_knomial_progress(&task->super);
         if (UCC_INPROGRESS == status) {
+            ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
             return UCC_INPROGRESS;
         }
         goto completed;
@@ -145,12 +161,12 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_barrier_progress(ucc_coll_task_t *ctas
         ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
         return UCC_INPROGRESS;
     }
-    if (task->barrier.phase == 0) {
-        ucc_knomial_pattern_init(gsize, grank,
-                                 ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
-                                         cfg.barrier_kn_radix, gsize),
-                                 &task->barrier.p);
+    status = ucc_tl_ucp_barrier_knomial_progress(&task->super);
+    if (UCC_INPROGRESS == status) {
+        ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
+        return UCC_INPROGRESS;
     }
+
 
 completed:
     task->super.super.status = UCC_OK;
@@ -171,44 +187,40 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_get_progress(ucc_coll_task_t *ctask)
     ucc_rank_t         peer;
     ucc_status_t       status;
 
-    if (task->barrier.phase == UCC_KN_PHASE_PROXY + 1) {
-        goto tests;
-    }
-
-    if (task->barrier.phase < (UCC_KN_PHASE_PROXY + 1)) {
-        if (task->barrier.phase == 0) {
-            ucc_knomial_pattern_init(gsize, grank,
-                                 ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
-                                         cfg.barrier_kn_radix, gsize),
-                                 &task->barrier.p);
-
+    if (task->recv_posted > 0) {
+        if (task->recv_completed < task->recv_posted) {
+            ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
+            return UCC_INPROGRESS;
         }
+
         status = ucc_tl_ucp_barrier_knomial_progress(&task->super);
         if (UCC_INPROGRESS == status) {
             return UCC_INPROGRESS;
         }
-        task->barrier.phase = UCC_KN_PHASE_PROXY + 1;
-        task->super.super.status = UCC_INPROGRESS;
-    } 
-    
-    nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
-    src = src + grank * nelems;
+        goto completed;
+    }
 
-    ucc_tl_ucp_get_nb((void *)dest + start * nelems, (void *)src, nelems,
-                  start, team, task);
+    nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
+    //dest   = dest + grank * nelems;
+    ucc_tl_ucp_get_nb((void *)(dest + start * nelems), (void *)src, nelems,
+                      start, team, task);
 
     for (peer = (start + 1) % gsize; peer != start; peer = (peer + 1) % gsize) {
-        ucc_tl_ucp_get_nb((void *)(dest + peer * nelems), (void *)(src), nelems,
+        ucc_tl_ucp_get_nb((void *)(dest + peer * nelems), (void *)src, nelems,
                           peer, team, task);
     }
-tests:
+    
     if (task->recv_completed < task->recv_posted) {
         ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
         return UCC_INPROGRESS;
-    } 
+    }
+
+
+completed:
     task->super.super.status = UCC_OK;
     ucc_task_complete(ctask);
     return task->super.super.status;
 }
+
 
 
