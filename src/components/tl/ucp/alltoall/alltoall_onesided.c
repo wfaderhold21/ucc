@@ -52,18 +52,32 @@ out:
 
 ucc_status_t ucc_tl_ucp_alltoall_onesided_barrier_start(ucc_coll_task_t *ctask)
 {
-    ucc_tl_ucp_task_t *task = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
-    ucc_tl_ucp_team_t *team = TASK_TEAM(task);
-    ucc_rank_t rank = UCC_TL_TEAM_RANK(team);
-    ucc_rank_t size = UCC_TL_TEAM_SIZE(team);
+    ucc_tl_ucp_task_t *task   = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
+    ucc_tl_ucp_team_t *team   = TASK_TEAM(task);
+    ptrdiff_t          src    = (ptrdiff_t)TASK_ARGS(task).src.info.buffer;
+    ptrdiff_t          dest   = (ptrdiff_t)TASK_ARGS(task).dst.info.buffer;
+    size_t             nelems = TASK_ARGS(task).src.info.count;
+    ucc_rank_t         grank  = UCC_TL_TEAM_RANK(team);
+    ucc_rank_t         gsize  = UCC_TL_TEAM_SIZE(team);
+    ucc_rank_t         start  = (grank + 1) % gsize;
+    ucc_rank_t         peer;
     ucc_status_t       status;
 
     task->barrier.phase = UCC_KN_PHASE_INIT;
-        ucc_knomial_pattern_init(size, rank,
-                                 ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
-                                         cfg.barrier_kn_radix, size),
-                                 &task->barrier.p);
+    ucc_knomial_pattern_init(gsize, grank,
+                             ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
+                                     cfg.barrier_kn_radix, gsize),
+                             &task->barrier.p);
 
+    nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
+    dest   = dest + grank * nelems;
+    ucc_tl_ucp_put_nb((void *)(src + start * nelems), (void *)dest, nelems,
+                      start, team, task);
+
+    for (peer = (start + 1) % gsize; peer != start; peer = (peer + 1) % gsize) {
+        ucc_tl_ucp_put_nb((void *)(src + peer * nelems), (void *)dest, nelems,
+                          peer, team, task);
+    }
 
     task->super.super.status = UCC_INPROGRESS;
     status = ucc_tl_ucp_alltoall_onesided_barrier_progress(&task->super);
@@ -125,50 +139,14 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_barrier_progress(ucc_coll_task_t *ctas
 {
     ucc_tl_ucp_task_t *task   = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
     ucc_tl_ucp_team_t *team   = TASK_TEAM(task);
-    ptrdiff_t          src    = (ptrdiff_t)TASK_ARGS(task).src.info.buffer;
-    ptrdiff_t          dest   = (ptrdiff_t)TASK_ARGS(task).dst.info.buffer;
-    size_t             nelems = TASK_ARGS(task).src.info.count;
-    ucc_rank_t         grank  = UCC_TL_TEAM_RANK(team);
-    ucc_rank_t         gsize  = UCC_TL_TEAM_SIZE(team);
-    ucc_rank_t         start  = (grank + 1) % gsize;
-    ucc_rank_t         peer;
     ucc_status_t       status;
-
-    if (task->send_posted > 0) {
-        if (task->send_completed < gsize) {
-            ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
-            return UCC_INPROGRESS;
-        }
-
-        status = ucc_tl_ucp_barrier_knomial_progress(&task->super);
-        if (UCC_INPROGRESS == status) {
-            ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
-            return UCC_INPROGRESS;
-        }
-        goto completed;
-    }
-
-    nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
-    dest   = dest + grank * nelems;
-    ucc_tl_ucp_put_nb((void *)(src + start * nelems), (void *)dest, nelems,
-                      start, team, task);
-
-    for (peer = (start + 1) % gsize; peer != start; peer = (peer + 1) % gsize) {
-        ucc_tl_ucp_put_nb((void *)(src + peer * nelems), (void *)dest, nelems,
-                          peer, team, task);
-    }
-    if (task->send_completed < task->send_posted) {
-        ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
-        return UCC_INPROGRESS;
-    }
+    
     status = ucc_tl_ucp_barrier_knomial_progress(&task->super);
     if (UCC_INPROGRESS == status) {
         ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
         return UCC_INPROGRESS;
     }
-
-
-completed:
+    
     task->super.super.status = UCC_OK;
     ucc_task_complete(ctask);
     return task->super.super.status;
@@ -185,38 +163,56 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_get_progress(ucc_coll_task_t *ctask)
     ucc_rank_t         gsize  = UCC_TL_TEAM_SIZE(team);
     ucc_rank_t         start  = (grank + 1) % gsize;
     ucc_rank_t         peer;
-    ucc_status_t       status;
-
+    
+    printf("task: %p, src: %lx, dest: %lx\n", task, src, dest);
+//    ucc_status_t       status = UCC_INPROGRESS;
+#if 0
+    status = ucc_tl_ucp_barrier_knomial_progress(&task->super);
+    if (status != UCC_OK) {
+        return status;
+    }    
+#endif
+#if 1
     if (task->recv_posted > 0) {
         if (task->recv_completed < task->recv_posted) {
             ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
             return UCC_INPROGRESS;
         }
 
+        printf("[%d] started barrier\n", grank);
+/*
         status = ucc_tl_ucp_barrier_knomial_progress(&task->super);
         if (UCC_INPROGRESS == status) {
             return UCC_INPROGRESS;
-        }
+        } */
         goto completed;
     }
 
     nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
     //dest   = dest + grank * nelems;
-    ucc_tl_ucp_get_nb((void *)(dest + start * nelems), (void *)src, nelems,
+    ucc_tl_ucp_get_nb((void *)(dest), (void *)src, 1,
                       start, team, task);
 
+    printf("start: %d\n", start);
     for (peer = (start + 1) % gsize; peer != start; peer = (peer + 1) % gsize) {
-        ucc_tl_ucp_get_nb((void *)(dest + peer * nelems), (void *)src, nelems,
+        ucc_tl_ucp_get_nb((void *)(dest), (void *)src, 1,
                           peer, team, task);
+        printf("peer: %d\n", peer);
     }
     
     if (task->recv_completed < task->recv_posted) {
         ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->ucp_worker);
         return UCC_INPROGRESS;
     }
-
-
+/*
+    printf("[%d] started barrier (low)\n", grank);
+    status = ucc_tl_ucp_barrier_knomial_progress(&task->super);
+    if (UCC_INPROGRESS == status) {
+        return UCC_INPROGRESS;
+    }
+*/
 completed:
+#endif
     task->super.super.status = UCC_OK;
     ucc_task_complete(ctask);
     return task->super.super.status;
