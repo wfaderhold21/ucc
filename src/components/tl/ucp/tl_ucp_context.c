@@ -41,8 +41,9 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     }
 
     ucp_params.field_mask =
-        UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_TAG_SENDER_MASK;
+        UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_TAG_SENDER_MASK | UCP_PARAM_FIELD_MT_WORKERS_SHARED;
     ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_AM;
+    ucp_params.mt_workers_shared = 1;
     if (params->params.mask & UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS) {
         ucp_params.features |= UCP_FEATURE_RMA | UCP_FEATURE_AMO64;
     }
@@ -78,6 +79,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     }
     self->ucp_memory_types = context_attr.memory_types;
     worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
+    #if 0
     switch (params->thread_mode) {
     case UCC_THREAD_SINGLE:
     case UCC_THREAD_FUNNELED:
@@ -91,6 +93,9 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
         ucc_assert(0);
         break;
     }
+    #else
+        worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
+    #endif
     status = ucp_worker_create(ucp_context, &worker_params, &ucp_worker);
     if (UCS_OK != status) {
         tl_error(self->super.super.lib, "failed to create ucp worker, %s",

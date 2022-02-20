@@ -15,6 +15,7 @@ enum {
     UCC_TL_UCP_ALLTOALL_ALG_ONESIDED,
     UCC_TL_UCP_ALLTOALL_ALG_TEST_ONESIDED,
     UCC_TL_UCP_ALLTOALL_ALG_GET_ONESIDED,
+    UCC_TL_UCP_ALLTOALL_ALG_LIMIT_ONESIDED,
     UCC_TL_UCP_ALLTOALL_ALG_LAST
 };
 
@@ -42,6 +43,10 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_test_init(ucc_base_coll_args_t *coll_a
 ucc_status_t ucc_tl_ucp_alltoall_onesided_get_init(ucc_base_coll_args_t *coll_args,
                                                ucc_base_team_t *     team,
                                                ucc_coll_task_t **    task_h);
+ucc_status_t ucc_tl_ucp_alltoall_onesided_limit_init(ucc_base_coll_args_t *coll_args,
+                                               ucc_base_team_t *     team,
+                                               ucc_coll_task_t **    task_h);
+
 
 
 
