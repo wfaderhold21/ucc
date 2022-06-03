@@ -15,16 +15,16 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *task);
 void ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *task);
 
 ucc_status_t ucc_tl_ucp_alltoall_onesided_sm_start(ucc_coll_task_t *task);
-ucc_status_t ucc_tl_ucp_alltoall_onesided_sm_progress(ucc_coll_task_t *task);
+void ucc_tl_ucp_alltoall_onesided_sm_progress(ucc_coll_task_t *task);
 
 ucc_status_t ucc_tl_ucp_alltoall_onesided_limit_start(ucc_coll_task_t *task);
-ucc_status_t ucc_tl_ucp_alltoall_onesided_limit_progress(ucc_coll_task_t *task);
+void ucc_tl_ucp_alltoall_onesided_limit_progress(ucc_coll_task_t *task);
 
 ucc_status_t ucc_tl_ucp_alltoall_onesided_barrier_start(ucc_coll_task_t *task);
-ucc_status_t ucc_tl_ucp_alltoall_onesided_barrier_progress(ucc_coll_task_t *task);
+void ucc_tl_ucp_alltoall_onesided_barrier_progress(ucc_coll_task_t *task);
 
 ucc_status_t ucc_tl_ucp_alltoall_onesided_get_start(ucc_coll_task_t *task);
-ucc_status_t ucc_tl_ucp_alltoall_onesided_get_progress(ucc_coll_task_t *task);
+void ucc_tl_ucp_alltoall_onesided_get_progress(ucc_coll_task_t *task);
 
 
 
