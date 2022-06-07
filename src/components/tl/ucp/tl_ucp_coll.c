@@ -209,7 +209,7 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
         case UCC_TL_UCP_ALLTOALL_ALG_ONESIDED:
             *init = ucc_tl_ucp_alltoall_onesided_init;
             break;
-        case UCC_TL_UCP_ALLTOALL_ALG_TEST_ONESIDED:
+        case UCC_TL_UCP_ALLTOALL_ALG_BARRIER_ONESIDED:
             *init = ucc_tl_ucp_alltoall_onesided_test_init;
             break;
         case UCC_TL_UCP_ALLTOALL_ALG_GET_ONESIDED:
@@ -218,8 +218,8 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
         case UCC_TL_UCP_ALLTOALL_ALG_LIMIT_ONESIDED:
             *init = ucc_tl_ucp_alltoall_onesided_limit_init;
             break;
-        case UCC_TL_UCP_ALLTOALL_ALG_SM_ONESIDED:
-            *init = ucc_tl_ucp_alltoall_onesided_sm_init;
+        case UCC_TL_UCP_ALLTOALL_ALG_AUTO_LIMIT_ONESIDED:
+            *init = ucc_tl_ucp_alltoall_onesided_auto_limit_init;
             break;
         default:
             status = UCC_ERR_INVALID_PARAM;

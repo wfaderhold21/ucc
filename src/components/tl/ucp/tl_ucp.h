@@ -56,6 +56,7 @@ typedef struct ucc_tl_ucp_lib_config {
     uint32_t            gather_kn_radix;
     uint32_t            scatter_kn_radix;
     uint32_t            alltoall_pairwise_num_posts;
+    uint32_t            alltoall_limit_ppn;
     uint32_t            alltoallv_pairwise_num_posts;
     uint32_t            allreduce_sra_kn_n_frags;
     uint32_t            allreduce_sra_kn_pipeline_depth;

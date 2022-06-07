@@ -31,6 +31,12 @@ static ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
     {"", "", NULL, ucc_offsetof(ucc_tl_ucp_lib_config_t, super),
      UCC_CONFIG_TYPE_TABLE(ucc_tl_lib_config_table)},
 
+    {"ALLTOALL_LIMIT_PPN", "1",
+     "The number of processes per node for the current job in "
+     "auto limited onesided a2a algorithm",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_limit_ppn),
+     UCC_CONFIG_TYPE_UINT},
+
     {"ALLTOALL_PAIRWISE_NUM_POSTS", "1",
      "Maximum number of outstanding send and receive messages in alltoall "
      "pairwise algorithm",
