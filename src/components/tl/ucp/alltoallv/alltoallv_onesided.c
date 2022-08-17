@@ -6,17 +6,15 @@
 
 #include "config.h"
 #include "tl_ucp.h"
-#include "alltoall.h"
+#include "alltoallv.h"
 #include "core/ucc_progress_queue.h"
 #include "utils/ucc_math.h"
 #include "tl_ucp_sendrecv.h"
-#include <omp.h>
 
 void ucc_tl_ucp_alltoallv_onesided_progress(ucc_coll_task_t *ctask);
 void ucc_tl_ucp_alltoallv_onesided_barrier_progress(ucc_coll_task_t *ctask);
-void ucc_tl_ucp_alltoallv_onesided_get_progress(ucc_coll_task_t *ctask);
-void ucc_tl_ucp_alltoallv_onesided_limit_progress(ucc_coll_task_t *ctask);
-void ucc_tl_ucp_alltoallv_onesided_sm_progress(ucc_coll_task_t *ctask);
+void ucc_tl_ucp_barrier_knomial_progress(ucc_coll_task_t *task);
+
 
 ucc_status_t ucc_tl_ucp_alltoallv_onesided_start(ucc_coll_task_t *ctask)
 {

@@ -10,7 +10,6 @@
 #include "core/ucc_progress_queue.h"
 #include "utils/ucc_math.h"
 #include "tl_ucp_sendrecv.h"
-#include <omp.h>
 
 void ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask);
 void ucc_tl_ucp_alltoall_onesided_barrier_progress(ucc_coll_task_t *ctask);
