@@ -22,7 +22,8 @@ alltoall =                       \
 alltoallv =                        \
 	alltoallv/alltoallv.h          \
 	alltoallv/alltoallv.c          \
-	alltoallv/alltoallv_pairwise.c
+	alltoallv/alltoallv_pairwise.c \
+	alltoallv/alltoallv_onesided.c
 
 bcast =                   \
 	bcast/bcast.h         \
