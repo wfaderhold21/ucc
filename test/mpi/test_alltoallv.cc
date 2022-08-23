@@ -26,6 +26,8 @@ TestAlltoallv::TestAlltoallv(ucc_test_team_t &_team, TestCaseParams &params) :
 {
     size_t dt_size = ucc_dt_size(TEST_DT);
     size_t count   = msgsize/dt_size;
+    bool   is_onesided       = (params.buffers != nullptr);
+    void  *work_buf          = nullptr;
     std::uniform_int_distribution<int> urd(count/2, count);
     std::default_random_engine         eng;
     int rank;
@@ -60,6 +62,10 @@ TestAlltoallv::TestAlltoallv(ucc_test_team_t &_team, TestCaseParams &params) :
     args.mask  = UCC_COLL_ARGS_FIELD_FLAGS;
     args.flags |= UCC_COLL_ARGS_FLAG_CONTIG_SRC_BUFFER |
                   UCC_COLL_ARGS_FLAG_CONTIG_DST_BUFFER;
+    if (is_onesided) {
+        args.mask |= UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER;
+        args.flags |= UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS;
+    }
     if (count_bits == TEST_FLAG_VSIZE_64BIT) {
         args.flags |= UCC_COLL_ARGS_FLAG_COUNT_64BIT;
     }
@@ -96,13 +102,20 @@ TestAlltoallv::TestAlltoallv(ucc_test_team_t &_team, TestCaseParams &params) :
     if (TEST_SKIP_NONE != skip_reduce(test_skip, team.comm)) {
         return;
     }
-
     UCC_CHECK(ucc_mc_alloc(&sbuf_mc_header, sncounts * dt_size, mem_type));
     UCC_CHECK(ucc_mc_alloc(&rbuf_mc_header, rncounts * dt_size, mem_type));
-    sbuf      = sbuf_mc_header->addr;
-    rbuf      = rbuf_mc_header->addr;
     check_buf = ucc_malloc((sncounts + rncounts) * dt_size, "check buf");
     UCC_MALLOC_CHECK(check_buf);
+
+    if (!is_onesided) {
+        sbuf      = sbuf_mc_header->addr;
+        rbuf      = rbuf_mc_header->addr;
+    } else {
+        sbuf     = params.buffers[MEM_SEND_SEGMENT];
+        rbuf     = params.buffers[MEM_RECV_SEGMENT];
+        work_buf = params.buffers[MEM_WORK_SEGMENT];
+        args.global_work_buffer = work_buf;
+    }
 
     args.src.info_v.buffer = sbuf;
     args.src.info_v.datatype = TEST_DT;
