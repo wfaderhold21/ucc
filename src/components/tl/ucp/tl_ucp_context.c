@@ -339,11 +339,12 @@ ucc_status_t ucc_tl_ucp_rinfo_destroy(ucc_tl_ucp_context_t *ctx)
         }
     }
     for (i = 0; i < ctx->n_rinfo_segs; i++) {
+        if (ctx->remote_info[i].mem_h && ctx->remote_info[i].packed_key) {
+//            ucp_rkey_buffer_release(ctx->remote_info[i].packed_key[0].key);
+        }
+
         if (ctx->remote_info[i].mem_h) {
             ucp_mem_unmap(ctx->worker.ucp_context, ctx->remote_info[i].mem_h);
-        }
-        if (ctx->remote_info[i].packed_key) {
-            ucp_rkey_buffer_release(ctx->remote_info[i].packed_key);
         }
     }
     ucc_free(ctx->remote_info);
@@ -435,7 +436,7 @@ ucc_status_t ucc_tl_ucp_populate_rcache(void *addr, size_t length,
     return UCC_OK;
 }
 
-ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
+ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t  *ctx,
                                             ucc_mem_map_params_t   map,
                                             ucc_context_oob_coll_t oob)
 {
@@ -459,8 +460,8 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
                  MAX_NR_SEGMENTS);
         return UCC_ERR_INVALID_PARAM;
     }
-    ctx->rkeys =
-        (ucp_rkey_h *)ucc_calloc(sizeof(ucp_rkey_h), nsegs * size, "ucp_ctx_rkeys");
+    ctx->rkeys = (ucp_rkey_h *)ucc_calloc(sizeof(ucp_rkey_h), nsegs * size,
+                                          "ucp_ctx_rkeys");
     if (NULL == ctx->rkeys) {
         tl_error(ctx->super.super.lib, "failed to allocated %zu bytes",
                  sizeof(ucp_rkey_h) * nsegs * size);
@@ -476,30 +477,44 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
     }
 
     for (i = 0; i < nsegs; i++) {
-        mmap_params.field_mask =
-            UCP_MEM_MAP_PARAM_FIELD_ADDRESS | UCP_MEM_MAP_PARAM_FIELD_LENGTH;
-        mmap_params.address = map.segments[i].address;
-        mmap_params.length  = map.segments[i].len;
+        if (map.segments[i].mask == UCC_MEM_MAP_FIELD_KEY) {
+            /* i've passed in a key, saves a registration */
+            ctx->remote_info[i].va_base = map.segments[i].address;
+            ctx->remote_info[i].len     = map.segments[i].len;
+            ctx->remote_info[i].mem_h   = NULL;
+            memcpy(ctx->remote_info[i].packed_key, map.segments[i].key,
+                   sizeof(ucc_rma_key_t) * 2);
+        } else {
+            /* i have not passed in a key */
+            mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
+                                     UCP_MEM_MAP_PARAM_FIELD_LENGTH;
+            mmap_params.address = map.segments[i].address;
+            mmap_params.length  = map.segments[i].len;
 
-        status = ucp_mem_map(ctx->worker.ucp_context, &mmap_params, &mh);
-        if (UCS_OK != status) {
-            tl_error(ctx->super.super.lib,
-                     "ucp_mem_map failed with error code: %d", status);
-            ucc_status = ucs_status_to_ucc_status(status);
-            goto fail_mem_map;
+            status = ucp_mem_map(ctx->worker.ucp_context, &mmap_params, &mh);
+            if (UCS_OK != status) {
+                tl_error(ctx->super.super.lib,
+                         "ucp_mem_map failed with error code: %d", status);
+                ucc_status = ucs_status_to_ucc_status(status);
+                goto fail_mem_map;
+            }
+            ctx->remote_info[i].mem_h = (void *)mh;
+            status = ucp_rkey_pack(ctx->worker.ucp_context, mh,
+                                   &ctx->remote_info[i].packed_key[0].key,
+                                   &ctx->remote_info[i].packed_key[0].key_len);
+            if (UCS_OK != status) {
+                tl_error(ctx->super.super.lib,
+                         "failed to pack UCP key with error code: %d", status);
+                ucc_status = ucs_status_to_ucc_status(status);
+                goto fail_mem_map;
+            }
+            ctx->remote_info[i].va_base = map.segments[i].address;
+            ctx->remote_info[i].len     = map.segments[i].len;
         }
-        ctx->remote_info[i].mem_h = (void *)mh;
-        status                    = ucp_rkey_pack(ctx->worker.ucp_context, mh,
-                               &ctx->remote_info[i].packed_key,
-                               &ctx->remote_info[i].packed_key_len);
-        if (UCS_OK != status) {
-            tl_error(ctx->super.super.lib,
-                     "failed to pack UCP key with error code: %d", status);
-            ucc_status = ucs_status_to_ucc_status(status);
-            goto fail_mem_map;
+
+        if (map.segments[i].mask == UCC_MEM_MAP_FIELD_MEM_TYPE) {
+            ctx->remote_info[i].mem_type = map.segments[i].mem_type;
         }
-        ctx->remote_info[i].va_base = map.segments[i].address;
-        ctx->remote_info[i].len     = map.segments[i].len;
     }
     ctx->n_rinfo_segs = nsegs;
 
@@ -529,22 +544,38 @@ static void ucc_tl_ucp_ctx_remote_pack_data(ucc_tl_ucp_context_t *ctx,
     uint64_t *rvas;
     uint64_t *lens;
     uint64_t *key_sizes;
+    uint64_t *memh_sizes;
+    uint64_t *mem_types;
     int       i;
+
+    /* keys are packed in this order:
+     *  1. packed_memh -- may be null
+     *  2. packed_rkey
+     * two key sizes per segment
+     */
 
     /* pack into one data object in following order: */
     /* rva, len, pack sizes, packed keys */
-    rvas      = pack;
-    lens      = PTR_OFFSET(pack, section_offset);
-    key_sizes = PTR_OFFSET(pack, (section_offset * 2));
-    keys      = PTR_OFFSET(pack, (section_offset * 3));
+    rvas       = pack;
+    lens       = PTR_OFFSET(pack, section_offset);
+    key_sizes  = PTR_OFFSET(pack, (section_offset * 2));
+    memh_sizes = PTR_OFFSET(pack, (section_offset * 3));
+    mem_types  = PTR_OFFSET(pack, (section_offset * 4));
+    keys       = PTR_OFFSET(pack, (section_offset * 5));
 
     for (i = 0; i < nsegs; i++) {
-        rvas[i]      = (uint64_t)ctx->remote_info[i].va_base;
-        lens[i]      = ctx->remote_info[i].len;
-        key_sizes[i] = ctx->remote_info[i].packed_key_len;
-        memcpy(PTR_OFFSET(keys, offset), ctx->remote_info[i].packed_key,
-               ctx->remote_info[i].packed_key_len);
-        offset += ctx->remote_info[i].packed_key_len;
+        rvas[i]       = (uint64_t)ctx->remote_info[i].va_base;
+        lens[i]       = ctx->remote_info[i].len;
+        key_sizes[i]  = ctx->remote_info[i].packed_key[0].key_len;
+        memh_sizes[i] = ctx->remote_info[i].packed_key[1].key_len;
+        mem_types[i]  = ctx->remote_info[i].mem_type;
+        memcpy(PTR_OFFSET(keys, offset), ctx->remote_info[i].packed_key[0].key,
+               key_sizes[i]);
+        if (memh_sizes[i]) {
+            memcpy(PTR_OFFSET(keys, offset),
+                   ctx->remote_info[i].packed_key[1].key, memh_sizes[i]);
+        }
+        offset += key_sizes[i] + memh_sizes[i];
     }
 }
 
@@ -591,9 +622,10 @@ ucc_status_t ucc_tl_ucp_get_context_attr(const ucc_base_context_t *context,
                 TL_UCP_EP_ADDRLEN_SIZE + ctx->service_worker.ucp_addrlen;
         }
         if (NULL != ctx->remote_info) {
-            packed_length += ctx->n_rinfo_segs * (sizeof(size_t) * 3);
+            packed_length += ctx->n_rinfo_segs * (sizeof(size_t) * 5);
             for (i = 0; i < ctx->n_rinfo_segs; i++) {
-                packed_length += ctx->remote_info[i].packed_key_len;
+                packed_length += ctx->remote_info[i].packed_key[0].key_len;
+                packed_length += ctx->remote_info[i].packed_key[1].key_len;
             }
         }
         attr->attr.ctx_addr_len = packed_length;

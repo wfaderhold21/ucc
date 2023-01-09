@@ -91,8 +91,11 @@ typedef struct ucc_tl_ucp_remote_info {
     void * va_base;
     size_t len;
     void * mem_h;
-    void * packed_key;
-    size_t packed_key_len;
+    ucc_rma_key_t packed_key[2];
+//    void * packed_key;
+//    size_t packed_key_len;
+//    ucc_key_type_t key_type;
+    ucc_memory_type_t mem_type;
 } ucc_tl_ucp_remote_info_t;
 
 typedef struct ucc_tl_ucp_worker {
