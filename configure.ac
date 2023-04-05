@@ -175,6 +175,7 @@ AS_IF([test "x$with_docs_only" = xyes],
      m4_include([config/m4/rccl.m4])
      m4_include([config/m4/sharp.m4])
      m4_include([config/m4/mpi.m4])
+     m4_include([config/m4/urom.m4])
      m4_include([config/m4/ibverbs.m4])
      m4_include([config/m4/rdmacm.m4])
      m4_include([config/m4/configure.m4])
@@ -215,6 +216,8 @@ AS_IF([test "x$with_docs_only" = xyes],
      AC_MSG_RESULT([RDMACM support: $rdmacm_happy])
      ]) # Docs only
 
+     CHECK_UROM
+     AC_MSG_RESULT([UROM support: $urom_happy])
 
 CHECK_TLS
 CFLAGS="$CFLAGS -std=gnu11"
@@ -229,6 +232,7 @@ AC_CONFIG_FILES([
                  src/core/ucc_version.c
                  src/components/cl/basic/Makefile
                  src/components/cl/hier/Makefile
+                 src/components/cl/urom/Makefile
                  src/components/mc/cpu/Makefile
                  src/components/mc/cuda/Makefile
                  src/components/ec/cpu/Makefile

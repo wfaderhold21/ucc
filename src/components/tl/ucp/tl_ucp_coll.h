@@ -270,6 +270,10 @@ typedef struct ucc_tl_ucp_task {
             ucc_rank_t              iteration;
             int                     phase;
         } alltoall_bruck;
+        struct {
+            int peer;
+            int nreqs;
+        } alltoall;
     };
 } ucc_tl_ucp_task_t;
 

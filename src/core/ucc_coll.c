@@ -233,7 +233,7 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_init,
 
     status = ucc_coll_init(team->score_map, &op_args, &task);
     if (UCC_ERR_NOT_SUPPORTED == status) {
-        ucc_debug("failed to init collective: not supported");
+        ucc_debug("failed to init collective (type: %d): not supported", coll_args->coll_type);
         return status;
     } else if (ucc_unlikely(status < 0)) {
         ucc_error("failed to init collective: %s", ucc_status_string(status));
