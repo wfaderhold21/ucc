@@ -6,6 +6,10 @@
 cl_dirs = components/cl/basic \
 		  components/cl/hier
 
+if HAVE_UROM
+cl_dirs += components/cl/urom
+endif
+
 mc_dirs = components/mc/cpu
 ec_dirs = components/ec/cpu
 
