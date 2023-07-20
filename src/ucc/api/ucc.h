@@ -827,7 +827,8 @@ enum ucc_context_params_field {
     UCC_CONTEXT_PARAM_FIELD_SYNC_TYPE         = UCC_BIT(1),
     UCC_CONTEXT_PARAM_FIELD_OOB               = UCC_BIT(2),
     UCC_CONTEXT_PARAM_FIELD_ID                = UCC_BIT(3),
-    UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS        = UCC_BIT(4)
+    UCC_CONTEXT_PARAM_FIELD_CONTEXT           = UCC_BIT(4),
+    UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS        = UCC_BIT(5)
 };
 
 /**
@@ -934,6 +935,7 @@ typedef struct ucc_context_params {
     ucc_coll_sync_type_t    sync_type;
     ucc_context_oob_coll_t  oob;
     uint64_t                ctx_id;
+    void                   *context;
     ucc_mem_map_params_t    mem_params;
 } ucc_context_params_t;
 

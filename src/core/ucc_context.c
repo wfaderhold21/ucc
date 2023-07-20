@@ -352,6 +352,7 @@ static inline void ucc_copy_context_params(ucc_context_params_t *dst,
     UCC_COPY_PARAM_BY_FIELD(dst, src, UCC_CONTEXT_PARAM_FIELD_SYNC_TYPE,
                             sync_type);
     UCC_COPY_PARAM_BY_FIELD(dst, src, UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS, mem_params);
+    UCC_COPY_PARAM_BY_FIELD(dst, src, UCC_CONTEXT_PARAM_FIELD_CONTEXT, context);
 }
 
 static ucc_status_t ucc_create_tl_contexts(ucc_context_t *ctx,
@@ -484,7 +485,6 @@ poll:
                     addr_storage->size * sizeof(size_t));
                 return UCC_ERR_NO_MEMORY;
             }
-
             status = oob->allgather(&context->attr.ctx_addr_len,
                                     addr_storage->storage, sizeof(size_t),
                                     oob->coll_info, &addr_storage->oob_req);
@@ -497,6 +497,7 @@ poll:
         addr_lens = (size_t *)addr_storage->storage;
         ucc_assert(addr_storage->storage != NULL);
         for (i = 0; i < addr_storage->size; i++) {
+//            printf("[%d] recved %lu from %d\n", oob->oob_ep, addr_lens[i], i);
             if (addr_lens[i] > addr_storage->addr_len) {
                 addr_storage->addr_len = addr_lens[i];
             }

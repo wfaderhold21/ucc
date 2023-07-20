@@ -158,37 +158,44 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
         return UCC_ERR_NO_MEMORY;
     }
     prefix[strlen(prefix) - 1] = '\0';
-    UCP_CHECK(ucp_config_read(prefix, NULL, &ucp_config),
-              "failed to read ucp configuration", err_cfg_read, self);
 
-    ucp_params.field_mask =
-        UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_TAG_SENDER_MASK;
-    ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_AM;
-    if (params->params.mask & UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS) {
-        ucp_params.features |= UCP_FEATURE_RMA | UCP_FEATURE_AMO64;
+    if (0 && params->params.context && params->params.mask & UCC_CONTEXT_PARAM_FIELD_CONTEXT) {
+        ucc_debug("setting ucc tl/ucp context to %p", params->params.context);
+        ucp_context = params->params.context;
+    } else {
+        UCP_CHECK(ucp_config_read(prefix, NULL, &ucp_config),
+                  "failed to read ucp configuration", err_cfg_read, self);
+
+        ucp_params.field_mask =
+            UCP_PARAM_FIELD_FEATURES | UCP_PARAM_FIELD_TAG_SENDER_MASK;
+        ucp_params.features = UCP_FEATURE_TAG | UCP_FEATURE_AM;
+        if (params->params.mask & UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS) {
+            ucp_params.features |= UCP_FEATURE_RMA | UCP_FEATURE_AMO64 | UCP_FEATURE_EXPORTED_MEMH;
+        }
+        ucp_params.tag_sender_mask = UCC_TL_UCP_TAG_SENDER_MASK;
+
+        if (params->estimated_num_ppn > 0) {
+            ucp_params.field_mask |= UCP_PARAM_FIELD_ESTIMATED_NUM_PPN;
+            ucp_params.estimated_num_ppn = params->estimated_num_ppn;
+        }
+
+        if (params->estimated_num_eps > 0) {
+            ucp_params.field_mask |= UCP_PARAM_FIELD_ESTIMATED_NUM_EPS;
+            ucp_params.estimated_num_eps = params->estimated_num_eps;
+        }
+
+        UCP_CHECK(ucp_init(&ucp_params, ucp_config, &ucp_context),
+                  "failed to init ucp context", err_cfg, self);
+        ucp_config_release(ucp_config);
+
+        context_attr.field_mask = UCP_ATTR_FIELD_MEMORY_TYPES;
+        UCP_CHECK(ucp_context_query(ucp_context, &context_attr),
+                  "failed to query supported memory types", err_worker_create,
+                  self);
+
+        self->ucp_memory_types = context_attr.memory_types;
     }
-    ucp_params.tag_sender_mask = UCC_TL_UCP_TAG_SENDER_MASK;
-
-    if (params->estimated_num_ppn > 0) {
-        ucp_params.field_mask |= UCP_PARAM_FIELD_ESTIMATED_NUM_PPN;
-        ucp_params.estimated_num_ppn = params->estimated_num_ppn;
-    }
-
-    if (params->estimated_num_eps > 0) {
-        ucp_params.field_mask |= UCP_PARAM_FIELD_ESTIMATED_NUM_EPS;
-        ucp_params.estimated_num_eps = params->estimated_num_eps;
-    }
-
-    UCP_CHECK(ucp_init(&ucp_params, ucp_config, &ucp_context),
-              "failed to init ucp context", err_cfg, self);
-    ucp_config_release(ucp_config);
-
-    context_attr.field_mask = UCP_ATTR_FIELD_MEMORY_TYPES;
-    UCP_CHECK(ucp_context_query(ucp_context, &context_attr),
-              "failed to query supported memory types", err_worker_create,
-              self);
-
-    self->ucp_memory_types = context_attr.memory_types;
+    ucp_context = params->params.context;
     worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
     switch (params->thread_mode) {
     case UCC_THREAD_SINGLE:
@@ -257,7 +264,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
             tl_error(self->super.super.lib, "failed to gather RMA information");
             goto err_thread_mode;
         }
-    }
+    } 
 
     CHECK(UCC_OK != ucc_tl_ucp_eps_ephash_init(
                         params, self, &self->worker.ep_hash, &self->worker.eps),
@@ -477,14 +484,43 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t  *ctx,
     }
 
     for (i = 0; i < nsegs; i++) {
-        if (map.segments[i].mask == UCC_MEM_MAP_FIELD_KEY) {
-            /* i've passed in a key, saves a registration */
+#if 1
+        if (map.segments[i].mask & UCC_MEM_MAP_FIELD_ADDRESS) {
             ctx->remote_info[i].va_base = map.segments[i].address;
             ctx->remote_info[i].len     = map.segments[i].len;
+        }
+        if (map.segments[i].mask & UCC_MEM_MAP_FIELD_KEY) {
+            /* i've passed in a key, saves a registration */
             ctx->remote_info[i].mem_h   = NULL;
             memcpy(ctx->remote_info[i].packed_key, map.segments[i].key,
                    sizeof(ucc_rma_key_t) * 2);
+            if (ctx->remote_info[i].packed_key[1].key_type == UCC_KEY_TYPE_MEMH) {
+                ucp_mem_map_params_t map_params = {
+                        .field_mask = UCP_MEM_MAP_PARAM_FIELD_EXPORTED_MEMH_BUFFER,
+                        .exported_memh_buffer = ctx->remote_info[i].packed_key[1].key,
+                };
+                status = ucp_mem_map(ctx->worker.ucp_context, &map_params, &mh);
+
+                if (status == UCS_ERR_UNREACHABLE) {
+                    tl_error(ctx->super.super.lib, "exported memh unsupported");
+                    return UCC_ERR_NO_MESSAGE;
+                } else if (status < UCS_OK) {
+                    tl_error(ctx->super.super.lib, "error on ucp_mem_map");
+                    return UCC_ERR_NO_MESSAGE;
+                }
+                status = ucp_rkey_pack(ctx->worker.ucp_context, mh,
+                                   &ctx->remote_info[i].packed_key[0].key,
+                                   &ctx->remote_info[i].packed_key[0].key_len);
+                if (UCS_OK != status) {
+                    tl_error(ctx->super.super.lib,
+                         "failed to pack UCP key with error code: %d", status);
+                    ucc_status = ucs_status_to_ucc_status(status);
+                    goto fail_mem_map;
+                }
+                ctx->remote_info[i].mem_h = (void *)mh;
+            }
         } else {
+#endif
             /* i have not passed in a key */
             mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
                                      UCP_MEM_MAP_PARAM_FIELD_LENGTH;
@@ -498,6 +534,7 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t  *ctx,
                 ucc_status = ucs_status_to_ucc_status(status);
                 goto fail_mem_map;
             }
+            printf("MEM MAPPED %p -> 0x%lx %lu\n", mmap_params.address, (ptrdiff_t)mmap_params.address + mmap_params.length, mmap_params.length);
             ctx->remote_info[i].mem_h = (void *)mh;
             status = ucp_rkey_pack(ctx->worker.ucp_context, mh,
                                    &ctx->remote_info[i].packed_key[0].key,
@@ -510,12 +547,16 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t  *ctx,
             }
             ctx->remote_info[i].va_base = map.segments[i].address;
             ctx->remote_info[i].len     = map.segments[i].len;
+            ctx->remote_info[i].packed_key[1].key = NULL;
+            ctx->remote_info[i].packed_key[1].key_len = 0;
+#if 1
         }
-
-        if (map.segments[i].mask == UCC_MEM_MAP_FIELD_MEM_TYPE) {
+        if (map.segments[i].mask & UCC_MEM_MAP_FIELD_MEM_TYPE) {
             ctx->remote_info[i].mem_type = map.segments[i].mem_type;
         }
+#endif
     }
+    printf("NSEGS: %ld\n", nsegs);
     ctx->n_rinfo_segs = nsegs;
 
     return UCC_OK;
@@ -544,7 +585,7 @@ static void ucc_tl_ucp_ctx_remote_pack_data(ucc_tl_ucp_context_t *ctx,
     uint64_t *rvas;
     uint64_t *lens;
     uint64_t *key_sizes;
-    uint64_t *memh_sizes;
+    //uint64_t *memh_sizes;
     uint64_t *mem_types;
     int       i;
 
@@ -559,7 +600,7 @@ static void ucc_tl_ucp_ctx_remote_pack_data(ucc_tl_ucp_context_t *ctx,
     rvas       = pack;
     lens       = PTR_OFFSET(pack, section_offset);
     key_sizes  = PTR_OFFSET(pack, (section_offset * 2));
-    memh_sizes = PTR_OFFSET(pack, (section_offset * 3));
+    //memh_sizes = PTR_OFFSET(pack, (section_offset * 3));
     mem_types  = PTR_OFFSET(pack, (section_offset * 4));
     keys       = PTR_OFFSET(pack, (section_offset * 5));
 
@@ -567,15 +608,15 @@ static void ucc_tl_ucp_ctx_remote_pack_data(ucc_tl_ucp_context_t *ctx,
         rvas[i]       = (uint64_t)ctx->remote_info[i].va_base;
         lens[i]       = ctx->remote_info[i].len;
         key_sizes[i]  = ctx->remote_info[i].packed_key[0].key_len;
-        memh_sizes[i] = ctx->remote_info[i].packed_key[1].key_len;
+//        memh_sizes[i] = ctx->remote_info[i].packed_key[1].key_len;
         mem_types[i]  = ctx->remote_info[i].mem_type;
         memcpy(PTR_OFFSET(keys, offset), ctx->remote_info[i].packed_key[0].key,
                key_sizes[i]);
-        if (memh_sizes[i]) {
+/*        if (memh_sizes[i]) {
             memcpy(PTR_OFFSET(keys, offset),
                    ctx->remote_info[i].packed_key[1].key, memh_sizes[i]);
-        }
-        offset += key_sizes[i] + memh_sizes[i];
+        }*/
+        offset += key_sizes[i];// + memh_sizes[i];
     }
 }
 
@@ -625,7 +666,6 @@ ucc_status_t ucc_tl_ucp_get_context_attr(const ucc_base_context_t *context,
             packed_length += ctx->n_rinfo_segs * (sizeof(size_t) * 5);
             for (i = 0; i < ctx->n_rinfo_segs; i++) {
                 packed_length += ctx->remote_info[i].packed_key[0].key_len;
-                packed_length += ctx->remote_info[i].packed_key[1].key_len;
             }
         }
         attr->attr.ctx_addr_len = packed_length;

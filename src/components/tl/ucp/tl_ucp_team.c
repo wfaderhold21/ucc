@@ -180,6 +180,7 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
 
     if (ctx->remote_info) {
         for (int i = 0; i < ctx->n_rinfo_segs; i++) {
+//            printf("adding %p with len %lu to team\n", ctx->remote_info[i].va_base, ctx->remote_info[i].len);
             team->va_base[i]     = ctx->remote_info[i].va_base;
             team->base_length[i] = ctx->remote_info[i].len;
         }

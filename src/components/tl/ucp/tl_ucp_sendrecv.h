@@ -75,6 +75,8 @@ ucc_tl_ucp_send_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
     ucc_status_t        status;
     ucp_ep_h            ep;
     ucp_tag_t           ucp_tag;
+//    ucc_tl_ucp_context_t *ctx            = UCC_TL_UCP_TEAM_CTX(team);
+
 
     status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
     if (ucc_unlikely(UCC_OK != status)) {
@@ -84,14 +86,21 @@ ucc_tl_ucp_send_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
         task->tagged.tag, UCC_TL_TEAM_RANK(team), team->super.super.params.id,
         team->super.super.params.scope_id, team->super.super.params.scope);
     req_param.op_attr_mask =
-        UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_DATATYPE |
-        UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
+        UCP_OP_ATTR_FIELD_CALLBACK |// UCP_OP_ATTR_FIELD_DATATYPE |
+        UCP_OP_ATTR_FIELD_USER_DATA; //| UCP_OP_ATTR_FIELD_MEMORY_TYPE;
     req_param.datatype    = ucp_dt_make_contig(msglen);
     req_param.cb.send     = cb;
     req_param.memory_type = ucc_memtype_to_ucs[mtype];
     req_param.user_data   = (void *)task;
+/*
+    if (0 && buffer >= ctx->remote_info[0].va_base && (buffer + msglen) < ctx->remote_info[0].va_base) {
+        req_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        req_param.memh = ctx->remote_info[0].mem_h;
+    }
+*/
+
     task->tagged.send_posted++;
-    return ucp_tag_send_nbx(ep, buffer, 1, ucp_tag, &req_param);
+    return ucp_tag_send_nbx(ep, buffer, msglen, ucp_tag, &req_param);
 }
 
 static inline ucc_status_t
@@ -136,6 +145,7 @@ ucc_tl_ucp_recv_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
     ucc_coll_args_t    *args = &TASK_ARGS(task);
     ucp_request_param_t req_param;
     ucp_tag_t           ucp_tag, ucp_tag_mask;
+//    ucc_tl_ucp_context_t *ctx            = UCC_TL_UCP_TEAM_CTX(team);
 
     // coverity[result_independent_of_operands:FALSE]
     UCC_TL_UCP_MAKE_RECV_TAG(ucp_tag, ucp_tag_mask,
@@ -145,14 +155,20 @@ ucc_tl_ucp_recv_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
                              team->super.super.params.scope_id,
                              team->super.super.params.scope);
     req_param.op_attr_mask =
-        UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_DATATYPE |
-        UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
+        UCP_OP_ATTR_FIELD_CALLBACK | //UCP_OP_ATTR_FIELD_DATATYPE |
+        UCP_OP_ATTR_FIELD_USER_DATA;// | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
     req_param.datatype    = ucp_dt_make_contig(msglen);
     req_param.cb.recv     = cb;
     req_param.memory_type = ucc_memtype_to_ucs[mtype];
     req_param.user_data   = (void *)task;
+/*
+    if (buffer >= ctx->remote_info[0].va_base && (buffer + msglen) < ctx->remote_info[0].va_base) {
+        req_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        req_param.memh = ctx->remote_info[0].mem_h;
+    }
+*/
     task->tagged.recv_posted++;
-    return ucp_tag_recv_nbx(team->worker->ucp_worker, buffer, 1, ucp_tag,
+    return ucp_tag_recv_nbx(team->worker->ucp_worker, buffer, msglen, ucp_tag,
                             ucp_tag_mask, &req_param);
 }
 
@@ -235,7 +251,7 @@ ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team, void *va, ucp_ep_h *ep,
     ucc_rank_t            core_rank;
     uint64_t             *rvas;
     uint64_t             *key_sizes;
-    uint64_t             *memh_sizes;
+    //uint64_t             *memh_sizes;
     uint64_t             *mem_types;
     void                 *keys;
     void                 *offset;
@@ -252,7 +268,7 @@ ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team, void *va, ucp_ep_h *ep,
     base_offset = (ptrdiff_t)(TL_UCP_EP_ADDR_ONESIDED_INFO(offset, ctx));
     rvas        = (uint64_t *)base_offset;
     key_sizes   = PTR_OFFSET(base_offset, (section_offset * 2));
-    memh_sizes  = PTR_OFFSET(base_offset, (section_offset * 3));
+//    memh_sizes  = PTR_OFFSET(base_offset, (section_offset * 3));
     mem_types   = PTR_OFFSET(base_offset, (section_offset * 4));
     keys        = PTR_OFFSET(base_offset, (section_offset * 5));
 
@@ -262,11 +278,12 @@ ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team, void *va, ucp_ep_h *ep,
             *segment = i;
             break;
         }
-        key_offset += key_sizes[i] + memh_sizes[i];
+        key_offset += key_sizes[i];// + memh_sizes[i];
     }
     if (0 > *segment) {
         tl_error(UCC_TL_TEAM_LIB(team),
-            "attempt to perform one-sided operation on non-registered memory");
+            "attempt to perform one-sided operation on non-registered memory (%p)", va);
+        ucc_assert(0 <= *segment);
         return UCC_ERR_NOT_FOUND;
     }
     if (ucc_unlikely(NULL == UCC_TL_UCP_REMOTE_RKEY(ctx, peer, *segment))) {
@@ -277,11 +294,18 @@ ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team, void *va, ucp_ep_h *ep,
             return ucs_status_to_ucc_status(ucs_status);
         }
     }
+    if (ctx->remote_info[*segment].packed_key[1].key) {
+        *packed_memh = ctx->remote_info[*segment].mem_h;
+    } else {
+        *packed_memh = NULL;
+    }
+/*
     if (memh_sizes[*segment]) {
         *packed_memh = PTR_OFFSET(keys, key_offset + key_sizes[*segment]);
     } else {
         *packed_memh = NULL;
     }
+*/
     *rkey = UCC_TL_UCP_REMOTE_RKEY(ctx, peer, *segment);
     *rva  = rvas[*segment] + ((uint64_t)va - (uint64_t)team->va_base[*segment]);
     *mtype = mem_types[*segment];
@@ -339,8 +363,10 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void *buffer, void *target,
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
-    void               *packed_memh;
+    void               *packed_memh = NULL;
     ucc_memory_type_t   mtype;
+//    ucc_rank_t         grank  = UCC_TL_TEAM_RANK(team);
+
 
     status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
     if (ucc_unlikely(UCC_OK != status)) {
@@ -358,6 +384,10 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void *buffer, void *target,
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
     req_param.cb.send   = ucc_tl_ucp_put_completion_cb;
     req_param.user_data = (void *)task;
+    if (packed_memh) {
+        req_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        req_param.memh = packed_memh;
+    }
 
     ucp_status = ucp_put_nbx(ep, buffer, msglen, rva, rkey, &req_param);
 
@@ -385,7 +415,7 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void *buffer, void *target,
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
-    void               *packed_memh;
+    void               *packed_memh = NULL;
     ucc_memory_type_t   mtype;
 
     status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
@@ -404,7 +434,10 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void *buffer, void *target,
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
     req_param.cb.send   = ucc_tl_ucp_get_completion_cb;
     req_param.user_data = (void *)task;
-
+    if (packed_memh) {
+        req_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
+        req_param.memh = packed_memh;
+    }
     ucp_status = ucp_get_nbx(ep, buffer, msglen, rva, rkey, &req_param);
 
     task->onesided.get_posted++;
@@ -431,7 +464,7 @@ static inline ucc_status_t ucc_tl_ucp_atomic_inc(void      *target,
     ucs_status_ptr_t    ucp_status;
     ucc_status_t        status;
     ucp_ep_h            ep;
-    void               *packed_memh;
+    void               *packed_memh = NULL;
     ucc_memory_type_t   mtype;
 
     status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
