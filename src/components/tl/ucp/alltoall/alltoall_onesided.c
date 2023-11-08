@@ -33,13 +33,13 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
     UCPCHECK_GOTO(ucc_tl_ucp_put_nb((void *)(src + start * nelems),
                                     (void *)dest, nelems, start, team, task),
                   task, out);
-    UCPCHECK_GOTO(ucc_tl_ucp_atomic_inc(pSync, start, team), task, out);
+    UCPCHECK_GOTO(ucc_tl_ucp_atomic_inc(pSync, start, team, task), task, out);
 
     for (peer = (start + 1) % gsize; peer != start; peer = (peer + 1) % gsize) {
         UCPCHECK_GOTO(ucc_tl_ucp_put_nb((void *)(src + peer * nelems),
                                         (void *)dest, nelems, peer, team, task),
                       task, out);
-        UCPCHECK_GOTO(ucc_tl_ucp_atomic_inc(pSync, peer, team), task,
+        UCPCHECK_GOTO(ucc_tl_ucp_atomic_inc(pSync, peer, team, task), task,
                       out);
     }
 
@@ -56,7 +56,8 @@ void ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask)
     long *             pSync = TASK_ARGS(task).global_work_buffer;
 
     if ((*pSync < gsize) ||
-        (task->onesided.put_completed < task->onesided.put_posted)) {
+        (task->onesided.put_completed < task->onesided.put_posted) ||
+        (task->onesided.atomic_completed < task->onesided.atomic_posted)) {
         ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->worker.ucp_worker);
         return;
     }

@@ -19,10 +19,13 @@ void ucc_tl_ucp_send_completion_cb(void *request, ucs_status_t status,
                                    void *user_data);
 
 void ucc_tl_ucp_put_completion_cb(void *request, ucs_status_t status,
-                                   void *user_data);
+                                  void *user_data);
 
 void ucc_tl_ucp_get_completion_cb(void *request, ucs_status_t status,
-                                   void *user_data);
+                                  void *user_data);
+
+void ucc_tl_ucp_atomic_completion_cb(void *request, ucs_status_t status,
+                                     void *user_data);
 
 void ucc_tl_ucp_recv_completion_cb(void *request, ucs_status_t status,
                                    const ucp_tag_recv_info_t *info,
@@ -406,7 +409,8 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void *buffer, void *target,
 
 static inline ucc_status_t ucc_tl_ucp_atomic_inc(void *     target,
                                                  ucc_rank_t dest_group_rank,
-                                                 ucc_tl_ucp_team_t *team)
+                                                 ucc_tl_ucp_team_t *team,
+                                                 ucc_tl_ucp_task_t *task)
 {
     ucp_request_param_t req_param = {0};
     int                 segment   = 0;
@@ -428,17 +432,21 @@ static inline ucc_status_t ucc_tl_ucp_atomic_inc(void *     target,
         return status;
     }
 
-    req_param.op_attr_mask = UCP_OP_ATTR_FIELD_DATATYPE;
+    req_param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_DATATYPE;
+    req_param.cb.send = ucc_tl_ucp_atomic_completion_cb;
+    req_param.user_data = (void *) task;
     req_param.datatype     = ucp_dt_make_contig(sizeof(uint64_t));
 
     ucp_status = ucp_atomic_op_nbx(ep, UCP_ATOMIC_OP_ADD, &one, 1, rva, rkey,
                                    &req_param);
 
+    task->onesided.atomic_posted++;
     if (UCS_OK != ucp_status) {
         if (UCS_PTR_IS_ERR(ucp_status)) {
             return ucs_status_to_ucc_status(UCS_PTR_STATUS(ucp_status));
         }
-        ucp_request_free(ucp_status);
+    } else {
+        task->onesided.atomic_completed++;
     }
     return UCC_OK;
 }

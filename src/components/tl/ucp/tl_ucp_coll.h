@@ -102,6 +102,8 @@ typedef struct ucc_tl_ucp_task {
             uint32_t        put_completed;
             uint32_t        get_posted;
             uint32_t        get_completed;
+            uint32_t        atomic_posted;
+            uint32_t        atomic_completed;
         } onesided;
     };
     uint32_t        n_polls;
@@ -241,13 +243,15 @@ typedef struct ucc_tl_ucp_schedule {
 #define AVG_ALPHA(_task) (1.0 / (double)UCC_TL_TEAM_SIZE(TASK_TEAM(_task)))
 
 static inline void ucc_tl_ucp_task_reset(ucc_tl_ucp_task_t *task,
-                                         ucc_status_t status)
+                                         ucc_status_t       status)
 {
-    task->tagged.send_posted    = 0;
-    task->tagged.send_completed = 0;
-    task->tagged.recv_posted    = 0;
-    task->tagged.recv_completed = 0;
-    task->super.status          = status;
+    task->tagged.send_posted        = 0;
+    task->tagged.send_completed     = 0;
+    task->tagged.recv_posted        = 0;
+    task->tagged.recv_completed     = 0;
+    task->onesided.atomic_posted    = 0;
+    task->onesided.atomic_completed = 0;
+    task->super.status              = status;
 }
 
 static inline ucc_tl_ucp_task_t *ucc_tl_ucp_get_task(ucc_tl_ucp_team_t *team)
