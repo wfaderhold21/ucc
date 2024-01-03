@@ -18,6 +18,12 @@ ucc_base_coll_alg_info_t
              .name = "pairwise",
              .desc = "O(N) pairwise exchange with adjustable number "
              "of outstanding sends/recvs"},
+        [UCC_TL_UCP_ALLTOALLV_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_ALLTOALLV_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "O(N) pairwise exchange with adjustable number "
+             "of outstanding sends/recvs"},
+
         [UCC_TL_UCP_ALLTOALLV_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 

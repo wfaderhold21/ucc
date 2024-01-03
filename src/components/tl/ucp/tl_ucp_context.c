@@ -159,10 +159,6 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     }
     prefix[strlen(prefix) - 1] = '\0';
 
-    if (0 && params->params.context && params->params.mask & UCC_CONTEXT_PARAM_FIELD_CONTEXT) {
-        ucc_debug("setting ucc tl/ucp context to %p", params->params.context);
-        ucp_context = params->params.context;
-    } else {
         UCP_CHECK(ucp_config_read(prefix, NULL, &ucp_config),
                   "failed to read ucp configuration", err_cfg_read, self);
 
@@ -194,8 +190,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
                   self);
 
         self->ucp_memory_types = context_attr.memory_types;
-    }
-    ucp_context = params->params.context;
+    //ucp_context = params->params.context;
     worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
     switch (params->thread_mode) {
     case UCC_THREAD_SINGLE:
@@ -508,6 +503,8 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t  *ctx,
                     tl_error(ctx->super.super.lib, "error on ucp_mem_map");
                     return UCC_ERR_NO_MESSAGE;
                 }
+                printf("MEM MAPPED XGVMI %p -> 0x%lx %lu\n", map.segments[i].address, (ptrdiff_t)map.segments[i].address + map.segments[i].len, map.segments[i].len);
+
                 status = ucp_rkey_pack(ctx->worker.ucp_context, mh,
                                    &ctx->remote_info[i].packed_key[0].key,
                                    &ctx->remote_info[i].packed_key[0].key_len);

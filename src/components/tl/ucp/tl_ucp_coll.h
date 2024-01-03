@@ -86,6 +86,8 @@ typedef struct ucc_tl_ucp_task {
             uint32_t        put_completed;
             uint32_t        get_posted;
             uint32_t        get_completed;
+            uint32_t        atomic_posted;
+            uint32_t        atomic_completed;
         } onesided;
     };
     uint32_t        n_polls;
@@ -191,6 +193,10 @@ static inline void ucc_tl_ucp_task_reset(ucc_tl_ucp_task_t *task,
     task->tagged.send_completed = 0;
     task->tagged.recv_posted    = 0;
     task->tagged.recv_completed = 0;
+    task->onesided.put_posted = 0;
+    task->onesided.put_completed = 0;
+    task->onesided.atomic_posted = 0;
+    task->onesided.atomic_completed = 0;
     task->super.status          = status;
 }
 
@@ -320,6 +326,32 @@ static inline ucc_status_t ucc_tl_ucp_test_ring(ucc_tl_ucp_task_t *task)
             return UCC_OK;
         }
         ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
+    }
+    return UCC_INPROGRESS;
+}
+
+#define UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(_task)                           \
+    (((_task)->onesided.put_posted == (_task)->onesided.put_completed) &&      \
+     ((_task)->onesided.get_posted == (_task)->onesided.get_completed))
+
+#define UCC_TL_UCP_TASK_ONESIDED_SYNC_COMPLETE(_task, _end)                    \
+    (*((long *)(TASK_ARGS(_task).global_work_buffer)) == _end)
+
+static inline ucc_status_t ucc_tl_ucp_test_onesided(ucc_tl_ucp_task_t *task,
+                                                    int                sync_end)
+{
+    int polls = 0;
+
+    if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task) &&
+        UCC_TL_UCP_TASK_ONESIDED_SYNC_COMPLETE(task, sync_end)) {
+        return UCC_OK;
+    }
+    while (polls++ < task->n_polls) {
+        if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task) &&
+            UCC_TL_UCP_TASK_ONESIDED_SYNC_COMPLETE(task, sync_end)) {
+            return UCC_OK;
+        }
+        ucp_worker_progress(UCC_TL_UCP_TASK_TEAM(task)->worker->ucp_worker);
     }
     return UCC_INPROGRESS;
 }

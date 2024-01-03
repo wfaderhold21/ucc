@@ -54,7 +54,20 @@ void ucc_tl_ucp_put_completion_cb(void *request, ucs_status_t status,
                  ucs_status_string(status));
         task->super.status = ucs_status_to_ucc_status(status);
     }
-    task->onesided.put_completed++;
+    task->onesided.atomic_completed++;
+    ucp_request_free(request);
+}
+
+void ucc_tl_ucp_atomic_completion_cb(void *request, ucs_status_t status,
+                                     void *user_data)
+{
+    ucc_tl_ucp_task_t *task = (ucc_tl_ucp_task_t *)user_data;
+    if (ucc_unlikely(UCS_OK != status)) {
+        tl_error(UCC_TASK_LIB(task), "failure in atomic completion %s",
+                 ucs_status_string(status));
+        task->super.status = ucs_status_to_ucc_status(status);
+    }
+    task->onesided.atomic_completed++;
     ucp_request_free(request);
 }
 
@@ -222,6 +235,16 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
             break;
         default:
             status = UCC_ERR_INVALID_PARAM;
+            break;
+        };
+        break;
+    case UCC_COLL_TYPE_ALLTOALLV:
+        switch (alg_id) {
+        case UCC_TL_UCP_ALLTOALLV_ALG_PAIRWISE:
+            *init = ucc_tl_ucp_alltoallv_pairwise_init;
+            break;
+        case UCC_TL_UCP_ALLTOALLV_ALG_ONESIDED:
+            *init = ucc_tl_ucp_alltoallv_onesided_init;
             break;
         };
         break;
