@@ -27,9 +27,15 @@ ucc_status_t ucc_tl_ucp_alltoallv_onesided_start(ucc_coll_task_t *ctask)
     ucc_mem_map_mem_h  src_memh = TASK_ARGS(task).src_memh.local_memh;
     ucc_mem_map_mem_h *dst_memh = TASK_ARGS(task).dst_memh.global_memh;
     ucc_rank_t         peer;
+    ucc_status_t       status;
     size_t             sd_disp, dd_disp, data_size;
 
     ucc_tl_ucp_task_reset(task, UCC_INPROGRESS);
+    status = ucc_tl_ucp_coll_dynamic_segment_exchange(task);
+    if (UCC_OK != status) {
+        task->super.status = status;
+        goto out;
+    }
 
     /* perform a put to each member peer using the peer's index in the
      * destination displacement. */
@@ -73,6 +79,7 @@ void ucc_tl_ucp_alltoallv_onesided_progress(ucc_coll_task_t *ctask)
 
     pSync[0]           = 0;
     task->super.status = UCC_OK;
+    ucc_tl_ucp_coll_dynamic_segment_finalize(task);
 }
 
 ucc_status_t ucc_tl_ucp_alltoallv_onesided_init(ucc_base_coll_args_t *coll_args,
@@ -109,7 +116,12 @@ ucc_status_t ucc_tl_ucp_alltoallv_onesided_init(ucc_base_coll_args_t *coll_args,
     *task_h              = &task->super;
     task->super.post     = ucc_tl_ucp_alltoallv_onesided_start;
     task->super.progress = ucc_tl_ucp_alltoallv_onesided_progress;
-    status               = UCC_OK;
+
+    status = ucc_tl_ucp_coll_dynamic_segment_init(&coll_args->args, task);
+    if (UCC_OK != status) {
+        tl_error(UCC_TL_TEAM_LIB(tl_team),
+                 "failed to initialize dynamic segments");
+    }
 out:
     return status;
 }

@@ -9,6 +9,7 @@
 #include "alltoall.h"
 #include "core/ucc_progress_queue.h"
 #include "utils/ucc_math.h"
+#include "tl_ucp_coll.h"
 #include "tl_ucp_sendrecv.h"
 
 void ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask);
@@ -27,12 +28,19 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
     ucc_mem_map_mem_h  src_memh = TASK_ARGS(task).src_memh.local_memh;
     ucc_mem_map_mem_h *dst_memh = TASK_ARGS(task).dst_memh.global_memh;
     ucc_rank_t         peer;
+    ucc_status_t       status;
 
     if (TASK_ARGS(task).flags & UCC_COLL_ARGS_FLAG_SRC_MEMH_GLOBAL) {
         src_memh = TASK_ARGS(task).src_memh.global_memh[grank];
     }
 
     ucc_tl_ucp_task_reset(task, UCC_INPROGRESS);
+    status = ucc_tl_ucp_coll_dynamic_segment_exchange(task);
+    if (UCC_OK != status) {
+        task->super.status = status;
+        goto out;
+    }
+
     /* TODO: change when support for library-based work buffers is complete */
     nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
     dest   = dest + grank * nelems;
@@ -61,5 +69,5 @@ void ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask)
     }
 
     pSync[0]           = 0;
-    task->super.status = UCC_OK;
+    task->super.status = ucc_tl_ucp_coll_dynamic_segment_finalize(task);
 }

@@ -36,6 +36,12 @@
 #define ONESIDED_SYNC_SIZE 1
 #define ONESIDED_REDUCE_SIZE 4
 
+typedef enum {
+    UCC_TL_UCP_DYN_SEG_UPDATE_SRC    = UCC_BIT(0),
+    UCC_TL_UCP_DYN_SEG_UPDATE_DST    = UCC_BIT(1),
+    UCC_TL_UCP_DYN_SEG_UPDATE_GLOBAL = UCC_BIT(2),
+} ucc_tl_ucp_dynamic_segment_update_mask_t;
+
 typedef struct ucc_tl_ucp_iface {
     ucc_tl_iface_t super;
 } ucc_tl_ucp_iface_t;
@@ -157,8 +163,6 @@ typedef struct ucc_tl_ucp_team {
     ucc_status_t               status;
     uint32_t                   seq_num;
     ucc_tl_ucp_task_t         *preconnect_task;
-    void *                     va_base[MAX_NR_SEGMENTS];
-    size_t                     base_length[MAX_NR_SEGMENTS];
     ucc_tl_ucp_worker_t *      worker;
     ucc_tl_ucp_team_config_t   cfg;
     const char *               tuning_str;
