@@ -34,6 +34,11 @@ static ucc_config_field_t ucc_cl_urom_lib_config_table[] = {
      ucc_offsetof(ucc_cl_urom_lib_config_t, use_xgvmi),
      UCC_CONFIG_TYPE_UINT},
 
+    {"USE_XGVMI_CACHE", "0",
+     "Enable use of XGVMI cache to avoid allgather operations",
+     ucc_offsetof(ucc_cl_urom_lib_config_t, use_xgvmi_cache),
+     UCC_CONFIG_TYPE_UINT},
+
     {NULL}};
 
 static ucs_config_field_t ucc_cl_urom_context_config_table[] = {
