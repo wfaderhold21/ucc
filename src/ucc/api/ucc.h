@@ -904,6 +904,7 @@ typedef ucc_oob_coll_t ucc_team_oob_coll_t;
 typedef struct ucc_mem_map {
     void *   address; /*!< the address of a buffer to be attached to a UCC context */
     size_t   len;     /*!< the length of the buffer */
+    void *   resource;
 } ucc_mem_map_t;
 
 /**
@@ -1805,7 +1806,8 @@ enum ucc_coll_args_field {
     UCC_COLL_ARGS_FIELD_TAG                             = UCC_BIT(1),
     UCC_COLL_ARGS_FIELD_CB                              = UCC_BIT(2),
     UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER              = UCC_BIT(3),
-    UCC_COLL_ARGS_FIELD_ACTIVE_SET                      = UCC_BIT(4)
+    UCC_COLL_ARGS_FIELD_ACTIVE_SET                      = UCC_BIT(4),
+    UCC_COLL_ARGS_FIELD_MEM_MAP                         = UCC_BIT(5)
 };
 
 /**
@@ -1875,6 +1877,7 @@ typedef struct ucc_coll_args {
                                                              to 0. */
     ucc_coll_callback_t             cb;
     double                          timeout; /*!< Timeout in seconds */
+    ucc_mem_map_params_t            mem_map;
     struct {
         uint64_t start;
         int64_t  stride;
