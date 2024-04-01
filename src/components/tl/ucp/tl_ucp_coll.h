@@ -13,6 +13,7 @@
 #include "coll_patterns/recursive_knomial.h"
 #include "components/mc/base/ucc_mc_base.h"
 #include "components/ec/ucc_ec.h"
+#include "core/ucc_service_coll.h"
 #include "tl_ucp_tag.h"
 
 #define UCC_UUNITS_AUTO_RADIX 4
@@ -71,6 +72,11 @@ extern const char
         }                                                                      \
     } while (0)
 
+typedef struct ucc_tl_ucp_allreduce_sw_pipeline
+    ucc_tl_ucp_allreduce_sw_pipeline;
+typedef struct ucc_tl_ucp_allreduce_sw_host_allgather
+    ucc_tl_ucp_allreduce_sw_host_allgather;
+
 typedef struct ucc_tl_ucp_task {
     ucc_coll_task_t super;
     union {
@@ -105,6 +111,27 @@ typedef struct ucc_tl_ucp_task {
             ucc_ee_executor_task_t *etask;
             ucc_ee_executor_t      *executor;
         } allreduce_kn;
+        struct {
+            int                                        reduce_in_progress;
+            ucp_rkey_h *                               src_rkeys; //unpacked
+            ucp_rkey_h *                               dst_rkeys; //unpacked
+            ucp_ep_h *                                 eps;
+            void **                                    sbufs;
+            void **                                    rbufs;
+            ucc_coll_task_t *                          allreduce_task_h;
+            ucc_tl_ucp_allreduce_sw_pipeline *         pipe;
+            ucc_ee_executor_task_t *                   etask;
+            ucc_ee_executor_t *                        executor;
+            int                                        put_window_size;
+            int                                        num_get_bufs;
+            ucs_status_ptr_t *                         put_requests;
+            ucc_service_coll_req_t *                   allgather_scoll_req;
+            ucc_tl_ucp_allreduce_sw_host_allgather *   allgather_data;
+            ucc_coll_task_t *                          barrier_task;
+            struct ucc_tl_ucp_allreduce_sw_export_buf *src_ebuf;
+            struct ucc_tl_ucp_allreduce_sw_export_buf *dst_ebuf;
+            int                                        inplace;
+        } allreduce_sliding_window;
         struct {
             int                     phase;
             ucc_knomial_pattern_t   p;
@@ -203,7 +230,7 @@ static inline void ucc_tl_ucp_task_reset(ucc_tl_ucp_task_t *task,
 static inline ucc_tl_ucp_task_t *ucc_tl_ucp_get_task(ucc_tl_ucp_team_t *team)
 {
     ucc_tl_ucp_context_t *ctx  = UCC_TL_UCP_TEAM_CTX(team);
-    ucc_tl_ucp_task_t    *task = ucc_mpool_get(&ctx->req_mp);;
+    ucc_tl_ucp_task_t    *task = (ucc_tl_ucp_task_t *)ucc_mpool_get(&ctx->req_mp);;
 
     UCC_TL_UCP_PROFILE_REQUEST_NEW(task, "tl_ucp_task", 0);
     task->super.flags       = 0;
@@ -229,7 +256,7 @@ ucc_tl_ucp_get_schedule(ucc_tl_ucp_team_t      *team,
 {
     ucc_tl_ucp_context_t  *ctx      = UCC_TL_UCP_TEAM_CTX(team);
 
-    *schedule = ucc_mpool_get(&ctx->req_mp);
+    *schedule = (ucc_tl_ucp_schedule_t *)ucc_mpool_get(&ctx->req_mp);
 
     if (ucc_unlikely(!(*schedule))) {
         return UCC_ERR_NO_MEMORY;
