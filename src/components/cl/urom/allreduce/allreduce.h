@@ -14,7 +14,7 @@ enum {
 };
 
 extern ucc_base_coll_alg_info_t
-    ucc_cl_urom_allreduce_algs[UCC_CL_HIER_ALLREDUCE_ALG_LAST + 1];
+    ucc_cl_urom_allreduce_algs[UCC_CL_UROM_ALLREDUCE_ALG_LAST + 1];
 
 #define UCC_CL_UROM_ALLREDUCE_DEFAULT_ALG_SELECT_STR "allreduce:0-inf:@full"
 
