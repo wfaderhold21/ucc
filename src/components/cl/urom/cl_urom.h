@@ -67,6 +67,8 @@ typedef struct ucc_cl_urom_lib_config {
     uint32_t xgvmi_buffer_size;
     uint32_t use_xgvmi;
     uint32_t use_xgvmi_cache;
+    uint32_t use_port;
+    uint32_t urom_port;
 } ucc_cl_urom_lib_config_t;
 
 typedef struct ucc_cl_urom_context_config {
