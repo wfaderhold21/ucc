@@ -39,6 +39,16 @@ static ucc_config_field_t ucc_cl_urom_lib_config_table[] = {
      ucc_offsetof(ucc_cl_urom_lib_config_t, use_xgvmi_cache),
      UCC_CONFIG_TYPE_UINT},
 
+    {"USE_PORT", "0",
+     "Use Port instead of Device for connection to UROM Daemon",
+     ucc_offsetof(ucc_cl_urom_lib_config_t, use_port),
+     UCC_CONFIG_TYPE_UINT},
+
+    {"UROM_PORT", "10002",
+     "Port to use to connect to UROM Daemon",
+     ucc_offsetof(ucc_cl_urom_lib_config_t, urom_port),
+     UCC_CONFIG_TYPE_UINT},
+
     {NULL}};
 
 static ucs_config_field_t ucc_cl_urom_context_config_table[] = {

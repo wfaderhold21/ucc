@@ -30,6 +30,7 @@ static int service_connect(ucc_cl_urom_lib_t *urom_lib, urom_service_params_t *s
 static int device_connect(ucc_cl_urom_lib_t *urom_lib, char *dev_name, urom_service_h *service)
 {
     urom_service_params_t service_params = {0};
+    char port[5] = {0};
     urom_status_t status;
     urom_device_t *dev;
     struct urom_device *device_list;
@@ -59,8 +60,15 @@ static int device_connect(ucc_cl_urom_lib_t *urom_lib, char *dev_name, urom_serv
         return -1;
     }
 
-    service_params.flags = UROM_SERVICE_PARAM_DEVICE;
-    service_params.device = dev;
+    if (!urom_lib->cfg.use_port) {
+        service_params.flags = UROM_SERVICE_PARAM_DEVICE;
+        service_params.device = dev;
+    } else {
+        service_params.flags = UROM_SERVICE_PARAM_ADDR;
+        service_params.addr.node = dev->addr.node;
+        sprintf(port, "%d", urom_lib->cfg.urom_port);
+        service_params.addr.service = port;
+    }
     ret = service_connect(urom_lib, &service_params, service);
     if (ret) {
         status = urom_free_device_list(device_list);
