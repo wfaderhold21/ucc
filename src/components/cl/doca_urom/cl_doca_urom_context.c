@@ -28,6 +28,7 @@ static doca_error_t ucc_status_to_doca_error(ucc_status_t status)
         doca_err = DOCA_ERROR_INVALID_VALUE;
         break;
     case UCC_ERR_NO_MEMORY:
+    case UCC_ERR_MEM_MAP_FAILURE:
         doca_err = DOCA_ERROR_NO_MEMORY;
         break;
     case UCC_ERR_NO_RESOURCE:
