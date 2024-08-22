@@ -84,12 +84,7 @@ static ucc_status_t ucc_cl_urom_alltoall_full_start(ucc_coll_task_t *task)
     ucc_cl_urom_team_t     *cl_team = ucc_derived_of(task->team, ucc_cl_urom_team_t);
     ucc_cl_urom_context_t *ctx  = UCC_CL_UROM_TEAM_CTX(cl_team);
     ucc_cl_urom_lib_t *cl_lib = ucc_derived_of(ctx->super.super.lib, ucc_cl_urom_lib_t);
-//    ucc_team_t *core_team = cl_team->super.super.params.team;
     ucc_coll_args_t        *coll_args = &task->bargs.args;
-/*    ucc_subset_t subset = {.map.type = UCC_EP_MAP_FULL,
-                           .map.ep_num = core_team->size,
-                           .myrank = core_team->rank};
-    ucc_service_coll_req_t *scoll_req;*/
     urom_status_t       urom_status;
     urom_worker_cmd_t   coll_cmd = {
         .cmd_type = UROM_WORKER_CMD_UCC,
@@ -99,11 +94,10 @@ static ucc_status_t ucc_cl_urom_alltoall_full_start(ucc_coll_task_t *task)
         .ucc.coll_cmd.team = cl_team->teams[0],
         .ucc.coll_cmd.use_xgvmi = ctx->xgvmi_enabled,
     };
-#if 1
     ucp_mem_map_params_t mem_params;
-    //ucc_status_t ucc_status;
     ucs_status_t ucs_status;
     if ((coll_args->src.info.mem_type != UCC_MEMORY_TYPE_CUDA) &&
+        ctx->req_mc &&
         (cl_team->cache_el[n_cache_el].base_src_va != coll_args->src.info.buffer
       && cl_team->cache_el[n_cache_el].src_va_len != coll_args->src.info.count * ucc_dt_size(coll_args->src.info.datatype))) {
         ucp_memh_pack_params_t pack_params;
@@ -119,7 +113,7 @@ static ucc_status_t ucc_cl_urom_alltoall_full_start(ucc_coll_task_t *task)
         assert(ucs_status == UCS_OK);
 
         cl_team->cache_el[n_cache_el].base_dst_va = mem_params.address = coll_args->dst.info.buffer;
-//        cl_team->cache_el[n_cache_el].dst_va_len = mem_params.length
+        cl_team->cache_el[n_cache_el].dst_va_len = mem_params.length;
 
         ucs_status = ucp_mem_map(tl_ctx->worker.ucp_context, &mem_params, &cl_team->cache_el[n_cache_el].dst_memh);
         assert(ucs_status == UCS_OK);
@@ -167,12 +161,13 @@ static ucc_status_t ucc_cl_urom_alltoall_full_start(ucc_coll_task_t *task)
             sinfo = ucc_malloc(el_size);
             sinfo->src_xgvmi_size = cl_team->cache_el[n_cache_el].src_packed_xgvmi_len;
             sinfo->dst_xgvmi_size = cl_team->cache_el[n_cache_el].dst_packed_xgvmi_len;
+        //    printf("packed xgvmi key len: src %lu dst %lu\n", sinfo->src_xgvmi_size, sinfo->dst_xgvmi_size);
 
             memcpy(sinfo->rkeys + offset, cl_team->cache_el[n_cache_el].src_xgvmi_memh, cl_team->cache_el[n_cache_el].src_packed_xgvmi_len);
             offset += cl_team->cache_el[n_cache_el].src_packed_xgvmi_len;
             memcpy(sinfo->rkeys + offset, cl_team->cache_el[n_cache_el].dst_xgvmi_memh, cl_team->cache_el[n_cache_el].dst_packed_xgvmi_len);
         } else {
-            //printf("USING RKEYS!\n");
+          //  printf("USING RKEYS!\n");
             el_size = sizeof(size_t) * 3 + cl_team->cache_el[n_cache_el].packed_src_key_len + cl_team->cache_el[n_cache_el].packed_dst_key_len;
             sinfo = ucc_malloc(el_size);
             sinfo->src_xgvmi_size = cl_team->cache_el[n_cache_el].packed_src_key_len;
@@ -183,28 +178,30 @@ static ucc_status_t ucc_cl_urom_alltoall_full_start(ucc_coll_task_t *task)
             memcpy(sinfo->rkeys + offset, cl_team->cache_el[n_cache_el].packed_dst_key, cl_team->cache_el[n_cache_el].packed_dst_key_len);
         }
         sinfo->xgvmi_flag = ctx->xgvmi_enabled;
+        coll_cmd.ucc.coll_cmd.work_buffer = sinfo;
 
-    // add in the psync
-    if (coll_args->src.info.mem_type != UCC_MEMORY_TYPE_CUDA) {
-        coll_args->mask |= UCC_COLL_ARGS_FIELD_FLAGS | UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER,
-        coll_args->flags |= UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS,
-        coll_args->global_work_buffer = sinfo;
-        cl_team->cache_el[n_cache_el].pass_info = sinfo;
-        cl_team->cache_el[n_cache_el].pass_info_size = el_size;
-        coll_cmd.ucc.coll_cmd.work_buffer_size = el_size;
-    } 
-} else {
-    if (coll_args->src.info.mem_type != UCC_MEMORY_TYPE_CUDA) {
-        coll_args->mask |= UCC_COLL_ARGS_FIELD_FLAGS | UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER,
-        coll_args->flags |= UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS,
-        coll_args->global_work_buffer = cl_team->cache_el[n_cache_el].pass_info;
-        coll_cmd.ucc.coll_cmd.work_buffer_size = cl_team->cache_el[n_cache_el].pass_info_size;
+//        printf("sinfo->xgvmi_flag: %lu\n", sinfo->xgvmi_flag);
+
+        // add in the psync
+        if (coll_args->src.info.mem_type != UCC_MEMORY_TYPE_CUDA) {
+            //printf("A SIDE\n");
+            coll_args->mask |= UCC_COLL_ARGS_FIELD_FLAGS | UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER,
+            coll_args->flags |= UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS,
+            coll_args->global_work_buffer = sinfo;
+            cl_team->cache_el[n_cache_el].pass_info = sinfo;
+            cl_team->cache_el[n_cache_el].pass_info_size = el_size;
+            coll_cmd.ucc.coll_cmd.work_buffer_size = el_size;
+        }
+    } else if (ctx->req_mc) {
+        if (coll_args->src.info.mem_type != UCC_MEMORY_TYPE_CUDA) {
+            //printf("C SIDE\n");
+            coll_args->mask |= UCC_COLL_ARGS_FIELD_FLAGS | UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER,
+            coll_args->flags |= UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS,
+            coll_args->global_work_buffer = cl_team->cache_el[n_cache_el].pass_info;
+            coll_cmd.ucc.coll_cmd.work_buffer_size = cl_team->cache_el[n_cache_el].pass_info_size;
+        }
     }
-}
-    if (coll_args->src.info.mem_type != UCC_MEMORY_TYPE_CUDA) {
-        coll_cmd.ucc.coll_cmd.work_buffer = coll_args->global_work_buffer;
-    } 
-#endif
+
     if (coll_args->src.info.mem_type == UCC_MEMORY_TYPE_CUDA) {
         coll_args->src.info.mem_type = UCC_MEMORY_TYPE_HOST;
         coll_args->dst.info.mem_type = UCC_MEMORY_TYPE_HOST;
@@ -267,7 +264,7 @@ static void ucc_cl_urom_alltoall_full_progress(ucc_coll_task_t *ctask)
         cl_debug(cl_lib, "WRONG NOTIFICATION (%ld != %d)", notif->notify_type, UROM_WORKER_NOTIFY_UCC);
         return;
     }
-    if (ctx->req_mc) {
+    if (ctx->req_mc && ctask->bargs.args.dst.info.mem_type == UCC_MEMORY_TYPE_CUDA) {
         size_t size_mod = dt_size(ctask->bargs.args.dst.info.datatype);
 
         if ((ucc_status_t) notif->ucc.status == UCC_OK) {
@@ -300,7 +297,7 @@ ucc_status_t ucc_cl_urom_alltoall_full_init(
         return UCC_ERR_NO_MEMORY;
     }
     schedule = &cl_schedule->super.super;
-    if (ctx->req_mc) {
+    if (ctx->req_mc && coll_args->args.src.info.mem_type == UCC_MEMORY_TYPE_CUDA) {
         size_t size_mod = dt_size(coll_args->args.src.info.datatype);
         size_t count = coll_args->args.src.info.count * size_mod;
         //memcpy args to xgvmi buffer
