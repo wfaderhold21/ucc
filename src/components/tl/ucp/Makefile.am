@@ -46,6 +46,7 @@ allreduce =                           \
 	allreduce/allreduce_sra_knomial.c          \
 	allreduce/allreduce_sliding_window.h       \
 	allreduce/allreduce_sliding_window.c       \
+	allreduce/allreduce_sliding_window_oshmem.c\
 	allreduce/allreduce_sliding_window_setup.c \
 	allreduce/allreduce_dbt.c                  \
 	allreduce/allreduce_ring.c
