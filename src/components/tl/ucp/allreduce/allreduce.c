@@ -29,6 +29,11 @@ ucc_base_coll_alg_info_t
             {.id   = UCC_TL_UCP_ALLREDUCE_ALG_SLIDING_WINDOW,
              .name = "sliding_window",
              .desc = "sliding window allreduce (optimized for running on DPU)"},
+        [UCC_TL_UCP_ALLREDUCE_ALG_SLIDING_WINDOW_OSHMEM] =
+            {.id   = UCC_TL_UCP_ALLREDUCE_ALG_SLIDING_WINDOW_OSHMEM,
+             .name = "sliding_window_oshmem",
+             .desc = "sliding window allreduce (optimized for running with PGAS)"},
+
         [UCC_TL_UCP_ALLREDUCE_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 
@@ -52,6 +57,31 @@ ucc_status_t ucc_tl_ucp_allreduce_knomial_init(ucc_base_coll_args_t *coll_args,
     task                 = ucc_tl_ucp_init_task(coll_args, team);
     *task_h              = &task->super;
     status = ucc_tl_ucp_allreduce_knomial_init_common(task);
+out:
+    return status;
+}
+
+void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *coll_task);
+
+ucc_status_t
+ucc_tl_ucp_allreduce_sliding_window_oshmem_init(ucc_base_coll_args_t *coll_args,
+                                         ucc_base_team_t      *team,
+                                         ucc_coll_task_t     **task_h)
+{
+    ucc_tl_ucp_team_t *tl_team = ucc_derived_of(team, ucc_tl_ucp_team_t);
+    ucc_tl_ucp_task_t *task;
+    ucc_status_t       status = UCC_OK;
+
+    ALLREDUCE_TASK_CHECK(coll_args->args, tl_team);
+
+    task = ucc_tl_ucp_init_task(coll_args, team);
+    *task_h = &task->super;
+
+    task->super.post = ucc_tl_ucp_allreduce_sliding_window_oshmem_start;
+    task->super.progress = ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress;
+    task->super.finalize = ucc_tl_ucp_allreduce_sliding_window_oshmem_finalize;
+    task->super.flags |= UCC_COLL_TASK_FLAG_EXECUTOR;
+
 out:
     return status;
 }

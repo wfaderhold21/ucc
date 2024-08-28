@@ -12,6 +12,7 @@ enum {
     UCC_TL_UCP_ALLREDUCE_ALG_KNOMIAL,
     UCC_TL_UCP_ALLREDUCE_ALG_SRA_KNOMIAL,
     UCC_TL_UCP_ALLREDUCE_ALG_SLIDING_WINDOW,
+    UCC_TL_UCP_ALLREDUCE_ALG_SLIDING_WINDOW_OSHMEM,
     UCC_TL_UCP_ALLREDUCE_ALG_DBT,
     UCC_TL_UCP_ALLREDUCE_ALG_LAST
 };
@@ -47,6 +48,12 @@ ucc_tl_ucp_allreduce_sliding_window_init(ucc_base_coll_args_t *coll_args,
                                          ucc_base_team_t      *team,
                                          ucc_coll_task_t     **task_h);
 
+ucc_status_t
+ucc_tl_ucp_allreduce_sliding_window_oshmem_init(ucc_base_coll_args_t *coll_args,
+                                         ucc_base_team_t      *team,
+                                         ucc_coll_task_t     **task_h);
+
+
 ucc_status_t ucc_tl_ucp_allreduce_knomial_init_common(ucc_tl_ucp_task_t *task);
 
 ucc_status_t ucc_tl_ucp_allreduce_knomial_start(ucc_coll_task_t *task);
@@ -54,10 +61,10 @@ ucc_status_t ucc_tl_ucp_allreduce_knomial_start(ucc_coll_task_t *task);
 void ucc_tl_ucp_allreduce_knomial_progress(ucc_coll_task_t *task);
 
 ucc_status_t
-ucc_tl_ucp_allreduce_sliding_window_start(ucc_coll_task_t *coll_task);
+ucc_tl_ucp_allreduce_sliding_window_oshmem_start(ucc_coll_task_t *coll_task);
 
 ucc_status_t
-ucc_tl_ucp_allreduce_sliding_window_finalize(ucc_coll_task_t *task);
+ucc_tl_ucp_allreduce_sliding_window_oshmem_finalize(ucc_coll_task_t *task);
 
 ucc_status_t ucc_tl_ucp_allreduce_knomial_finalize(ucc_coll_task_t *task);
 
