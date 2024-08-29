@@ -134,6 +134,7 @@ typedef struct ucc_tl_ucp_task {
             ucc_tl_ucp_allreduce_sw_host_allgather    *allgather_data;
             ucc_coll_task_t                           *allgather_task;
             ucc_ee_executor_task_t                    *reduce_task;
+            ucc_ee_executor_task_t                    *reduce_task2;
             ucc_tl_ucp_dpu_offload_buf_info_t         *bufs;
         } allreduce_sliding_window;
         struct {
