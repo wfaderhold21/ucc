@@ -12,6 +12,8 @@
 #include "tl_ucp_ep.h"
 #include "tl_ucp_sendrecv.h"
 
+#include <omp.h>
+
 ucc_status_t ucc_tl_ucp_barrier_knomial_start(ucc_coll_task_t *task);
 
 ucc_status_t
@@ -68,6 +70,7 @@ ucc_tl_ucp_allreduce_sliding_window_oshmem_alloc_pipe(ucc_base_team_t   *team,
     pipe->num_buffers  = num_get_bufs;
 
     task->allreduce_sliding_window.pipe = pipe;
+    //printf("STARTED\n");
     return UCC_OK;
 
 free_getbuf:
@@ -109,6 +112,7 @@ static inline void ucc_tl_ucp_allreduce_sliding_window_oshmem_reset_pipeline(
     pipe->done_put      = pipe->posted_put     = 0;
     pipe->count_reduced = pipe->count_serviced = 0;
     pipe->my_count      = pipe->my_offset      = 0;
+    pipe->count_received = 0;
 
     ucc_tl_ucp_allreduce_sliding_window_oshmem_reset_buf(&pipe->accbuf);
     for (i = 0; i < pipe->num_buffers; i++) {
@@ -226,17 +230,29 @@ static inline void ucc_tl_ucp_allreduce_sliding_window_oshmem_reduction(
         tl_error(UCC_TASK_LIB(task), "failed to get executor");
     }
 
-    status =
-        ucc_dt_reduce(accbuf->buf, getbuf->buf, accbuf->buf, accbuf->count, dt,
-                      args, 0, 0, exec,
-                      &task->allreduce_sliding_window.reduce_task);
+    #pragma omp parallel for num_threads(2)
+    for (int i = 0; i < 2; i++) {
+        ucc_status_t pstatus;
+        size_t offset = omp_get_thread_num() * (getbuf->bytes / 2);
+        size_t count = accbuf->count / 2;
+        ucc_ee_executor_task_t *etask = (omp_get_thread_num() == 0) ? task->allreduce_sliding_window.reduce_task : task->allreduce_sliding_window.reduce_task2;
+
+        pstatus =
+            ucc_dt_reduce(accbuf->buf + offset, getbuf->buf + offset, accbuf->buf + offset, count, dt,
+                          args, 0, 0, exec,
+                          &etask);
+        if (pstatus != UCC_OK) {
+            tl_error(UCC_TASK_LIB(task), "failed to perform dt reduction\n");
+        }
+    }
 
     //printf("REDUCED!\n");
+    /*
     if (ucc_unlikely(UCC_OK != status)) {
         tl_error(UCC_TASK_LIB(task), "failed to perform dt reduction");
         task->super.status = status;
         return;
-    }
+    }*/
 }
 
 static inline void
@@ -301,8 +317,8 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
             return;
         }
     }
-
     if (pipe->count_serviced < pipe->my_count) {
+        //printf("pipe->avail_buffs: %ld, pipe->done_get: %d, pipe->count_received: %ld\n", pipe->avail_buffs, pipe->done_get, pipe->count_received);
         if ((pipe->count_received < pipe->my_count) &&
             (pipe->done_get < host_team_size) && (pipe->avail_buffs > 0) &&
             (accbuf->state != REDUCED && accbuf->state != SENDING)) {
@@ -323,7 +339,8 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
             getbuf->state   = RECVING;
             getbuf->count   = count;
             getbuf->bytes   = data_size;
-            ucc_tl_ucp_get_nb(dst_addr, src_addr + get_offset, data_size, src_rank, tl_team, task);
+            //printf("dst %p, src %p, offset %lx\n", dst_addr, src_addr, get_offset);
+            ucc_tl_ucp_get_nb(dst_addr, src_addr + get_offset, getbuf->bytes, src_rank, tl_team, task);
             pipe->src_rank = (src_rank + 1) % host_team_size;
 
             if (getbuf != accbuf) {
@@ -338,42 +355,51 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
         }
 
         if (accbuf->state == RECVING) {
+            int probes = 0;
             //request = accbuf->ucp_req;
-            if (task->onesided.get_posted == task->onesided.get_completed) {
-                accbuf->state   = REDUCING;
-                accbuf->ucp_req = NULL;
-            } else {
-                ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
+            for (probes = 0; probes < 5; probes++){ 
+                if (task->onesided.get_posted == task->onesided.get_completed) {
+                    //printf("Move to REDUCE\n");
+                    accbuf->state   = REDUCING;
+                    accbuf->ucp_req = NULL;
+                    break;
+                } else {
+                    ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
+                }
             }
         }
 
         red_idx = pipe->red_idx % pipe->num_buffers;
         redbuf  = &pipe->getbuf[red_idx];
         if (accbuf->state == REDUCING && redbuf->state == RECVING) {
-            if (task->onesided.get_posted == task->onesided.get_completed) {
-                redbuf->state   = REDUCING;
-                redbuf->ucp_req = NULL;
+            int probes = 0;
+            for (probes = 0; probes < 5; probes++) {
+                if (task->onesided.get_posted == task->onesided.get_completed) {
+                    redbuf->state   = REDUCING;
+                    redbuf->ucp_req = NULL;
 
-                ucc_tl_ucp_allreduce_sliding_window_oshmem_reduction(coll_task, accbuf,
-                                                              redbuf);
+                    ucc_tl_ucp_allreduce_sliding_window_oshmem_reduction(coll_task, accbuf,
+                                                                  redbuf);
 
-                ucc_tl_ucp_allreduce_sliding_window_oshmem_test_reduction(task);
+                    ucc_tl_ucp_allreduce_sliding_window_oshmem_test_reduction(task);
 
-                if (*reduce_task != NULL) {
-                    return;
+                    if (*reduce_task != NULL) {
+                        return;
+                    }
+
+                    redbuf->state = FREE;
+                    pipe->avail_buffs++;
+                    pipe->red_idx++;
+                    pipe->done_red++;
+
+                    if (pipe->done_red == host_team_size - 1) {
+                        accbuf->state = REDUCED;
+                        pipe->count_reduced += accbuf->count;
+                    }
+                    break;
+                } else {
+                    ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
                 }
-
-                redbuf->state = FREE;
-                pipe->avail_buffs++;
-                pipe->red_idx++;
-                pipe->done_red++;
-
-                if (pipe->done_red == host_team_size - 1) {
-                    accbuf->state = REDUCED;
-                    pipe->count_reduced += accbuf->count;
-                }
-            } else {
-                ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
             }
         }
 
