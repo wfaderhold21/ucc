@@ -167,6 +167,7 @@ ucc_tl_ucp_allreduce_sliding_window_oshmem_start(ucc_coll_task_t *coll_task)
     }
 
     rdma_task->allreduce_sliding_window.reduce_task  = NULL;
+    rdma_task->allreduce_sliding_window.reduce_task2  = NULL;
     return ucc_progress_queue_enqueue(UCC_TL_CORE_CTX(team)->pq, &rdma_task->super);//ucc_schedule_start(coll_task);
 }
 
@@ -232,15 +233,17 @@ static inline void ucc_tl_ucp_allreduce_sliding_window_oshmem_reduction(
 
     #pragma omp parallel for num_threads(2)
     for (int i = 0; i < 2; i++) {
+//    {
         ucc_status_t pstatus;
         size_t offset = omp_get_thread_num() * (getbuf->bytes / 2);
         size_t count = accbuf->count / 2;
         ucc_ee_executor_task_t *etask = (omp_get_thread_num() == 0) ? task->allreduce_sliding_window.reduce_task : task->allreduce_sliding_window.reduce_task2;
 
+    //    printf("[th id %d] reducing %ld bytes of %ld\n", omp_get_thread_num(), getbuf->bytes / 2, getbuf->bytes);
         pstatus =
             ucc_dt_reduce(accbuf->buf + offset, getbuf->buf + offset, accbuf->buf + offset, count, dt,
                           args, 0, 0, exec,
-                          &etask);
+                          &etask /*&task->allreduce_sliding_window.reduce_task*/);
         if (pstatus != UCC_OK) {
             tl_error(UCC_TASK_LIB(task), "failed to perform dt reduction\n");
         }
@@ -259,16 +262,38 @@ static inline void
 ucc_tl_ucp_allreduce_sliding_window_oshmem_test_reduction(ucc_tl_ucp_task_t *task)
 {
     ucc_status_t status;
+//    ucc_ee_executor_task_t *ftask = task->allreduce_sliding_window.reduce_task;
+//    ucc_ee_executor_task_t *etask = task->allreduce_sliding_window.reduce_task2;
 
-    #define SAVE_STATE(_phase)
+    if (task->allreduce_sliding_window.reduce_task != NULL) {                          
+        status = ucc_ee_executor_task_test(task->allreduce_sliding_window.reduce_task);
+        if (status == 0) {                          
+            ucc_ee_executor_task_finalize(task->allreduce_sliding_window.reduce_task);     
+//            ftask = NULL;                             
+            task->allreduce_sliding_window.reduce_task = NULL;
+        }                                          
+    }                                              
+    if (task->allreduce_sliding_window.reduce_task2 != NULL) {                          
+        status = ucc_ee_executor_task_test(task->allreduce_sliding_window.reduce_task2);
+        if (status == 0) {                          
+            ucc_ee_executor_task_finalize(task->allreduce_sliding_window.reduce_task2);     
+//            ftask = NULL;                             
+            task->allreduce_sliding_window.reduce_task2 = NULL;
+        }                                          
+    }                                              
 
-    EXEC_TASK_TEST(NULL,
-                   "failed to perform dt reduction",
-                   task->allreduce_sliding_window.reduce_task);
+/*
+    if (etask != NULL) {                          
+        status = ucc_ee_executor_task_test(etask);
+        if (status == 0) {                          
+            ucc_ee_executor_task_finalize(etask);     
+            etask = NULL;                             
+            task->allreduce_sliding_window.reduce_task2 = NULL;
+        }                                          
+    }                                              
+*/
 
-    //printf("testing... complete?\n");
     // If it didn't complete, we would have returned by now. So, clear the flag
-    task->allreduce_sliding_window.reduce_task = NULL;
 }
 
 void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *coll_task)
@@ -308,14 +333,27 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
 
     ucc_assert(host_team_size > 0);
 
-    if (*reduce_task != NULL) {
+    if (*reduce_task != NULL || task->allreduce_sliding_window.reduce_task2 != NULL) {
         // We've previously started a reduction on the accbuf that hasn't yet
         // completed.
         ucc_tl_ucp_allreduce_sliding_window_oshmem_test_reduction(task);
 
-        if (*reduce_task != NULL) {
+        if (*reduce_task != NULL || task->allreduce_sliding_window.reduce_task2 != NULL) {
             return;
         }
+        red_idx = pipe->red_idx % pipe->num_buffers;
+        redbuf  = &pipe->getbuf[red_idx];
+
+            redbuf->state = FREE;
+            pipe->avail_buffs++;
+            pipe->red_idx++;
+            pipe->done_red++;
+
+            if (pipe->done_red == host_team_size - 1) {
+                accbuf->state = REDUCED;
+                pipe->count_reduced += accbuf->count;
+            }
+
     }
     if (pipe->count_serviced < pipe->my_count) {
         //printf("pipe->avail_buffs: %ld, pipe->done_get: %d, pipe->count_received: %ld\n", pipe->avail_buffs, pipe->done_get, pipe->count_received);
@@ -383,7 +421,7 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
 
                     ucc_tl_ucp_allreduce_sliding_window_oshmem_test_reduction(task);
 
-                    if (*reduce_task != NULL) {
+                    if (*reduce_task != NULL || task->allreduce_sliding_window.reduce_task2 != NULL) {
                         return;
                     }
 
@@ -426,7 +464,7 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
                 //          put_window_size;
 
                 ucp_worker_fence(tl_ctx->worker.ucp_worker);
-                ucc_tl_ucp_put_nb(src_addr, dst_addr + put_offset, data_size, dst_rank, tl_team, task);
+                ucc_tl_ucp_put_nb(src_addr, dst_addr, data_size, dst_rank, tl_team, task);
                 pipe->posted_put++;
                 pipe->dst_rank = (dst_rank + 1) % host_team_size;
             }
@@ -434,6 +472,7 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
             while (task->onesided.put_posted > task->onesided.put_completed) {
                 ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
             }
+            //printf("puts complete\n");
 
             pipe->count_serviced += accbuf->count;
 
