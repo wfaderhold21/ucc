@@ -29,10 +29,10 @@ typedef struct ex_info {
 static ucp_mem_h latest_src_xgvmi_mh = NULL;
 static ucp_mem_h latest_dest_xgvmi_mh = NULL;
 static uint64_t latest_src_size = 0;
-static uint64_t latest_dst_addrs[128];
-void * latest_dst_packed_keys[128];
+static uint64_t latest_dst_addrs[128] = {0};
+void * latest_dst_packed_keys[128] = {0};
 //static ucp_rkey_h src_keys[128];
-static ucp_rkey_h dst_keys[128];
+static ucp_rkey_h dst_keys[128] = {0};
 
 static inline ucc_status_t put_nb(void *buffer, size_t target, size_t target_offset,
                                   size_t             msglen,
@@ -298,7 +298,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
                                      cfg.barrier_kn_radix, gsize),              
                              &task->barrier.p);
 
-//    printf("[%d] coll args src %p, dst %p\n", grank, (void *)src, (void *)dest);
+    //printf("[%d] coll args src %p, dst %p, xgvmi flag: %lu, %lu %lu, pass_info->src size: %lu\n", grank, (void *)src, (void *)dest, pass_info->xgvmi_flag, nelems, latest_src_size, pass_info->src_xgvmi_size);
 #if 1
     if (pass_info->xgvmi_flag && nelems != latest_src_size) {
         //printf("needing to allgather! src (nelems %lu, latest_src_size %lu)\n", nelems, latest_src_size);
@@ -354,9 +354,15 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
         for (int i = 0; i < gsize; i++) {
             ex_info_t *p = &rbuf[i];
             latest_dst_addrs[i] = p->dst;
+            //printf("latest_dst_addrs[%d]: %lx, key len: %lu\n", i, latest_dst_addrs[i], dst_key_len);
+            if (latest_dst_packed_keys[i]) {
+                free(latest_dst_packed_keys[i]);
+            }
             latest_dst_packed_keys[i] = malloc(dst_key_len);
             memcpy(latest_dst_packed_keys[i], p->dst_key, dst_key_len);
         }
+        free(sbuf);
+        free(rbuf);
     }
 #endif
     /* TODO: change when support for library-based work buffers is complete */
@@ -365,15 +371,15 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
     dest   = dest + grank * nelems;
     if (ucc_likely(pass_info->xgvmi_flag)) {
         for (peer = start; task->onesided.atomic_posted < gsize;) {
-            UCPCHECK_GOTO(put_nb(PTR_OFFSET(src, peer * nelems),
-                                 latest_dst_addrs[peer], grank * nelems, nelems, peer, latest_dst_packed_keys[peer], mtype, &dst_keys[peer], team, task),
-                                  task, out);
+            //printf("[%d] peer %d\n", grank, peer);
+            /*UCPCHECK_GOTO(*/put_nb(PTR_OFFSET(src, peer * nelems),
+                                 latest_dst_addrs[peer], grank * nelems, nelems, peer, latest_dst_packed_keys[peer], mtype, &dst_keys[peer], team, task);/*,
+                                  task, out);*/
             peer = (peer + 1) % gsize;
-//            printf("[%d] peer %d\n", grank, peer);
         }
-//        printf("put posted: %u\n", task->onesided.atomic_posted);
+        //printf("put posted: %u\n", task->onesided.atomic_posted);
     } else {
-//        printf("perf original");
+        //printf("perf original");
         for (peer = start; task->onesided.atomic_posted < gsize;) {       
             UCPCHECK_GOTO(ucc_tl_ucp_put_nb((void *)(src + peer * nelems),
                                         (void *)dest, nelems, peer, team, task),

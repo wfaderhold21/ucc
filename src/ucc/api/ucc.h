@@ -1832,6 +1832,15 @@ typedef struct ucc_coll_args {
         int64_t  stride;
         uint64_t size;
     } active_set;
+    ucc_mem_map_params_t            mem_map; /*!< Memory regions to be used
+                                                  for the current collective.
+                                                  If set, the designated regions
+                                                  will be mapped and information
+                                                  exchanged. Memory is unmapped
+                                                  at collective completion. Not
+                                                  necessary for two-sided
+                                                  collectives. */
+
 } ucc_coll_args_t;
 
 /**
