@@ -153,6 +153,7 @@ UCC_CLASS_INIT_FUNC(ucc_cl_urom_context_t,
     } else {
         self->xgvmi.xgvmi_size = urom_lib->cfg.num_buffers * urom_lib->cfg.xgvmi_buffer_size;
         self->xgvmi.xgvmi_buffer = ucc_calloc(1, self->xgvmi.xgvmi_size, "xgvmi buffer");
+        cl_debug(&urom_lib->super.super, "Allocated xgvmi buffer of size %lu\n", self->xgvmi.xgvmi_size);
         if (!self->xgvmi.xgvmi_buffer) {
             return UCC_ERR_NO_MEMORY;
         }
