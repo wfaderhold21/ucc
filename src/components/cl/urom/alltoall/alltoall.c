@@ -301,7 +301,7 @@ ucc_status_t ucc_cl_urom_alltoall_full_init(
         size_t size_mod = dt_size(coll_args->args.src.info.datatype);
         size_t count = coll_args->args.src.info.count * size_mod;
         //memcpy args to xgvmi buffer
-        void * ptr = ctx->xgvmi.xgvmi_buffer + (cl_lib->cfg.xgvmi_buffer_size * (schedule->super.seq_num % cl_lib->cfg.num_buffers));
+        void * ptr = ctx->xgvmi.xgvmi_buffer;// + (cl_lib->cfg.xgvmi_buffer_size * (schedule->super.seq_num % cl_lib->cfg.num_buffers));
 
         ctx->old_src = coll_args->args.src.info.buffer;
         coll_args->args.src.info.buffer = ptr;
