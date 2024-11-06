@@ -167,14 +167,7 @@ ucc_tl_ucp_allreduce_sliding_window_oshmem_start(ucc_coll_task_t *coll_task)
     if (rank == size - 1) {
         pipe->my_count += count_total % size;
     }
-#if 0
-    for (int i = 0; i < UCC_TL_UCP_MAX_THREADS; i++) {
-        rdma_task->allreduce_sliding_window.reduce_task2[i] = NULL;
-    }
-#else
     rdma_task->allreduce_sliding_window.reduce_task  = NULL;
-    //rdma_task->allreduce_sliding_window.reduce_task2  = NULL;
-#endif
     return ucc_progress_queue_enqueue(UCC_TL_CORE_CTX(team)->pq, &rdma_task->super);//ucc_schedule_start(coll_task);
 }
 
@@ -232,50 +225,17 @@ static inline void ucc_tl_ucp_allreduce_sliding_window_oshmem_reduction(
     ucc_tl_ucp_task_t *task   = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
     ucc_coll_args_t   *args   = &TASK_ARGS(task);
     ucc_datatype_t     dt     = TASK_ARGS(task).dst.info.datatype;
-#if 1
     status = ucc_coll_task_get_executor(&task->super, &exec);
     if (ucc_unlikely(status != UCC_OK)) {
         tl_error(UCC_TASK_LIB(task), "failed to get executor");
     }
-#if 0
-    status = ucc_coll_task_get_executor(&task->super, &exec2);
-    if (ucc_unlikely(status != UCC_OK)) {
-        tl_error(UCC_TASK_LIB(task), "failed to get executor");
-    }
-#endif
-#endif
 
 
-#if 0
-//    for (int i = 0; i < 2; i++) {
-    #pragma omp parallel
-    {
-        ucc_status_t pstatus;
-        ucc_status_t estatus;
-        int num_threads = omp_get_num_threads();
-        size_t offset = omp_get_thread_num() * (getbuf->bytes / num_threads);
-        size_t count = accbuf->count / num_threads;
-        ucc_ee_executor_task_t *etask = task->allreduce_sliding_window.reduce_task2[omp_get_thread_num()];//(omp_get_thread_num() == 0) ? task->allreduce_sliding_window.reduce_task : task->allreduce_sliding_window.reduce_task2;
-        estatus = ucc_coll_task_get_executor(&task->super, &exec[omp_get_thread_num()]);
-        if (ucc_unlikely(estatus != UCC_OK)) {
-            tl_error(UCC_TASK_LIB(task), "failed to get executor");
-        }
-
-    //    printf("[th id %d] reducing %ld bytes of %ld\n", omp_get_thread_num(), getbuf->bytes / 2, getbuf->bytes);
-        pstatus =
-            ucc_dt_reduce(accbuf->buf + offset, getbuf->buf + offset, accbuf->buf + offset, count, dt,
-                          args, 0, 0, exec[omp_get_thread_num()],
-                          &etask /*&task->allreduce_sliding_window.reduce_task*/);
-        if (pstatus != UCC_OK) {
-            tl_error(UCC_TASK_LIB(task), "failed to perform dt reduction\n");
-        }
-    }
-#else
     {
         ucc_status_t pstatus;
         size_t count = accbuf->count;
 
-        //printf("[th id %d] reducing %ld bytes of %ld\n", omp_get_thread_num(), getbuf->bytes / 2, getbuf->bytes);
+        //printf("reducing %ld bytes of %ld\n", getbuf->bytes, getbuf->bytes);
         pstatus =
             ucc_dt_reduce(accbuf->buf, getbuf->buf, accbuf->buf, count, dt,
                           args, 0, 0, exec,
@@ -284,76 +244,29 @@ static inline void ucc_tl_ucp_allreduce_sliding_window_oshmem_reduction(
             tl_error(UCC_TASK_LIB(task), "failed to perform dt reduction\n");
         }
     }
-#endif
-
-    //printf("REDUCED!\n");
-    /*
-    if (ucc_unlikely(UCC_OK != status)) {
-        tl_error(UCC_TASK_LIB(task), "failed to perform dt reduction");
-        task->super.status = status;
-        return;
-    }*/
 }
 
 static inline void
 ucc_tl_ucp_allreduce_sliding_window_oshmem_test_reduction(ucc_tl_ucp_task_t *task)
 {
     ucc_status_t status;
-//    ucc_ee_executor_task_t *ftask = task->allreduce_sliding_window.reduce_task;
-//    ucc_ee_executor_task_t *etask = task->allreduce_sliding_window.reduce_task2;
 
-#if 0
-    for (int i = 0; i < UCC_TL_UCP_MAX_THREADS; i++) {
-        if (task->allreduce_sliding_window.reduce_task2[i] != NULL) {                          
-            for (int j = 0; j < 5; j++) {
-                status = ucc_ee_executor_task_test(task->allreduce_sliding_window.reduce_task2[i]);
-                if (status == 0) {                          
-                    ucc_ee_executor_task_finalize(task->allreduce_sliding_window.reduce_task2[i]);     
-                    task->allreduce_sliding_window.reduce_task2[i] = NULL;
-                    break;
-                }
-            }
-        }
-    }
-          
-#else
+    #define SAVE_STATE(_phase)
+
+    EXEC_TASK_TEST(NULL, "failed to perform dt reduction", task->allreduce_sliding_window.reduce_task);
+    task->allreduce_sliding_window.reduce_task = NULL;
+    /*
     if (task->allreduce_sliding_window.reduce_task != NULL) {                          
         int i = 0;
         for (i = 0; i < 5; i++) {
             status = ucc_ee_executor_task_test(task->allreduce_sliding_window.reduce_task);
             if (status == 0) {                          
                 ucc_ee_executor_task_finalize(task->allreduce_sliding_window.reduce_task);     
-//            ftask = NULL;                             
                 task->allreduce_sliding_window.reduce_task = NULL;
                 break;
             }
         }
-    }                                              
-#if 0
-    if (task->allreduce_sliding_window.reduce_task2 != NULL) {                          
-        for (int i = 0; i < 5; i ++) {
-            status = ucc_ee_executor_task_test(task->allreduce_sliding_window.reduce_task2);
-            if (status == 0) {                          
-                ucc_ee_executor_task_finalize(task->allreduce_sliding_window.reduce_task2);     
-//            ftask = NULL;                             
-                task->allreduce_sliding_window.reduce_task2 = NULL;
-                break;
-            }                                          
-        }
-    }
-#endif
-#endif                                              
-
-/*
-    if (etask != NULL) {                          
-        status = ucc_ee_executor_task_test(etask);
-        if (status == 0) {                          
-            ucc_ee_executor_task_finalize(etask);     
-            etask = NULL;                             
-            task->allreduce_sliding_window.reduce_task2 = NULL;
-        }                                          
-    }                                              
-*/
+    } */                                             
 
     // If it didn't complete, we would have returned by now. So, clear the flag
 }
@@ -388,8 +301,6 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
     ucc_tl_ucp_context_t          *tl_ctx    = UCC_TL_UCP_TEAM_CTX(tl_team);
     ucc_tl_ucp_allreduce_sw_buf_t *accbuf    = &pipe->accbuf;
     int                            i         = 0;
-/*    ucc_ee_executor_task_t **reduce_task = 
-        &task->allreduce_sliding_window.reduce_task2;*/
     int              put_window_size =
         UCC_TL_UCP_TEAM_LIB(tl_team)->
             cfg.allreduce_sliding_window_put_window_size;
