@@ -19,6 +19,8 @@
 #define UCC_UUNITS_AUTO_RADIX 4
 #define UCC_TL_UCP_N_DEFAULT_ALG_SELECT_STR 8
 
+#define UCC_TL_UCP_MAX_THREADS 1
+
 ucc_status_t ucc_tl_ucp_team_default_score_str_alloc(ucc_tl_ucp_team_t *team,
     char *default_select_str[UCC_TL_UCP_N_DEFAULT_ALG_SELECT_STR]);
 
@@ -134,7 +136,7 @@ typedef struct ucc_tl_ucp_task {
             ucc_tl_ucp_allreduce_sw_host_allgather    *allgather_data;
             ucc_coll_task_t                           *allgather_task;
             ucc_ee_executor_task_t                    *reduce_task;
-            ucc_ee_executor_task_t                    *reduce_task2;
+            ucc_ee_executor_task_t                    *reduce_task2[UCC_TL_UCP_MAX_THREADS];
             ucc_tl_ucp_dpu_offload_buf_info_t         *bufs;
         } allreduce_sliding_window;
         struct {
