@@ -27,9 +27,11 @@ ucc_tl_ucp_allreduce_sliding_window_oshmem_alloc_pipe(ucc_base_team_t   *team,
     ucc_rank_t               team_size = (ucc_rank_t)team->params.size;
     ucc_tl_ucp_lib_config_t *cfg       = &UCC_TL_UCP_TEAM_LIB(tl_team)->cfg;
 
-    const size_t buf_size = cfg->allreduce_sliding_window_buf_size;
+    size_t buf_size = cfg->allreduce_sliding_window_buf_size;
     int   put_window_size = cfg->allreduce_sliding_window_put_window_size;
     int      num_get_bufs = cfg->allreduce_sliding_window_num_get_bufs;
+    size_t nelems = TASK_ARGS(task).src.info.count;
+    nelems = nelems * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
 
     ucc_tl_ucp_allreduce_sw_pipeline *pipe =
         (ucc_tl_ucp_allreduce_sw_pipeline *)ucc_malloc(
@@ -44,6 +46,13 @@ ucc_tl_ucp_allreduce_sliding_window_oshmem_alloc_pipe(ucc_base_team_t   *team,
 
     if (num_get_bufs <= 0) {
         num_get_bufs = team_size;
+    }
+
+    if (nelems >= 131072) { // 1 / 4 cache size
+        tl_debug(UCC_TASK_LIB(task), "resetting buffer size to 1/4 cache size");
+        buf_size = 131072;
+    } else {
+        buf_size = nelems;
     }
 
     ucc_assert(num_get_bufs > 0);
