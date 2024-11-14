@@ -271,6 +271,11 @@ typedef struct ucc_tl_ucp_task {
             ucc_rank_t              iteration;
             int                     phase;
         } alltoall_bruck;
+        struct {
+            size_t rate;
+            double token_rate;
+            int last_peer;
+        } alltoallv_auto;
     };
 } ucc_tl_ucp_task_t;
 
