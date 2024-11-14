@@ -48,6 +48,11 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoallv_pairwise_num_posts),
      UCC_CONFIG_TYPE_ULUNITS},
 
+    {"ALLTOALLV_ONESIDED_RATE", "1",
+    "Data rate of NIC",
+    ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoallv_onesided_rate),
+    UCC_CONFIG_TYPE_ULUNITS},
+
 /* TODO: add radix to config once it's fully supported by the algorithm
     {"ALLTOALLV_HYBRID_RADIX", "2",
      "Radix of the Hybrid Alltoallv algorithm",
