@@ -264,6 +264,14 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
         }
     }
 
+    /* setup pinger info here */
+    tl_debug(self->super.super.lib, "Using IP %s for RTT", self->cfg.ip_addr);
+    //get_addr(self->cfg.ip_addr, (struct sockaddr *) &self->pinger_attr.sin);
+    self->pinger_attr.npeers = params->params.oob.n_oob_eps;
+    self->pinger_attr.port = 13007;
+
+    pinger_create(&self->pinger_attr, &self->pinger);
+
     CHECK(UCC_OK != ucc_tl_ucp_eps_ephash_init(
                         params, self, &self->worker.ep_hash, &self->worker.eps),
           "failed to allocate memory for endpoint storage", err_thread_mode,
@@ -594,7 +602,7 @@ ucc_status_t ucc_tl_ucp_get_context_attr(const ucc_base_context_t *context,
     }
 
     if (attr->attr.mask & UCC_CONTEXT_ATTR_FIELD_CTX_ADDR_LEN) {
-        packed_length = TL_UCP_EP_ADDRLEN_SIZE + ctx->worker.ucp_addrlen;
+        packed_length = TL_UCP_EP_ADDRLEN_SIZE + ctx->worker.ucp_addrlen + sizeof(struct pinger_attr);
         if (ctx->cfg.service_worker != 0) {
             packed_length +=
                 TL_UCP_EP_ADDRLEN_SIZE + ctx->service_worker.ucp_addrlen;
@@ -620,6 +628,8 @@ ucc_status_t ucc_tl_ucp_get_context_attr(const ucc_base_context_t *context,
                    ctx->service_worker.ucp_addrlen);
             offset = PTR_OFFSET(offset, ctx->service_worker.ucp_addrlen);
         }
+        memcpy(offset, &ctx->pinger_attr, sizeof(struct pinger_attr));
+        offset = PTR_OFFSET(offset, sizeof(struct pinger_attr));
         if (NULL != ctx->remote_info) {
             ucc_tl_ucp_ctx_remote_pack_data(ctx, offset);
         }
