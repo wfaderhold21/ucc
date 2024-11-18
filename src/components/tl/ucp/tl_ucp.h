@@ -15,6 +15,7 @@
 #include <ucp/api/ucp.h>
 #include <ucs/memory/memory_type.h>
 #include "core/ucc_service_coll.h"
+#include "tl_ucp_pinger.h"
 
 #ifndef UCC_TL_UCP_DEFAULT_SCORE
 #define UCC_TL_UCP_DEFAULT_SCORE 10
@@ -36,36 +37,6 @@
 #define ONESIDED_SYNC_SIZE 1
 #define ONESIDED_REDUCE_SIZE 4
 
-/* FERROL: remove once pinger is done 
- * */
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <linux/types.h>
-struct pinger_attr {
-    int npeers;
-    struct sockaddr_storage sin;
-    __be16 port;
-};
-
-struct pinger_peer_attr {
-    struct sockaddr_storage sin;
-    __be16 port;
-};
-
-typedef void* pinger_t;
-typedef void* pinger_pid_t;
-typedef double pinger_rtt_t;
-
-static inline int pinger_create(struct pinger_attr *attr, pinger_t *pinger) {
-    return 0;
-}
-
-static inline int pinger_destroy(pinger_t *pinger) {
-    return 0;
-}
-
-static inline int pinger_connect(pinger_t pinger, struct pinger_peer_attr *attr, pinger_pid_t *peer) { return 0; }
-static inline int pinger_query(pinger_t pinger, pinger_pid_t peer, pinger_rtt_t *rtt) { *rtt = 1; return 0; }
 
 typedef struct ucc_tl_ucp_iface {
     ucc_tl_iface_t super;
