@@ -162,6 +162,7 @@ typedef struct ucc_tl_ucp_context {
     int                         topo_required;
     pinger_t                    pinger;
     struct pinger_attr          pinger_attr;
+    pinger_pid_t               *pinger_peer;
 } ucc_tl_ucp_context_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_context_t, const ucc_base_context_params_t *,
                   const ucc_base_config_t *);

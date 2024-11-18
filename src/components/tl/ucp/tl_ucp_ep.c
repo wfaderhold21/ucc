@@ -52,13 +52,26 @@ ucc_status_t ucc_tl_ucp_connect_team_ep(ucc_tl_ucp_team_t *team,
 {
     ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
     int                   use_service_worker = USE_SERVICE_WORKER(team);
+    struct pinger_attr *pattr;
+    struct pinger_peer_attr peer_attr;
     void                 *addr;
+    void                 *paddr;
 
     addr = ucc_get_team_ep_addr(UCC_TL_CORE_CTX(team), UCC_TL_CORE_TEAM(team),
                                 core_rank, ucc_tl_ucp.super.super.id);
+    paddr = addr;
     addr = use_service_worker ? TL_UCP_EP_ADDR_WORKER_SERVICE(addr)
                               : TL_UCP_EP_ADDR_WORKER(addr);
 
+/* FERROL: setup pinger here */
+    if (ctx->pinger_peer[core_rank] == NULL) {
+        paddr = (TL_UCP_EP_ADDR_ONESIDED_INFO(paddr, ctx));
+        paddr -= sizeof(struct pinger_attr);
+        pattr = (struct pinger_attr *)paddr;
+        peer_attr.sin = pattr->sin;
+        peer_attr.port = pattr->port;
+        pinger_connect(ctx->pinger, &peer_attr, &ctx->pinger_peer[core_rank]);
+    }
     return ucc_tl_ucp_connect_ep(ctx, use_service_worker, ep, addr);
 }
 

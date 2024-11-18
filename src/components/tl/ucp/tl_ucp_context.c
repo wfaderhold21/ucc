@@ -271,6 +271,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     self->pinger_attr.port = 13007;
 
     pinger_create(&self->pinger_attr, &self->pinger);
+    self->pinger_peer = (pinger_pid_t *)calloc(sizeof(pinger_pid_t), params->params.oob.n_oob_eps);
 
     CHECK(UCC_OK != ucc_tl_ucp_eps_ephash_init(
                         params, self, &self->worker.ep_hash, &self->worker.eps),
