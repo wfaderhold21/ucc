@@ -12,7 +12,7 @@
 #include "tl_ucp_sendrecv.h"
 
 /* update when pinger rtt complete */
-#define MAGIC_NUMBER    1.0
+#define MAGIC_NUMBER    32
 
 void ucc_tl_ucp_alltoall_onesided_ca_progress(ucc_coll_task_t *ctask);
 
@@ -31,17 +31,22 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
     int                revisit[128] = {0};
     int                nr_revisit = 0;
     int nr_revisit_max = 0;
-    pinger_rtt_t       rtt;
+    pinger_rtt_t       rtt = 1;
     ucc_rank_t         peer;
+    int j = 0;
 
     ucc_tl_ucp_task_reset(task, UCC_INPROGRESS);
     /* TODO: change when support for library-based work buffers is complete */
     nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
     dest   = dest + grank * nelems;
-
     /* maybe have a list of processes to send to, cut them out of the process list */
-    for (peer = start; task->onesided.put_posted < gsize; peer = (peer + 1) % gsize) {
-        pinger_query(ctx->pinger, ctx->pinger_peer[peer], &rtt);
+    for (peer = start; j < gsize; j++ ) {
+        if (peer != grank) {
+            pinger_query(ctx->pinger, ctx->pinger_peer[peer], &rtt);
+//            printf("[%d] peer %d rtt: %ld\n", grank, peer, rtt);
+        } else {
+            rtt = 0;
+        }
         if (rtt <= MAGIC_NUMBER) {
             UCPCHECK_GOTO(ucc_tl_ucp_put_nb((void *)(src + peer * nelems),
                                             (void *)dest, nelems, peer, team, task),
@@ -51,6 +56,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
         } else {
             revisit[nr_revisit++] = peer;
         }
+        peer = (peer + 1) % gsize;
     }
 
     while (nr_revisit) {
