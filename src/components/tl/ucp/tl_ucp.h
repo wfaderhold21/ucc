@@ -89,7 +89,7 @@ typedef struct ucc_tl_ucp_context_config {
     uint32_t                pre_reg_mem;
     uint32_t                service_worker;
     uint32_t                service_throttling_thresh;
-    char                     ip_addr[16];
+    char                    *ip_addr;
 } ucc_tl_ucp_context_config_t;
 
 typedef ucc_tl_ucp_lib_config_t ucc_tl_ucp_team_config_t;

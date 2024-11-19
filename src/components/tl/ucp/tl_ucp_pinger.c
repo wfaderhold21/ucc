@@ -580,7 +580,7 @@ static int dcping_handle_cm_event(struct pinger *p, struct dcping_cb *cb, enum r
 				p->remote_buf_info[p->next_peer].rkey = be32toh(remote_buf_info->rkey);
 				p->remote_buf_info[p->next_peer].dctn = be32toh(remote_buf_info->dctn); 
 
-				DEBUG_LOG("got server param's: peer_id: %d dctn=%d, buf=%llu, size=%d, rkey=%d\n",
+				DEBUG_LOG("got server param's: peer_id: %ld dctn=%d, buf=%llu, size=%d, rkey=%d\n",
 						p->next_peer, p->remote_buf_info[p->next_peer].dctn,
 						p->remote_buf_info[p->next_peer].addr,
 						p->remote_buf_info[p->next_peer].size,
@@ -656,12 +656,12 @@ static int dcping_bind_server(struct dcping_cb *cb)
 
 	return 0;
 }
-
+/*
 static void free_cb(struct dcping_cb *cb)
 {
 	free(cb);
 }
-
+*/
 static int dcping_client_dc_send_wr(struct dcping_cb *cb, uint64_t wr_id, struct dcping_rdma_info *info);
 static int dcping_client_get_cqe_tiemstmp(struct dcping_cb *cb, uint64_t wr_id, uint64_t *ts_hw_start, uint64_t *ts_hw_end);
 
@@ -1095,7 +1095,7 @@ static int dcping_bind_client(struct pinger *p, struct dcping_cb *cb)
 
 	return 0;
 }
-
+/*
 static int get_addr(char *dst, struct sockaddr *addr)
 {
 	struct addrinfo *res;
@@ -1117,7 +1117,7 @@ static int get_addr(char *dst, struct sockaddr *addr)
 	freeaddrinfo(res);
 	return ret;
 }
-
+*/
 void *pinger_server_func(void *arg)
 {
 	struct pinger *p = (struct pinger *)arg;
@@ -1179,12 +1179,15 @@ int pinger_destroy(pinger_t *pinger)
 {
 	struct pinger *p = (struct pinger *)pinger;
 	void *retval;
-	int ret;
+    int ret;
 
 	p->return_sig = 1;
 	pthread_kill(p->server_thread,SIGUSR1); // wake up thread
 	ret = pthread_join(p->server_thread, &retval);
-	assert(!ret);
+    if (!ret) {
+        abort();
+    }
+	//assert(!ret);
 
 	rdma_destroy_id(p->server.cm_id);
 	rdma_destroy_event_channel(p->server.cm_channel);
@@ -1192,8 +1195,8 @@ int pinger_destroy(pinger_t *pinger)
 	rdma_destroy_event_channel(p->client.cm_channel);
 	free(p->rtts);
 	free(p->remote_buf_info);
-	free_cb(&p->server);
-	free_cb(&p->client);
+	//free_cb(&p->server);
+	//free_cb(&p->client);
 
 	return 0;
 }

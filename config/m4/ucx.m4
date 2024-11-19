@@ -101,7 +101,7 @@ AS_IF([test "x$ucx_checked" != "xyes"],[
                 AC_SUBST(UCS_LIBDIR, $check_ucx_libdir)
             ])
 
-            AC_SUBST(UCX_LIBADD, "-lucp -lucm")
+            AC_SUBST(UCX_LIBADD, "-lucp -lucm -lrdmacm")
             AC_SUBST(UCS_LIBADD, "-lucs")
 
             AC_CHECK_MEMBER(ucs_mpool_params_t.ops,

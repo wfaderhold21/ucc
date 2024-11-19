@@ -13,6 +13,7 @@
 #include "utils/arch/cpu.h"
 #include "schedule/ucc_schedule_pipelined.h"
 #include <limits.h>
+#include <ifaddrs.h>
 
 #define UCP_CHECK(function, msg, go, ctx)                                      \
     status = function;                                                         \
@@ -133,6 +134,34 @@ err_cfg_read:
     return ucc_status;
 }
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+
+#if 1
+static int get_addr(char *dst, struct sockaddr *addr)
+{
+    struct addrinfo *res;
+    int ret;
+
+    ret = getaddrinfo(dst, NULL, NULL, &res);
+    if (ret) {
+        printf("getaddrinfo failed (%s) - invalid hostname or IP address\n", gai_strerror(ret));
+        return ret;
+    }
+
+    if (res->ai_family == PF_INET)
+        memcpy(addr, res->ai_addr, sizeof(struct sockaddr_in));
+    else if (res->ai_family == PF_INET6)
+        memcpy(addr, res->ai_addr, sizeof(struct sockaddr_in6));
+    else
+        ret = -1;
+
+    freeaddrinfo(res);
+    return ret;
+}
+#endif
+
 UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
                     const ucc_base_context_params_t *params,
                     const ucc_base_config_t *config)
@@ -150,6 +179,8 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     ucp_worker_h        ucp_worker;
     ucs_status_t        status;
     char *              prefix;
+    struct sockaddr_in *saddr = NULL;
+    struct ifaddrs *addrs = NULL, *tmp = NULL;
 
     UCC_CLASS_CALL_SUPER_INIT(ucc_tl_context_t, &tl_ucp_config->super,
                               params->context);
@@ -265,8 +296,20 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     }
 
     /* setup pinger info here */
-    tl_debug(self->super.super.lib, "Using IP %s for RTT", self->cfg.ip_addr);
-    //get_addr(self->cfg.ip_addr, (struct sockaddr *) &self->pinger_attr.sin);
+    {
+        getifaddrs(&addrs);
+        tmp = addrs;
+
+        while (tmp) {
+            saddr = (struct sockaddr_in *) tmp->ifa_addr;
+            if (strcmp(tmp->ifa_name, "roce0") == 0 && strncmp(inet_ntoa(saddr->sin_addr), "192", 3) == 0) {
+                break;
+            }
+            tmp = tmp->ifa_next;
+        }
+    }
+    tl_debug(self->super.super.lib, "Using IP %s for RTT", inet_ntoa(saddr->sin_addr));
+    get_addr(inet_ntoa(saddr->sin_addr), (struct sockaddr *) &self->pinger_attr.sin);
     self->pinger_attr.npeers = params->params.oob.n_oob_eps;
     self->pinger_attr.port = 13007;
 
