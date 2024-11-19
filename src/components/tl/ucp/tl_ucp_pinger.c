@@ -672,7 +672,7 @@ int do_pings(struct pinger *p)
 	int i, ret;
 	int npeers = p->next_peer;
 
-//	printf("pinging %d peers\n", npeers);
+	//printf("pinging %d peers\n", npeers);
 
 	for (i = 0; i < npeers; i++) {
 		/* post ping */
@@ -692,7 +692,7 @@ int do_pings(struct pinger *p)
 		rtt_hw = ts_hw_end - ts_hw_start;
 		rtt_nsec = rtt_hw * USEC_PER_SEC / p->client.hw_clocks_kHz;
 		p->rtts[i] = rtt_nsec;
-		printf("peer %d rtt: %ld.%3.3ld\n", i, rtt_nsec/1000, rtt_nsec%1000);
+		//printf("peer %d rtt: %ld.%3.3ld\n", i, rtt_nsec/1000, rtt_nsec%1000);
 	}
 
 	usleep(p->ping_interval_us);
@@ -1081,12 +1081,12 @@ static int dcping_bind_client(struct pinger *p, struct dcping_cb *cb)
 		exit(1);
 	}
 	cb->mtu = port_attr.active_mtu;
-/*
+
 	if (port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
 		cb->is_global = 1;
 		cb->sgid_index = my_ibv_find_sgid_type(cb->cm_id->verbs, cb->cm_id->port_num, MY_IBV_GID_TYPE_ROCE_V2, cb->sin.ss_family);
 	}
-*/
+
 	DEBUG_LOG("rdma_resolve_addr/rdma_resolve_route successful to server: <%s:%d>\n", str, be16toh(rdma_get_src_port(cb->cm_id)));
 
 	cb->pd = ibv_alloc_pd(cb->cm_id->verbs);
@@ -1247,6 +1247,7 @@ int pinger_connect(pinger_t pinger, struct pinger_peer_attr *attr, pinger_pid_t 
 
 	*peer = (void *)p->next_peer++;
 
+    printf("DONE CONNECTING\n");
 	return 0;
 }
 

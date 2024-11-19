@@ -68,7 +68,9 @@ ucc_status_t ucc_tl_ucp_connect_team_ep(ucc_tl_ucp_team_t *team,
         paddr = (TL_UCP_EP_ADDR_ONESIDED_INFO(paddr, ctx));
         paddr -= sizeof(struct pinger_attr);
         pattr = (struct pinger_attr *)paddr;
-        peer_attr.sin = pattr->sin;
+        printf("pattr npeers: %d\n", pattr->npeers);
+        //peer_attr.sin = pattr->sin;
+        memcpy(&peer_attr.sin, &pattr->sin, sizeof(struct sockaddr_in));
         peer_attr.port = pattr->port;
         pinger_connect(ctx->pinger, &peer_attr, &ctx->pinger_peer[core_rank]);
     }

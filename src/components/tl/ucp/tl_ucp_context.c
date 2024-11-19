@@ -138,7 +138,7 @@ err_cfg_read:
 #include <sys/socket.h>
 #include <netdb.h>
 
-#if 1
+#if 0
 static int get_addr(char *dst, struct sockaddr *addr)
 {
     struct addrinfo *res;
@@ -309,7 +309,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
         }
     }
     tl_debug(self->super.super.lib, "Using IP %s for RTT", inet_ntoa(saddr->sin_addr));
-    get_addr(inet_ntoa(saddr->sin_addr), (struct sockaddr *) &self->pinger_attr.sin);
+//    get_addr(inet_ntoa(saddr->sin_addr), (struct sockaddr *) &self->pinger_attr.sin);
     self->pinger_attr.npeers = params->params.oob.n_oob_eps;
     memcpy(&self->pinger_attr.sin, saddr, sizeof(struct sockaddr_in));
 //    self->pinger_attr.sin = saddr;
@@ -317,6 +317,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
 
     pinger_create(&self->pinger_attr, &self->pinger);
     self->pinger_peer = (pinger_pid_t *)calloc(sizeof(pinger_pid_t), params->params.oob.n_oob_eps);
+    self->pinger_peer[params->params.oob.oob_ep] = (pinger_pid_t) 1;
 
     CHECK(UCC_OK != ucc_tl_ucp_eps_ephash_init(
                         params, self, &self->worker.ep_hash, &self->worker.eps),
@@ -648,11 +649,12 @@ ucc_status_t ucc_tl_ucp_get_context_attr(const ucc_base_context_t *context,
     }
 
     if (attr->attr.mask & UCC_CONTEXT_ATTR_FIELD_CTX_ADDR_LEN) {
-        packed_length = TL_UCP_EP_ADDRLEN_SIZE + ctx->worker.ucp_addrlen + sizeof(struct pinger_attr);
+        packed_length = TL_UCP_EP_ADDRLEN_SIZE + ctx->worker.ucp_addrlen;
         if (ctx->cfg.service_worker != 0) {
             packed_length +=
                 TL_UCP_EP_ADDRLEN_SIZE + ctx->service_worker.ucp_addrlen;
         }
+        packed_length += sizeof(struct pinger_attr);
         if (NULL != ctx->remote_info) {
             packed_length += ctx->n_rinfo_segs * (sizeof(size_t) * 3);
             for (i = 0; i < ctx->n_rinfo_segs; i++) {
