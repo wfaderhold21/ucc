@@ -50,7 +50,7 @@
 #include "my_ibv_helper.h"
 #include "tl_ucp_pinger.h"
 
-static int debug = 1;
+static int debug = 0;
 static int debug_fast_path = 0;
 #define DEBUG_LOG if (debug) printf
 #define DEBUG_LOG_FAST_PATH if (debug_fast_path) printf
@@ -139,7 +139,7 @@ struct dcping_cb {
 };
 
 struct pinger {
-	struct dcping_cb client;
+	struct dcping_cb *client;
 	struct dcping_cb server;
 
 	int npeers;
@@ -643,7 +643,7 @@ static int dcping_bind_server(struct dcping_cb *cb)
 	DEBUG_LOG("rdma_bind_addr successful on address: <%s:%d>\n", str, be16toh(cb->port));
 
 	DEBUG_LOG("rdma_listen\n");
-	ret = rdma_listen(cb->cm_id, 3);
+	ret = rdma_listen(cb->cm_id, 10);
 	if (ret) {
 		perror("rdma_listen");
 		return ret;
@@ -659,10 +659,10 @@ static int dcping_bind_server(struct dcping_cb *cb)
 	return 0;
 }
 
-static void free_cb(struct dcping_cb *cb)
+/*static void free_cb(struct dcping_cb *cb)
 {
 	free(cb);
-}
+}*/
 
 static int dcping_client_dc_send_wr(struct dcping_cb *cb, uint64_t wr_id, struct dcping_rdma_info *info);
 static int dcping_client_get_cqe_tiemstmp(struct dcping_cb *cb, uint64_t wr_id, uint64_t *ts_hw_start, uint64_t *ts_hw_end);
@@ -672,27 +672,28 @@ int do_pings(struct pinger *p)
 	int i, ret;
 	int npeers = p->next_peer;
 
-	//printf("pinging %d peers\n", npeers);
+//	printf("pinging %d peers\n", npeers);
 
 	for (i = 0; i < npeers; i++) {
 		/* post ping */
-		ret = dcping_client_dc_send_wr(&p->client, i, &p->remote_buf_info[i]);
+//        printf("posting ping for %d\n", i);
+		ret = dcping_client_dc_send_wr(&p->client[i], i, &p->remote_buf_info[i]);
 		assert(!ret);
 	}
 
 	uint64_t ts_hw_start, ts_hw_end, rtt_nsec, rtt_hw;
 	for (i = 0; i < npeers; i++) {
 		/* complete ping */
-		ret = dcping_client_get_cqe_tiemstmp(&p->client, i, &ts_hw_start, &ts_hw_end);
+		ret = dcping_client_get_cqe_tiemstmp(&p->client[i], i, &ts_hw_start, &ts_hw_end);
 		if (ret) {
 			DEBUG_LOG("cqe processing failed (peer %d)\n", i);
 			continue;
 		}
 
 		rtt_hw = ts_hw_end - ts_hw_start;
-		rtt_nsec = rtt_hw * USEC_PER_SEC / p->client.hw_clocks_kHz;
+		rtt_nsec = rtt_hw * USEC_PER_SEC / p->client[i].hw_clocks_kHz;
 		p->rtts[i] = rtt_nsec;
-		//printf("peer %d rtt: %ld.%3.3ld\n", i, rtt_nsec/1000, rtt_nsec%1000);
+	//	printf("peer %d rtt: %ld.%3.3ld\n", i, rtt_nsec/1000, rtt_nsec%1000);
 	}
 
 	usleep(p->ping_interval_us);
@@ -756,6 +757,7 @@ static int dcping_run_server(struct pinger *p)
 					ret = dcping_setup_qp(cb, req_cm_id);
 					if (ret) {
 						fprintf(stderr, "setup_qp failed: %d\n", ret);
+                    abort();
 						return ret;
 					}
 
@@ -771,6 +773,7 @@ static int dcping_run_server(struct pinger *p)
 
 				struct rdma_conn_param conn_param;
 				dcping_init_conn_param(cb, req_cm_id, &conn_param);
+                DEBUG_LOG("accepting rdma\n");
 				ret = rdma_accept(req_cm_id, &conn_param);
 				if (ret) {
 					perror("rdma_accept");
@@ -805,7 +808,7 @@ err2:
 	dcping_free_buffers(cb);
 err1:
 	dcping_free_qp(cb);
-
+    abort();
 	return ret;
 }
 
@@ -1157,7 +1160,8 @@ int pinger_create(struct pinger_attr *attr, pinger_t *pinger)
 	p->rtts = calloc(attr->npeers, sizeof(pinger_rtt_t));
 	assert(p->rtts);
 
-	p->remote_buf_info = calloc(attr->npeers, sizeof(*(p->remote_buf_info)));
+    printf("allocating for %d peers\n", attr->npeers);
+	p->remote_buf_info = calloc(attr->npeers + 1, sizeof(*(p->remote_buf_info)));
 	assert(p->remote_buf_info);
 
 	p->server.cm_channel = create_first_event_channel();
@@ -1170,6 +1174,8 @@ int pinger_create(struct pinger_attr *attr, pinger_t *pinger)
 		perror("rdma_create_id");
 		return -1;
 	}
+
+    p->client = calloc(attr->npeers, sizeof(struct dcping_cb));
 
 	ret = pthread_create(&p->server_thread,
 			NULL, pinger_server_func, (void *)p);
@@ -1194,12 +1200,12 @@ int pinger_destroy(pinger_t *pinger)
 
 	rdma_destroy_id(p->server.cm_id);
 	rdma_destroy_event_channel(p->server.cm_channel);
-	rdma_destroy_id(p->client.cm_id);
-	rdma_destroy_event_channel(p->client.cm_channel);
+	rdma_destroy_id(p->client[0].cm_id);
+	rdma_destroy_event_channel(p->client[0].cm_channel);
 	free(p->rtts);
 	free(p->remote_buf_info);
-	free_cb(&p->server);
-	free_cb(&p->client);
+	//free_cb(&p->server);
+	//free_cb(&p->client);
 
 	return 0;
 }
@@ -1209,45 +1215,51 @@ int pinger_connect(pinger_t pinger, struct pinger_peer_attr *attr, pinger_pid_t 
 	struct pinger *p = (struct pinger *)pinger;
 	int ret;
 
-	memcpy(&p->client.sin, &attr->sin, sizeof(struct sockaddr_storage));
-	p->client.port = htobe16(attr->port);
+	memcpy(&p->client[p->next_peer].sin, &attr->sin, sizeof(struct sockaddr_storage));
+	p->client[p->next_peer].port = htobe16(attr->port);
 
-	p->client.cm_channel = create_first_event_channel();
-	if (!p->client.cm_channel) {
+	p->client[p->next_peer].cm_channel = create_first_event_channel();
+	if (!p->client[p->next_peer].cm_channel) {
 		return -1;
 	}
 
-	ret = rdma_create_id(p->client.cm_channel, &p->client.cm_id, &p->client, RDMA_PS_TCP);
+    printf("create id\n");
+	ret = rdma_create_id(p->client[p->next_peer].cm_channel, &p->client[p->next_peer].cm_id, &p->client[p->next_peer], RDMA_PS_TCP);
 	if (ret) {
 		perror("rdma_create_id");
 		return -1;
 	}
 
-	ret = dcping_bind_client(p, &p->client);
+    printf("bind client\n");
+	ret = dcping_bind_client(p, &p->client[p->next_peer]);
 	if (ret)
 		return ret;
 
-	ret = dcping_setup_qp(&p->client, NULL);
+    printf("setup qp\n");
+	ret = dcping_setup_qp(&p->client[p->next_peer], NULL);
 	if (ret) {
 		fprintf(stderr, "setup_qp failed: %d\n", ret);
 		return ret;
 	}
 
-	ret = dcping_setup_buffers(&p->client);
+    printf("setup buffers\n");
+	ret = dcping_setup_buffers(&p->client[p->next_peer]);
 	if (ret) {
 		fprintf(stderr, "rping_setup_buffers failed: %d\n", ret);
 		return ret;
 	}
 
-	ret = dcping_connect_client(p, &p->client);
+    printf("connect client\n");
+	ret = dcping_connect_client(p, &p->client[p->next_peer]);
 	if (ret) {
 		fprintf(stderr, "connect error %d\n", ret);
 		return ret;
 	}
 
+    printf("connected\n");
 	*peer = (void *)p->next_peer++;
 
-    printf("DONE CONNECTING\n");
+    printf("DONE CONNECTING, next peer %ld\n", p->next_peer);
 	return 0;
 }
 
