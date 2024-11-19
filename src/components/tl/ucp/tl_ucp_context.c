@@ -294,7 +294,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
             goto err_thread_mode;
         }
     }
-
+    if (self->cfg.rtt) 
     /* setup pinger info here */
     {
         getifaddrs(&addrs);
@@ -307,7 +307,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
             }
             tmp = tmp->ifa_next;
         }
-    }
+    
     tl_debug(self->super.super.lib, "Using IP %s for RTT", inet_ntoa(saddr->sin_addr));
 //    get_addr(inet_ntoa(saddr->sin_addr), (struct sockaddr *) &self->pinger_attr.sin);
     self->pinger_attr.npeers = params->params.oob.n_oob_eps;
@@ -318,7 +318,10 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     pinger_create(&self->pinger_attr, &self->pinger);
     self->pinger_peer = (pinger_pid_t *)calloc(sizeof(pinger_pid_t), params->params.oob.n_oob_eps);
     self->pinger_peer[params->params.oob.oob_ep] = (pinger_pid_t) 1;
-
+} else {
+    self->pinger = NULL;
+    self->pinger_peer = NULL;
+}
     CHECK(UCC_OK != ucc_tl_ucp_eps_ephash_init(
                         params, self, &self->worker.ep_hash, &self->worker.eps),
           "failed to allocate memory for endpoint storage", err_thread_mode,

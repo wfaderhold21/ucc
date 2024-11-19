@@ -246,10 +246,10 @@ static ucs_config_field_t ucc_tl_ucp_context_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_context_config_t, service_throttling_thresh),
      UCC_CONFIG_TYPE_UINT},
 
-    {"IP_ADDR", "127.0.0.1",
-     "IP address to use for RTT utility",
-     ucc_offsetof(ucc_tl_ucp_context_config_t, ip_addr),
-     UCC_CONFIG_TYPE_STRING},
+    {"RTT", "n",
+     "RTT utility for congestion avoidance.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, rtt),
+     UCC_CONFIG_TYPE_BOOL},
 
     {NULL}};
 

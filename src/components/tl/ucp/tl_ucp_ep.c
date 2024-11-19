@@ -56,6 +56,7 @@ ucc_status_t ucc_tl_ucp_connect_team_ep(ucc_tl_ucp_team_t *team,
     struct pinger_peer_attr peer_attr;
     void                 *addr;
     void                 *paddr;
+    ucc_rank_t           grank = UCC_TL_TEAM_RANK(team);
 
     addr = ucc_get_team_ep_addr(UCC_TL_CORE_CTX(team), UCC_TL_CORE_TEAM(team),
                                 core_rank, ucc_tl_ucp.super.super.id);
@@ -64,7 +65,7 @@ ucc_status_t ucc_tl_ucp_connect_team_ep(ucc_tl_ucp_team_t *team,
                               : TL_UCP_EP_ADDR_WORKER(addr);
 
 /* FERROL: setup pinger here */
-    if (ctx->pinger_peer[core_rank] == NULL) {
+    if (ctx->pinger && ctx->pinger_peer[core_rank] == NULL) {
         paddr = (TL_UCP_EP_ADDR_ONESIDED_INFO(paddr, ctx));
         paddr -= sizeof(struct pinger_attr);
         pattr = (struct pinger_attr *)paddr;
@@ -72,7 +73,10 @@ ucc_status_t ucc_tl_ucp_connect_team_ep(ucc_tl_ucp_team_t *team,
         //peer_attr.sin = pattr->sin;
         memcpy(&peer_attr.sin, &pattr->sin, sizeof(struct sockaddr_in));
         peer_attr.port = pattr->port;
+    printf("[%d] connecting to %d\n", grank, core_rank);
         pinger_connect(ctx->pinger, &peer_attr, &ctx->pinger_peer[core_rank]);
+    printf("[%d] connected to %d\n", grank, core_rank);
+        sleep(1);
     }
     return ucc_tl_ucp_connect_ep(ctx, use_service_worker, ep, addr);
 }
