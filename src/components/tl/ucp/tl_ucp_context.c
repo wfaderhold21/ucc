@@ -302,7 +302,8 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
 
         while (tmp) {
             saddr = (struct sockaddr_in *) tmp->ifa_addr;
-            if (strcmp(tmp->ifa_name, "roce0") == 0 && strncmp(inet_ntoa(saddr->sin_addr), "192", 3) == 0) {
+//            printf("net dev %s ip addr %s\n", tmp->ifa_name, inet_ntoa(saddr->sin_addr));
+            if (strcmp(tmp->ifa_name, "enp26s0f0np0") == 0 && strncmp(inet_ntoa(saddr->sin_addr), "172", 3) == 0) {
                 break;
             }
             tmp = tmp->ifa_next;

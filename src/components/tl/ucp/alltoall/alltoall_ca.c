@@ -12,7 +12,7 @@
 #include "tl_ucp_sendrecv.h"
 
 /* update when pinger rtt complete */
-#define MAGIC_NUMBER    32
+#define MAGIC_NUMBER    100
 
 void ucc_tl_ucp_alltoall_onesided_ca_progress(ucc_coll_task_t *ctask);
 
@@ -43,7 +43,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
     for (peer = start; j < gsize; j++ ) {
         if (peer != grank) {
             pinger_query(ctx->pinger, ctx->pinger_peer[peer], &rtt);
-//            printf("[%d] peer %d rtt: %ld\n", grank, peer, rtt);
+        //    tl_debug(UCC_TL_UCP_TEAM_LIB(team), "[%d] peer %d rtt: %ld\n", grank, peer, rtt);
         } else {
             rtt = 0;
         }
@@ -55,6 +55,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
                           out);
         } else {
             revisit[nr_revisit++] = peer;
+            tl_debug(UCC_TL_UCP_TEAM_LIB(team), "[%d]: skipping peer %d rtt %ld\n", grank, peer, rtt);
         }
         peer = (peer + 1) % gsize;
     }
@@ -73,6 +74,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
                           out);
             } else {
                 revisit[nr_revisit++] = peer;
+                tl_debug(UCC_TL_UCP_TEAM_LIB(team), "[%d]: skipping peer %d\n", grank, peer);
             }
         }
     }
