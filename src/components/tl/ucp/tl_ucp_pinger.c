@@ -633,8 +633,10 @@ static int dcping_bind_server(struct dcping_cb *cb)
 		exit(1);
 	}
 	cb->mtu = port_attr.active_mtu;
+
 	if (port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
 		cb->is_global = 1;
+//        cb->sgid_index = 3;
 		cb->sgid_index = my_ibv_find_sgid_type(cb->cm_id->verbs, cb->cm_id->port_num, MY_IBV_GID_TYPE_ROCE_V2, cb->sin.ss_family);
 	}
 
@@ -656,12 +658,12 @@ static int dcping_bind_server(struct dcping_cb *cb)
 
 	return 0;
 }
-/*
+
 static void free_cb(struct dcping_cb *cb)
 {
 	free(cb);
 }
-*/
+
 static int dcping_client_dc_send_wr(struct dcping_cb *cb, uint64_t wr_id, struct dcping_rdma_info *info);
 static int dcping_client_get_cqe_tiemstmp(struct dcping_cb *cb, uint64_t wr_id, uint64_t *ts_hw_start, uint64_t *ts_hw_end);
 
@@ -670,7 +672,7 @@ int do_pings(struct pinger *p)
 	int i, ret;
 	int npeers = p->next_peer;
 
-	printf("pinging %d peers\n", npeers);
+//	printf("pinging %d peers\n", npeers);
 
 	for (i = 0; i < npeers; i++) {
 		/* post ping */
@@ -1079,11 +1081,12 @@ static int dcping_bind_client(struct pinger *p, struct dcping_cb *cb)
 		exit(1);
 	}
 	cb->mtu = port_attr.active_mtu;
+/*
 	if (port_attr.link_layer == IBV_LINK_LAYER_ETHERNET) {
 		cb->is_global = 1;
 		cb->sgid_index = my_ibv_find_sgid_type(cb->cm_id->verbs, cb->cm_id->port_num, MY_IBV_GID_TYPE_ROCE_V2, cb->sin.ss_family);
 	}
-
+*/
 	DEBUG_LOG("rdma_resolve_addr/rdma_resolve_route successful to server: <%s:%d>\n", str, be16toh(rdma_get_src_port(cb->cm_id)));
 
 	cb->pd = ibv_alloc_pd(cb->cm_id->verbs);
@@ -1195,8 +1198,8 @@ int pinger_destroy(pinger_t *pinger)
 	rdma_destroy_event_channel(p->client.cm_channel);
 	free(p->rtts);
 	free(p->remote_buf_info);
-	//free_cb(&p->server);
-	//free_cb(&p->client);
+	free_cb(&p->server);
+	free_cb(&p->client);
 
 	return 0;
 }

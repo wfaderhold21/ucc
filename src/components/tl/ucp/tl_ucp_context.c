@@ -311,7 +311,9 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     tl_debug(self->super.super.lib, "Using IP %s for RTT", inet_ntoa(saddr->sin_addr));
     get_addr(inet_ntoa(saddr->sin_addr), (struct sockaddr *) &self->pinger_attr.sin);
     self->pinger_attr.npeers = params->params.oob.n_oob_eps;
-    self->pinger_attr.port = 13007;
+    memcpy(&self->pinger_attr.sin, saddr, sizeof(struct sockaddr_in));
+//    self->pinger_attr.sin = saddr;
+    self->pinger_attr.port = 13000 + params->params.oob.oob_ep;
 
     pinger_create(&self->pinger_attr, &self->pinger);
     self->pinger_peer = (pinger_pid_t *)calloc(sizeof(pinger_pid_t), params->params.oob.n_oob_eps);

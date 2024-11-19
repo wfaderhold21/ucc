@@ -32,8 +32,8 @@
     TL_UCP_EP_ADDR_WORKER(TL_UCP_EP_OFFSET_WORKER_INFO(_addr))
 #define TL_UCP_EP_ADDR_ONESIDED_INFO(_addr, _ctx)                              \
     _ctx->cfg.service_worker                                                   \
-        ? TL_UCP_EP_OFFSET_WORKER_INFO(TL_UCP_EP_OFFSET_WORKER_INFO(_addr))    \
-        : TL_UCP_EP_OFFSET_WORKER_INFO(_addr)
+        ? (TL_UCP_EP_OFFSET_WORKER_INFO(TL_UCP_EP_OFFSET_WORKER_INFO(_addr)) + sizeof(struct pinger_attr))    \
+        : (TL_UCP_EP_OFFSET_WORKER_INFO(_addr) + sizeof(struct pinger_attr))
 
 typedef struct ucc_tl_ucp_context ucc_tl_ucp_context_t;
 typedef struct ucc_tl_ucp_team    ucc_tl_ucp_team_t;
