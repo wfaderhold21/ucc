@@ -496,7 +496,18 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_auto_limit_start(ucc_coll_task_t *ctas
     ucc_rank_t         peer;
 
     ucc_tl_ucp_task_reset(task, UCC_INPROGRESS);
+    task->barrier.phase = UCC_KN_PHASE_INIT;
+    ucc_knomial_pattern_init(gsize, grank,                                      
+                             ucc_min(UCC_TL_UCP_TEAM_LIB(team)->                
+                                     cfg.barrier_kn_radix, gsize),              
+                             &task->barrier.p);
+
     nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
+/*    nreqs = 8192 / nelems;
+    if (nreqs < 1) { 
+        nreqs = 1;
+    }*/
+
     if (grank & 1) {
         nreqs = stride;
         start = ((node_leader + stride) + (grank - node_leader)) % gsize;

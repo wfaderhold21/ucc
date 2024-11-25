@@ -435,7 +435,7 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void *buffer, void *target,
 
     req_param.op_attr_mask =
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-    req_param.cb.send   = ucc_tl_ucp_get_completion_cb;
+    req_param.cb.send   = ucc_tl_ucp_atomic_completion_cb;
     req_param.user_data = (void *)task;
     if (packed_memh) {
         req_param.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
@@ -443,13 +443,13 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void *buffer, void *target,
     }
     ucp_status = ucp_get_nbx(ep, buffer, msglen, rva, rkey, &req_param);
 
-    task->onesided.get_posted++;
+    task->onesided.atomic_posted++;
     if (UCS_OK != ucp_status) {
         if (UCS_PTR_IS_ERR(ucp_status)) {
             return ucs_status_to_ucc_status(UCS_PTR_STATUS(ucp_status));
         }
     } else {
-        task->onesided.get_completed++;
+        task->onesided.atomic_completed++;
     }
 
     return UCC_OK;
