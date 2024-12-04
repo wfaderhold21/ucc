@@ -47,14 +47,14 @@ ucc_tl_ucp_allreduce_sliding_window_oshmem_alloc_pipe(ucc_base_team_t   *team,
     if (num_get_bufs <= 0) {
         num_get_bufs = team_size;
     }
-
+/*
     if (nelems >= 131072) { // 1 / 4 cache size
         tl_debug(UCC_TASK_LIB(task), "resetting buffer size to 1/4 cache size");
         buf_size = 131072;
     } else {
         buf_size = nelems;
     }
-
+*/
     ucc_assert(num_get_bufs > 0);
     ucc_assert(put_window_size > 0);
 
@@ -307,7 +307,7 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
     uint32_t           host_team_size = UCC_TL_TEAM_SIZE(tl_team);//size;
     ucc_tl_ucp_allreduce_sw_pipeline_t *pipe =
         task->allreduce_sliding_window.pipe;
-    ucc_tl_ucp_context_t          *tl_ctx    = UCC_TL_UCP_TEAM_CTX(tl_team);
+    //ucc_tl_ucp_context_t          *tl_ctx    = UCC_TL_UCP_TEAM_CTX(tl_team);
     ucc_tl_ucp_allreduce_sw_buf_t *accbuf    = &pipe->accbuf;
     int                            i         = 0;
     int              put_window_size =
@@ -339,7 +339,7 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
     }
     if (pipe->count_serviced < pipe->my_count) {
         //printf("pipe->avail_buffs: %ld, pipe->done_get: %d, pipe->count_received: %ld\n", pipe->avail_buffs, pipe->done_get, pipe->count_received);
-        if ((pipe->count_received < pipe->my_count) &&
+        while ((pipe->count_received < pipe->my_count) &&
             (pipe->done_get < host_team_size) && (pipe->avail_buffs > 0) &&
             (accbuf->state != REDUCED && accbuf->state != SENDING)) {
             remaining_elems = pipe->my_count - pipe->count_received;
@@ -379,7 +379,6 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
             //request = accbuf->ucp_req;
             for (probes = 0; probes < 5; probes++){ 
                 if (task->onesided.get_posted == task->onesided.get_completed) {
-                    //printf("Move to REDUCE\n");
                     accbuf->state   = REDUCING;
                     accbuf->ucp_req = NULL;
                     break;
@@ -387,26 +386,22 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
                     ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
                 }
             }
+            if (probes == 5) {
+                return;
+            }
         }
 
         red_idx = pipe->red_idx % pipe->num_buffers;
         redbuf  = &pipe->getbuf[red_idx];
         if (accbuf->state == REDUCING && redbuf->state == RECVING) {
-//            int probes = 0;
-//            for (probes = 0; probes < 5; probes++) {
                 if (task->onesided.get_posted == task->onesided.get_completed) {
                     redbuf->state   = REDUCING;
-                    redbuf->ucp_req = NULL;
 
                     ucc_tl_ucp_allreduce_sliding_window_oshmem_reduction(coll_task, accbuf,
                                                                   redbuf);
 
                     ucc_tl_ucp_allreduce_sliding_window_oshmem_test_reduction(task);
-/*
-                    if (memcmp(task->allreduce_sliding_window.reduce_task2, memtest, sizeof(void *) * UCC_TL_UCP_MAX_THREADS) != 0) {
-                        return;
-                    }
-*/
+
                     if (task->allreduce_sliding_window.reduce_task != NULL) {
                         return;
                     }
@@ -420,11 +415,9 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
                         accbuf->state = REDUCED;
                         pipe->count_reduced += accbuf->count;
                     }
-//                    break;
                 } else {
                     ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
                 }
-            //}
         }
 
         if ((pipe->count_serviced < pipe->count_reduced) &&
@@ -455,18 +448,25 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
                 pipe->dst_rank = (dst_rank + 1) % host_team_size;
             }
 //    if (pipe->count_serviced < pipe->count_reduced) {
-        for (int z = 0; z < 5; z++) {
-            if (task->onesided.put_posted == task->onesided.put_completed) {
-                pipe->done_put += pipe->posted_put - pipe->done_put;
+        while (task->onesided.put_posted > task->onesided.put_completed) {
+            ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
+        }
+        pipe->done_put += pipe->posted_put - pipe->done_put;
+#if 0
+            for (int z = 0; z < 5; z++) {
+                if (task->onesided.put_posted == task->onesided.put_completed) {
+                    pipe->done_put += pipe->posted_put - pipe->done_put;
 /*                pipe->count_serviced += accbuf->count;
     
                 ucc_tl_ucp_allreduce_sliding_window_oshmem_reset_buf(accbuf);
                 pipe->done_get = 0;
                 pipe->done_red = pipe->done_put = pipe->posted_put = 0;*/
-                break;
+                    break;
+                }
+                ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
             }
-            ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
         }
+#endif
 //    }
 /*
             while (task->onesided.put_posted > task->onesided.put_completed) {
@@ -498,11 +498,11 @@ void ucc_tl_ucp_allreduce_sliding_window_oshmem_rdma_progress(ucc_coll_task_t *c
             }
         }
 #endif
-        ucp_worker_progress(tl_ctx->worker.ucp_worker);
+    //    ucp_worker_progress(tl_ctx->worker.ucp_worker);
     }
 
     if (pipe->count_serviced == pipe->my_count) {
-#if 0
+#if 0 
         int pcount = 0;
         if (pSync[1] == 0) {
             for (int z = 0; z < host_team_size; z++) {
