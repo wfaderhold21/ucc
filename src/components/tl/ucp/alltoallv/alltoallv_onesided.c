@@ -13,7 +13,7 @@
 
 
 void ucc_tl_ucp_barrier_knomial_progress(ucc_coll_task_t *task);
-#if 0
+#if 1
 ucc_status_t ucc_tl_ucp_alltoallv_onesided_start(ucc_coll_task_t *ctask)
 {
     ucc_tl_ucp_task_t *task     = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
@@ -38,6 +38,11 @@ ucc_status_t ucc_tl_ucp_alltoallv_onesided_start(ucc_coll_task_t *ctask)
         task->super.status = status;
         goto out;
     }
+    task->barrier.phase = UCC_KN_PHASE_INIT;
+    ucc_knomial_pattern_init(gsize, grank,
+                             ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
+                                     cfg.barrier_kn_radix, gsize),
+                             &task->barrier.p);
 
     /* perform a put to each member peer using the peer's index in the
      * destination displacement. */
@@ -77,10 +82,17 @@ void ucc_tl_ucp_alltoallv_onesided_progress(ucc_coll_task_t *ctask)
     }
 
     pSync[0]           = 0;*/
-
-            while (task->onesided.put_posted > task->onesided.put_completed) {
-                ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->worker.ucp_worker);
-            }
+    if (task->barrier.phase == UCC_KN_PHASE_INIT) { 
+        if (task->onesided.put_posted > task->onesided.put_completed) {
+            ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->worker.ucp_worker);
+            return;
+        }
+    }
+    ucc_tl_ucp_barrier_knomial_progress(&task->super);
+    if (task->super.status == UCC_INPROGRESS) {
+        ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->worker.ucp_worker);
+        return;
+    }
 
     task->super.status = UCC_OK;
     ucc_tl_ucp_coll_dynamic_segment_finalize(task);
@@ -143,7 +155,7 @@ static ucc_rank_t get_num_posts(const ucc_tl_ucp_team_t *team)
     return tsize;
 }
 #endif
-#if 1
+#if 0
 ucc_status_t ucc_tl_ucp_alltoallv_onesided_start(ucc_coll_task_t *ctask)
 {
     ucc_tl_ucp_task_t *task     = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
@@ -162,6 +174,7 @@ ucc_status_t ucc_tl_ucp_alltoallv_onesided_start(ucc_coll_task_t *ctask)
     size_t             ub_rate = UCC_TL_UCP_TEAM_LIB(team)->cfg.alltoallv_onesided_rate;/* assuming 100 gbps */
     int                nreqs = 1;
     size_t             count = 1;
+    int cs_ratio = 1;
 
     int stride = 128;
     int start = (grank + 1) % gsize;
@@ -175,10 +188,14 @@ ucc_status_t ucc_tl_ucp_alltoallv_onesided_start(ucc_coll_task_t *ctask)
     for (int i = 0; i < gsize; i++) {
         count += ucc_coll_args_get_count(&TASK_ARGS(task), TASK_ARGS(task).src.info_v.counts, i);
     }
-        nreqs = task->alltoallv_auto.token_rate = (task->alltoallv_auto.rate * ub_rate) / (count / stride);
-        if (nreqs < 1) {
-            nreqs = 1;
-        }
+    cs_ratio = count / stride;
+    if (cs_ratio < 1) {
+        cs_ratio = 1;
+    }
+    nreqs = task->alltoallv_auto.token_rate = (task->alltoallv_auto.rate * ub_rate) / (cs_ratio);
+    if (nreqs < 1) {
+        nreqs = 1;
+    }
     
     /* perform a put to each member peer using the peer's index in the
      * destination displacement. */
