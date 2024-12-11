@@ -50,7 +50,7 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
 
     {"ALLTOALLV_ONESIDED_RATE", "1",
     "Data rate of NIC",
-    ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoallv_onesided_rate),
+    ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoallv_onesided_ca_rate),
     UCC_CONFIG_TYPE_ULUNITS},
 
     {"ALLTOALL_ONESIDED_CA_RATE", "1",
@@ -61,6 +61,11 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
     {"ALLTOALL_ONESIDED_CA_PPN", "1",
     "Number of processes per node",
     ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_ca_ppn),
+    UCC_CONFIG_TYPE_ULUNITS},
+
+    {"ALLTOALLV_ONESIDED_CA_PPN", "1",
+    "Number of processes per node",
+    ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoallv_onesided_ca_ppn),
     UCC_CONFIG_TYPE_ULUNITS},
 
 

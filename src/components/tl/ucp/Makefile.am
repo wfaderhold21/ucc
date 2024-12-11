@@ -37,7 +37,8 @@ alltoallv =                        \
 	alltoallv/alltoallv.c          \
 	alltoallv/alltoallv_pairwise.c \
 	alltoallv/alltoallv_hybrid.c   \
-	alltoallv/alltoallv_onesided.c
+	alltoallv/alltoallv_onesided.c \
+	alltoallv/alltoallv_ca.c
 
 allreduce =                           \
 	allreduce/allreduce.h                      \

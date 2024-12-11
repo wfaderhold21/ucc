@@ -14,6 +14,7 @@ enum {
     UCC_TL_UCP_ALLTOALLV_ALG_PAIRWISE,
     UCC_TL_UCP_ALLTOALLV_ALG_HYBRID,
     UCC_TL_UCP_ALLTOALLV_ALG_ONESIDED,
+    UCC_TL_UCP_ALLTOALLV_ALG_ONESIDED_CA,
     UCC_TL_UCP_ALLTOALLV_ALG_LAST
 };
 
@@ -36,6 +37,11 @@ ucc_status_t ucc_tl_ucp_alltoallv_hybrid_init(ucc_base_coll_args_t *coll_args,
 ucc_status_t ucc_tl_ucp_alltoallv_onesided_init(ucc_base_coll_args_t *coll_args,
                                                 ucc_base_team_t      *team,
                                                 ucc_coll_task_t     **task_h);
+
+ucc_status_t ucc_tl_ucp_alltoallv_onesided_ca_init(ucc_base_coll_args_t *coll_args,
+                                                   ucc_base_team_t      *team,
+                                                   ucc_coll_task_t     **task_h);
+
 
 ucc_status_t ucc_tl_ucp_alltoallv_pairwise_init_common(ucc_tl_ucp_task_t *task);
 
