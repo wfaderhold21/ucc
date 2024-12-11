@@ -23,6 +23,10 @@ ucc_base_coll_alg_info_t
             {.id   = UCC_TL_UCP_ALLTOALLV_ALG_ONESIDED,
              .name = "onesided",
              .desc = "O(N) onesided alltoallv"},
+        [UCC_TL_UCP_ALLTOALLV_ALG_ONESIDED_CA] =
+            {.id   = UCC_TL_UCP_ALLTOALLV_ALG_ONESIDED_CA,
+             .name = "onesided_ca",
+             .desc = "O(N) onesided alltoallv with congestion avoidance"},
         [UCC_TL_UCP_ALLTOALLV_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 

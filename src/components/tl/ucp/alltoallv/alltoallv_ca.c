@@ -13,7 +13,8 @@
 
 
 void ucc_tl_ucp_barrier_knomial_progress(ucc_coll_task_t *task);
-ucc_status_t ucc_tl_ucp_alltoallv_onesided_start(ucc_coll_task_t *ctask)
+
+ucc_status_t ucc_tl_ucp_alltoallv_onesided_ca_start(ucc_coll_task_t *ctask)
 {
     ucc_tl_ucp_task_t *task     = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
     ucc_tl_ucp_team_t *team     = TASK_TEAM(task);
@@ -21,61 +22,82 @@ ucc_status_t ucc_tl_ucp_alltoallv_onesided_start(ucc_coll_task_t *ctask)
     ptrdiff_t          dest     = (ptrdiff_t)TASK_ARGS(task).dst.info_v.buffer;
     ucc_rank_t         grank    = UCC_TL_TEAM_RANK(team);
     ucc_rank_t         gsize    = UCC_TL_TEAM_SIZE(team);
-    //long              *pSync    = TASK_ARGS(task).global_work_buffer;
     ucc_aint_t        *s_disp   = TASK_ARGS(task).src.info_v.displacements;
     ucc_aint_t        *d_disp   = TASK_ARGS(task).dst.info_v.displacements;
     size_t             sdt_size = ucc_dt_size(TASK_ARGS(task).src.info_v.datatype);
     size_t             rdt_size = ucc_dt_size(TASK_ARGS(task).dst.info_v.datatype);
     ucc_rank_t         peer;
     size_t             sd_disp, dd_disp, data_size;
+    size_t             ub_rate = UCC_TL_UCP_TEAM_LIB(team)->cfg.alltoallv_onesided_ca_rate;/* assuming 100 gbps */
+    int                nreqs = 1;
+    size_t             count = 1;
+    int cs_ratio = 1;
+    int stride = UCC_TL_UCP_TEAM_LIB(team)->cfg.alltoallv_onesided_ca_ppn;
+    int start = (grank + 1) % gsize;
 
     ucc_tl_ucp_task_reset(task, UCC_INPROGRESS);
-    task->barrier.phase = UCC_KN_PHASE_INIT;
-    ucc_knomial_pattern_init(gsize, grank,
-                             ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
-                                     cfg.barrier_kn_radix, gsize),
-                             &task->barrier.p);
-
+    // calculate tokens
+    task->alltoallv_auto.rate = 1;
+    task->alltoallv_auto.token_rate = gsize;
+    data_size = 0;
+    for (int i = 0; i < gsize; i++) {
+        count += ucc_coll_args_get_count(&TASK_ARGS(task), TASK_ARGS(task).src.info_v.counts, i);
+    }
+    cs_ratio = count / stride;
+    if (cs_ratio < 1) {
+        cs_ratio = 1;
+    }
+    nreqs = task->alltoallv_auto.token_rate = (task->alltoallv_auto.rate * ub_rate) / (cs_ratio);
+    if (nreqs < 1) {
+        nreqs = 1;
+    }
+    
     /* perform a put to each member peer using the peer's index in the
      * destination displacement. */
-    for (peer = (grank + 1) % gsize; task->onesided.put_posted < gsize;
+    for (peer = start; task->onesided.get_posted < gsize; //get_num_posts(team);
          peer = (peer + 1) % gsize) {
         sd_disp =
             ucc_coll_args_get_displacement(&TASK_ARGS(task), s_disp, peer) *
             sdt_size;
         dd_disp =
-            ucc_coll_args_get_displacement(&TASK_ARGS(task), d_disp, peer) *
+            ucc_coll_args_get_displacement(&TASK_ARGS(task), d_disp, grank) *
             rdt_size;
         data_size =
             ucc_coll_args_get_count(&TASK_ARGS(task),
                                     TASK_ARGS(task).src.info_v.counts, peer) *
             sdt_size;
 
-        UCPCHECK_GOTO(ucc_tl_ucp_put_nb(PTR_OFFSET(src, sd_disp),
-                                        PTR_OFFSET(dest, dd_disp),
+        UCPCHECK_GOTO(ucc_tl_ucp_get_nb(PTR_OFFSET(dest, dd_disp),
+                                        PTR_OFFSET(src, sd_disp),
                                         data_size, peer, team, task),
                       task, out);
-    //    UCPCHECK_GOTO(ucc_tl_ucp_atomic_inc(pSync, peer, team), task, out);
+        if ((task->onesided.get_posted - task->onesided.get_completed) >= nreqs) {
+            // move this logic around, this is breaking api
+            while (task->onesided.get_posted > task->onesided.get_completed) {
+                ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->worker.ucp_worker);
+            }
+        }
     }
+    task->barrier.phase = UCC_KN_PHASE_INIT;
+    ucc_knomial_pattern_init(gsize, grank,
+                             ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
+                                     cfg.barrier_kn_radix, gsize),
+                             &task->barrier.p);
+
+
     return ucc_progress_queue_enqueue(UCC_TL_CORE_CTX(team)->pq, &task->super);
 out:
     return task->super.status;
 }
 
-void ucc_tl_ucp_alltoallv_onesided_progress(ucc_coll_task_t *ctask)
+void ucc_tl_ucp_alltoallv_onesided_ca_progress(ucc_coll_task_t *ctask)
 {
     ucc_tl_ucp_task_t *task  = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
-    ucc_tl_ucp_team_t *team  = TASK_TEAM(task);/*
-    ucc_rank_t         gsize = UCC_TL_TEAM_SIZE(team);
-    long              *pSync = TASK_ARGS(task).global_work_buffer;
+    ucc_tl_ucp_team_t *team  = TASK_TEAM(task);
 
-    if (ucc_tl_ucp_test_onesided(task, gsize) == UCC_INPROGRESS) {
-        return;
-    }
-
-    pSync[0]           = 0;*/
+    // move this logic around, this is breaking api
     if (task->barrier.phase == UCC_KN_PHASE_INIT) { 
-        if (task->onesided.put_posted > task->onesided.put_completed) {
+        if (task->onesided.get_posted > task->onesided.get_completed) {
             ucp_worker_progress(UCC_TL_UCP_TEAM_CTX(team)->worker.ucp_worker);
             return;
         }
@@ -88,8 +110,7 @@ void ucc_tl_ucp_alltoallv_onesided_progress(ucc_coll_task_t *ctask)
 
     task->super.status = UCC_OK;
 }
-
-ucc_status_t ucc_tl_ucp_alltoallv_onesided_init(ucc_base_coll_args_t *coll_args,
+ucc_status_t ucc_tl_ucp_alltoallv_onesided_ca_init(ucc_base_coll_args_t *coll_args,
                                                 ucc_base_team_t      *team,
                                                 ucc_coll_task_t     **task_h)
 {
@@ -115,8 +136,8 @@ ucc_status_t ucc_tl_ucp_alltoallv_onesided_init(ucc_base_coll_args_t *coll_args,
 
     task                 = ucc_tl_ucp_init_task(coll_args, team);
     *task_h              = &task->super;
-    task->super.post     = ucc_tl_ucp_alltoallv_onesided_start;
-    task->super.progress = ucc_tl_ucp_alltoallv_onesided_progress;
+    task->super.post     = ucc_tl_ucp_alltoallv_onesided_ca_start;
+    task->super.progress = ucc_tl_ucp_alltoallv_onesided_ca_progress;
     status               = UCC_OK;
 out:
     return status;
