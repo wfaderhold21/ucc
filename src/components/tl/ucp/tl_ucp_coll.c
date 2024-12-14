@@ -195,7 +195,7 @@ ucc_status_t ucc_tl_ucp_memmap_segment(ucc_tl_ucp_task_t *task,
     ucs_status_t          ucs_status;
     ucp_mem_map_params_t  mmap_params;
     ucp_mem_h             mh;
-
+    
     /* map the memory */
     if (map->resource != NULL) {
         mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_EXPORTED_MEMH_BUFFER;
@@ -241,10 +241,10 @@ ucc_status_t ucc_tl_ucp_coll_dynamic_segment_init(ucc_coll_args_t   *coll_args,
     ucc_tl_ucp_team_t    *tl_team    = UCC_TL_UCP_TASK_TEAM(task);
     ucc_tl_ucp_context_t *ctx        = UCC_TL_UCP_TEAM_CTX(tl_team);
     int                   i          = 0;
-    uint64_t              need_map   = 0x7;
+    uint64_t              need_map   = 0x3;
     ucc_mem_map_t        *maps       = coll_args->mem_map.segments;
     ucc_mem_map_t        *seg_maps   = NULL;
-    size_t                n_segments = 3;
+    size_t                n_segments = 2;
     ucc_status_t          status;
 
 
@@ -265,12 +265,12 @@ ucc_status_t ucc_tl_ucp_coll_dynamic_segment_init(ucc_coll_args_t   *coll_args,
             --n_segments;
         }
 
-        if ((uint64_t)coll_args->global_work_buffer >= base &&
+/*        if ((uint64_t)coll_args->global_work_buffer >= base &&
             (uint64_t)coll_args->global_work_buffer < end) {
             // found it
             need_map ^= 4;
             --n_segments;
-        }
+        }*/
 
         if (n_segments == 0) {
             break;
@@ -298,11 +298,12 @@ ucc_status_t ucc_tl_ucp_coll_dynamic_segment_init(ucc_coll_args_t   *coll_args,
                           ucc_dt_size(coll_args->dst.info.datatype);
             seg_maps[index++].resource = NULL;
         }
+/*
         if (need_map & 0x4) {
             seg_maps[index].address = coll_args->global_work_buffer;
             seg_maps[index].len = (ONESIDED_SYNC_SIZE + ONESIDED_REDUCE_SIZE) * sizeof(long);
             seg_maps[index++].resource = NULL;
-        }
+        }*/
     }
 
     if (n_segments > 0) {

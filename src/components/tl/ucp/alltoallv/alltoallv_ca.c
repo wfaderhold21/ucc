@@ -26,6 +26,7 @@ ucc_status_t ucc_tl_ucp_alltoallv_onesided_ca_start(ucc_coll_task_t *ctask)
     ucc_aint_t        *d_disp   = TASK_ARGS(task).dst.info_v.displacements;
     size_t             sdt_size = ucc_dt_size(TASK_ARGS(task).src.info_v.datatype);
     size_t             rdt_size = ucc_dt_size(TASK_ARGS(task).dst.info_v.datatype);
+    ucc_memory_type_t  mtype    = TASK_ARGS(task).src.info_v.mem_type;
     ucc_rank_t         peer;
     size_t             sd_disp, dd_disp, data_size;
     size_t             ub_rate = UCC_TL_UCP_TEAM_LIB(team)->cfg.alltoallv_onesided_ca_rate;/* assuming 100 gbps */
@@ -69,7 +70,7 @@ ucc_status_t ucc_tl_ucp_alltoallv_onesided_ca_start(ucc_coll_task_t *ctask)
 
         UCPCHECK_GOTO(ucc_tl_ucp_get_nb(PTR_OFFSET(dest, dd_disp),
                                         PTR_OFFSET(src, sd_disp),
-                                        data_size, peer, team, task),
+                                        data_size, peer, mtype, team, task),
                       task, out);
         if ((task->onesided.get_posted - task->onesided.get_completed) >= nreqs) {
             // move this logic around, this is breaking api

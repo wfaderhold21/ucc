@@ -365,8 +365,31 @@ ucc_status_t ucc_tl_ucp_rinfo_destroy(ucc_tl_ucp_context_t *ctx)
                 ucp_mem_unmap(ctx->worker.ucp_context,
                               ctx->dynamic_remote_info[i].mem_h);
             }
+            if (ctx->dynamic_remote_info[i].packed_key) {
+                ucp_rkey_buffer_release(ctx->dynamic_remote_info[i].packed_key);
+            }
+            if (ctx->dynamic_remote_info[i].packed_memh) {
+                ucp_rkey_buffer_release(
+                    ctx->dynamic_remote_info[i].packed_memh);
+            }
+        }
+        /* destroy rkeys */
+        for (i = 0; i < size; i++) {
+            for (j = 0; j < ctx->n_dynrinfo_segs; j++) {
+                if (UCC_TL_UCP_DYN_REMOTE_RKEY(ctx, i, j)) {
+                    ucp_rkey_destroy(UCC_TL_UCP_DYN_REMOTE_RKEY(ctx, i, j));
+                }
+            }
         }
         ucc_free(ctx->dynamic_remote_info);
+        ucc_free(ctx->dyn_rkeys);
+        ucc_free(ctx->dyn_seg_buf);
+
+        ctx->dynamic_remote_info = NULL;
+        ctx->dyn_rkeys           = NULL;
+        ctx->dyn_seg_buf         = NULL;
+        ctx->dyn_seg_size        = 0;
+        ctx->n_dynrinfo_segs     = 0;
     }
     ucc_free(ctx->remote_info);
     ucc_free(ctx->rkeys);
@@ -399,7 +422,7 @@ static inline void ucc_tl_ucp_worker_cleanup(ucc_tl_ucp_worker_t worker)
 UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
 {
     tl_debug(self->super.super.lib, "finalizing tl context: %p", self);
-    if (self->remote_info) {
+    if (self->remote_info || self->dynamic_remote_info) {
         ucc_tl_ucp_rinfo_destroy(self);
     }
     ucc_context_progress_deregister(

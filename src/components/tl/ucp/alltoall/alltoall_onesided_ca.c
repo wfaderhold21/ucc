@@ -17,10 +17,12 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
 {
     ucc_tl_ucp_task_t *task     = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
     ucc_tl_ucp_team_t *team     = TASK_TEAM(task);
-    ptrdiff_t          src      = (ptrdiff_t)TASK_ARGS(task).src.info_v.buffer;
-    ptrdiff_t          dest     = (ptrdiff_t)TASK_ARGS(task).dst.info_v.buffer;
+    ucc_tl_ucp_context_t *ctx     = UCC_TL_UCP_TEAM_CTX(team);
+    ptrdiff_t          src      = (ptrdiff_t)TASK_ARGS(task).src.info.buffer;
+    ptrdiff_t          dest     = (ptrdiff_t)TASK_ARGS(task).dst.info.buffer;
     ucc_rank_t         grank    = UCC_TL_TEAM_RANK(team);
     ucc_rank_t         gsize    = UCC_TL_TEAM_SIZE(team);
+    ucc_memory_type_t  smem     = TASK_ARGS(task).src.info.mem_type;
     //long              *pSync    = TASK_ARGS(task).global_work_buffer;
     ucc_rank_t         peer;
     size_t             ub_rate = UCC_TL_UCP_TEAM_LIB(team)->cfg.alltoall_onesided_ca_rate;/* assuming 100 gbps */
@@ -28,13 +30,51 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
     int                nreqs = 1;
     size_t             count = 1;
     int                cs_ratio = 1;
+    ucc_status_t       status;
 
     int start = (grank + 1) % gsize;
-
+    count = TASK_ARGS(task).src.info.count / gsize;
     ucc_tl_ucp_task_reset(task, UCC_INPROGRESS);
+    if (ctx->n_dynrinfo_segs > 0) {
+        int i = 0;
+        for (; i < ctx->n_dynrinfo_segs; i++) {
+            if (src == (ptrdiff_t)ctx->dynamic_remote_info[i].va_base && ((TASK_ARGS(task).src.info.count) * ucc_dt_size(TASK_ARGS(task).src.info.datatype)) == ctx->dynamic_remote_info[i].len) {
+                break;
+            }
+        }
+        if (i >= ctx->n_dynrinfo_segs) {
+            //unmap old
+            ucc_tl_ucp_coll_dynamic_segment_finalize(task);
+            // map new
+            status = ucc_tl_ucp_coll_dynamic_segment_init(&TASK_ARGS(task), task);
+            if (UCC_OK != status) {
+                tl_error(UCC_TL_TEAM_LIB(team),
+                         "failed to initialize dynamic segments");
+            }
+
+            status = ucc_tl_ucp_coll_dynamic_segment_exchange(task);
+            if (UCC_OK != status) {
+                task->super.status = status;
+                goto out;
+            }
+        }
+    } else {
+        status = ucc_tl_ucp_coll_dynamic_segment_init(&TASK_ARGS(task), task);
+        if (UCC_OK != status) {
+            tl_error(UCC_TL_TEAM_LIB(team),
+                     "failed to initialize dynamic segments");
+        }
+
+        // we were out
+        status = ucc_tl_ucp_coll_dynamic_segment_exchange(task);
+        if (UCC_OK != status) {
+            task->super.status = status;
+            goto out;
+        }
+    }
+
     task->alltoallv_auto.rate = 1;
     task->alltoallv_auto.token_rate = gsize;
-    count = TASK_ARGS(task).src.info.count / gsize;
     cs_ratio = count / ppn;
     if (cs_ratio < 1) {
         cs_ratio = 1;
@@ -43,8 +83,9 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
     if (nreqs < 1) {
         nreqs = 1;
     }
-    
     count = count * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
+
+   
     /* perform a put to each member peer using the peer's index in the
      * destination displacement. */
     for (peer = start; task->onesided.get_posted < gsize; //get_num_posts(team);
@@ -52,7 +93,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
 
         UCPCHECK_GOTO(ucc_tl_ucp_get_nb(PTR_OFFSET(dest, grank * count),
                                         PTR_OFFSET(src, peer * count),
-                                        count, peer, team, task),
+                                        count, peer, smem, team, task),
                       task, out);
         if ((task->onesided.get_posted - task->onesided.get_completed) >= nreqs) {
             // move this logic around, this is breaking api
@@ -91,6 +132,7 @@ void ucc_tl_ucp_alltoall_onesided_ca_progress(ucc_coll_task_t *ctask)
     }
 
     task->super.status = UCC_OK;
+    //ucc_tl_ucp_coll_dynamic_segment_finalize(task);
 }
 
 ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_init(ucc_base_coll_args_t *coll_args,
@@ -116,6 +158,8 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_init(ucc_base_coll_args_t *coll_arg
     task->super.post     = ucc_tl_ucp_alltoall_onesided_ca_start;
     task->super.progress = ucc_tl_ucp_alltoall_onesided_ca_progress;
     status               = UCC_OK;
+
+
 out:
     return status;
 }
