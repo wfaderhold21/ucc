@@ -196,18 +196,21 @@ ucc_status_t ucc_tl_ucp_memmap_segment(ucc_tl_ucp_task_t *task,
     ucp_mem_map_params_t  mmap_params;
     ucp_mem_h             mh;
     
+//    printf("mmap params address %p length %lu\n", map->address, map->len);
     /* map the memory */
+/*
     if (map->resource != NULL) {
+        printf("i'm wrongly taking this path\n");
         mmap_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_EXPORTED_MEMH_BUFFER;
         mmap_params.exported_memh_buffer               = map->resource;
         tl_ctx->dynamic_remote_info[segid].packed_memh = map->resource;
-    } else {
+    } else {*/
         mmap_params.field_mask =
             UCP_MEM_MAP_PARAM_FIELD_ADDRESS | UCP_MEM_MAP_PARAM_FIELD_LENGTH;
         mmap_params.address                            = map->address;
         mmap_params.length                             = map->len;
         tl_ctx->dynamic_remote_info[segid].packed_memh = NULL;
-    }
+//    }
     /* map exported memory handle */
     ucs_status = ucp_mem_map(tl_ctx->worker.ucp_context, &mmap_params, &mh);
     if (ucs_status == UCS_ERR_UNREACHABLE) {
@@ -242,7 +245,7 @@ ucc_status_t ucc_tl_ucp_coll_dynamic_segment_init(ucc_coll_args_t   *coll_args,
     ucc_tl_ucp_context_t *ctx        = UCC_TL_UCP_TEAM_CTX(tl_team);
     int                   i          = 0;
     uint64_t              need_map   = 0x3;
-    ucc_mem_map_t        *maps       = coll_args->mem_map.segments;
+    //ucc_mem_map_t        *maps       = coll_args->mem_map.segments;
     ucc_mem_map_t        *seg_maps   = NULL;
     size_t                n_segments = 2;
     ucc_status_t          status;
@@ -298,6 +301,7 @@ ucc_status_t ucc_tl_ucp_coll_dynamic_segment_init(ucc_coll_args_t   *coll_args,
                           ucc_dt_size(coll_args->dst.info.datatype);
             seg_maps[index++].resource = NULL;
         }
+    //    printf("src %p dst %p src len %lu dst len %lu\n", seg_maps[0].address, seg_maps[1].address, seg_maps[0].len, seg_maps[1].len);
 /*
         if (need_map & 0x4) {
             seg_maps[index].address = coll_args->global_work_buffer;
@@ -323,14 +327,14 @@ ucc_status_t ucc_tl_ucp_coll_dynamic_segment_init(ucc_coll_args_t   *coll_args,
             }
             ++ctx->n_dynrinfo_segs;
         }
-        for (i = 0; i < coll_args->mem_map.n_segments; i++) {
+/*        for (i = 0; i < coll_args->mem_map.n_segments; i++) {
             status = ucc_tl_ucp_memmap_segment(task, &maps[i], i + n_segments);
             if (status != UCC_OK) {
                 tl_error(UCC_TASK_LIB(task), "failed to memory map a segment");
                 goto failed_memory_map;
             }
             ++ctx->n_dynrinfo_segs;
-        }
+        }*/
         if (n_segments) {
             free(seg_maps);
         }
