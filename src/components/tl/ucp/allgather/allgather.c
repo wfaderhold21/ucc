@@ -31,6 +31,10 @@ ucc_base_coll_alg_info_t
             {.id   = UCC_TL_UCP_ALLGATHER_ALG_SPARBIT,
              .name = "sparbit",
              .desc = "O(log(N)) SPARBIT algorithm"},
+        [UCC_TL_UCP_ALLGATHER_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_ALLGATHER_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "O(N) onesided algorithm"},
         [UCC_TL_UCP_ALLGATHER_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 

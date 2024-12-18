@@ -251,6 +251,7 @@ ucc_status_t ucc_tl_ucp_coll_dynamic_segment_init(ucc_coll_args_t   *coll_args,
     ucc_status_t          status;
 
 
+    //printf("init %p\n", coll_args->src.info.buffer);
     /* check if src, dst, global work in ctx mapped segments */
     for (i = 0; i < ctx->n_rinfo_segs && n_segments > 0; i++) {
         uint64_t base = (uint64_t)ctx->remote_info[i].va_base;
@@ -292,13 +293,13 @@ ucc_status_t ucc_tl_ucp_coll_dynamic_segment_init(ucc_coll_args_t   *coll_args,
         if (need_map & 0x1) {
             seg_maps[index].address = coll_args->src.info.buffer;
             seg_maps[index].len = (coll_args->src.info.count) *
-                          ucc_dt_size(coll_args->src.info.datatype);
+                              ucc_dt_size(coll_args->src.info.datatype);
             seg_maps[index++].resource = NULL;
         }
         if (need_map & 0x2) {
             seg_maps[index].address = coll_args->dst.info.buffer;
             seg_maps[index].len = (coll_args->dst.info.count) *
-                          ucc_dt_size(coll_args->dst.info.datatype);
+                              ucc_dt_size(coll_args->dst.info.datatype);
             seg_maps[index++].resource = NULL;
         }
     //    printf("src %p dst %p src len %lu dst len %lu\n", seg_maps[0].address, seg_maps[1].address, seg_maps[0].len, seg_maps[1].len);
@@ -633,6 +634,9 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
             break;
         case UCC_TL_UCP_ALLGATHER_ALG_SPARBIT:
             *init = ucc_tl_ucp_allgather_sparbit_init;
+            break;
+        case UCC_TL_UCP_ALLGATHER_ALG_ONESIDED:
+            *init = ucc_tl_ucp_allgather_onesided_init;
             break;
         default:
             status = UCC_ERR_INVALID_PARAM;
