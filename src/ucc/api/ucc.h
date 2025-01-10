@@ -1895,6 +1895,7 @@ typedef struct ucc_coll_args {
         int64_t  stride;
         uint64_t size;
     } active_set;
+    ucc_mem_map_params_t            map; /* for syncing with dpu version */
 } ucc_coll_args_t;
 
 /**
