@@ -11,8 +11,6 @@
 #include "utils/ucc_math.h"
 #include "tl_ucp_sendrecv.h"
 
-void ucc_tl_ucp_barrier_knomial_progress(ucc_coll_task_t *task);
-
 ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_sched_start(ucc_coll_task_t *ctask)
 {
     return ucc_schedule_start(ctask);
@@ -58,8 +56,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_start(ucc_coll_task_t *ctask)
 
     count = TASK_ARGS(task).src.info.count / gsize;
     count = count * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
-    /* perform a put to each member peer using the peer's index in the
-     * destination displacement. */
+
     for (peer = start; task->onesided.get_posted < gsize;
          peer = (peer + 1) % gsize, ++iteration) {
 
@@ -104,20 +101,22 @@ void ucc_tl_ucp_alltoall_onesided_ca_progress(ucc_coll_task_t *ctask)
                                         count, peer, team, task),
                       task, out);
         if ((task->onesided.get_posted - task->onesided.get_completed) >= nreqs) {
+            ucp_worker_progress(UCC_TL_UCP_TASK_TEAM(task)->worker->ucp_worker);
             task->alltoall_onesided_ca.iteration = iteration;
             return;
         }
     }
     if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
         while (polls++ < task->n_polls) {
-            if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
-                goto out;
-            }
             ucp_worker_progress(UCC_TL_UCP_TASK_TEAM(task)->worker->ucp_worker);
+            if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                goto complete;
+            }
         }
         return;
     }
 
+complete:
     task->super.status = UCC_OK;
 out:
     return;
@@ -127,18 +126,16 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_init(ucc_base_coll_args_t *coll_arg
                                                   ucc_base_team_t      *team,
                                                   ucc_coll_task_t     **task_h)
 {
-    ucc_schedule_t    *schedule = NULL;
-    ucc_tl_ucp_team_t *tl_team  = ucc_derived_of(team, ucc_tl_ucp_team_t);
-    ucc_base_coll_args_t barrier_coll_args = {
-        .team = team->params.team,
-        .args.coll_type = UCC_COLL_TYPE_BARRIER,
-    };
-    ucc_coll_task_t   *barrier_task;
-    ucc_tl_ucp_task_t *task;
-    ucc_coll_task_t   *a2a_task;
-    ucc_status_t       status;
+    ucc_schedule_t        *schedule  = NULL;
+    ucc_tl_ucp_team_t     *tl_team   = ucc_derived_of(team, ucc_tl_ucp_team_t);
+    size_t                 frac_rate = UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_ca_frac_rate;
+    ucc_base_coll_args_t   barrier_coll_args;
+    ucc_coll_task_t       *barrier_task;
+    ucc_tl_ucp_task_t     *task;
+    ucc_coll_task_t       *a2a_task;
+    ucc_status_t           status;
     ucc_tl_ucp_schedule_t *tl_schedule;
-    size_t frac_rate = UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_ca_frac_rate;
+
     ALLTOALL_TASK_CHECK(coll_args->args, tl_team);
 
     status = ucc_tl_ucp_get_schedule(tl_team, coll_args, (ucc_tl_ucp_schedule_t **)&tl_schedule);
@@ -158,6 +155,9 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_init(ucc_base_coll_args_t *coll_arg
     task->super.finalize = ucc_tl_ucp_alltoall_onesided_ca_finalize;
     a2a_task = &task->super;
 
+    barrier_coll_args.team      = team->params.team;
+    barrier_coll_args.coll_type = UCC_COLL_TYPE_BARRIER;
+
     status = ucc_tl_ucp_coll_init(&barrier_coll_args, team, &barrier_task);
     if (status != UCC_OK) {
         return status;
@@ -167,13 +167,9 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_init(ucc_base_coll_args_t *coll_arg
     }  
     size_t nelems = (TASK_ARGS(task).src.info.count / UCC_TL_TEAM_SIZE(tl_team));/* *
                     ucc_dt_size(TASK_ARGS(task).src.info.datatype);*/
-    size_t rate = (UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_ca_nic_rate) *
-                    ((UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_ca_frac_rate / 100.0));
+    size_t rate = (UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_ca_nic_rate);/* *
+                    ((UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_ca_frac_rate / 100.0));*/
     size_t cs_ratio = nelems * UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_ca_ppn;
-
-    if (cs_ratio < 1) {
-        cs_ratio = 1;
-    }
 
     task->alltoall_onesided_ca.tokens = (rate) / (cs_ratio);
     if (task->alltoall_onesided_ca.tokens < 1) {
@@ -185,7 +181,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_ca_init(ucc_base_coll_args_t *coll_arg
     ucc_task_subscribe_dep(&schedule->super, a2a_task, UCC_EVENT_SCHEDULE_STARTED);
 
     ucc_schedule_add_task(schedule, barrier_task);
-    ucc_task_subscribe_dep(&schedule->super, barrier_task, UCC_EVENT_SCHEDULE_STARTED);
+    ucc_task_subscribe_dep(a2a_task, barrier_task, UCC_EVENT_COMPLETED);
     *task_h             = &schedule->super;
 out:
     return status;
