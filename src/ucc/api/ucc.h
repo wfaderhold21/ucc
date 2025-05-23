@@ -859,6 +859,11 @@ enum ucc_context_params_field {
     UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS        = UCC_BIT(4)
 };
 
+typedef struct ucc_failure_info {
+    uint64_t *ep_list;
+    int       num_eps;
+} ucc_failure_info_t;
+
 /**
  *
  *  @ingroup UCC_CONTEXT_DT
@@ -868,7 +873,8 @@ enum ucc_context_attr_field {
     UCC_CONTEXT_ATTR_FIELD_SYNC_TYPE          = UCC_BIT(1),
     UCC_CONTEXT_ATTR_FIELD_CTX_ADDR           = UCC_BIT(2),
     UCC_CONTEXT_ATTR_FIELD_CTX_ADDR_LEN       = UCC_BIT(3),
-    UCC_CONTEXT_ATTR_FIELD_WORK_BUFFER_SIZE   = UCC_BIT(4)
+    UCC_CONTEXT_ATTR_FIELD_WORK_BUFFER_SIZE   = UCC_BIT(4),
+    UCC_CONTEXT_ATTR_FIELD_FAILED_RANKS       = UCC_BIT(5)
 };
 
 /**
@@ -2226,6 +2232,53 @@ ucc_status_t ucc_ee_wait(ucc_ee_h ee, ucc_ev_t *ev);
  * @return Error code as defined by @ref ucc_status_t
  */
 ucc_status_t ucc_collective_triggered_post(ucc_ee_h ee, ucc_ev_t *ee_event);
+
+/**
+ * @ingroup UCC_RESILIENCE
+ *
+ * @brief The routine recovers a valid UCC context from a node failure.
+ *
+ * @param [in] ctx      Handle to a valid UCC context
+ *
+ * @parblock
+ *
+ * @b Description
+ *
+ * @ref ucc_context_recover is a collective operation over the processes in a
+ * context that stops the execution of collective operations on the context,
+ * ctx, and recovers from a node failure. To ensure recovery, failed
+ * processes will be marked and be queryable through @ref ucc_context_query.
+ * Any team created using this context should be considered invalid and
+ * continued usage for collective operations can result in undefined behavior.
+ *
+ * @endparblock
+ *
+ * @return Error code as defined by @ref ucc_status_t
+ */
+ucc_status_t ucc_context_recover(ucc_context_h ctx);
+
+/**
+ * @ingroup UCC_RESILIENCE
+ *
+ * @brief The routine shrinks the size of a team by removing failed processes
+ * from the team.
+ *
+ * @param [in]    *failed_ranks      Array of indices of failed ranks
+ * @param [inout] *team              Team to be shrunk
+ *
+ * @parblock
+ *
+ * @b Description
+ *
+ * @ref ucc_team_shrink is a local operation that removes failed ranks
+ * from a team and returns a new team that would be considered valid. 
+ *
+ * @endparblock
+ *
+ * @return Error code as defined by @ref ucc_status_t
+ */
+ucc_status_t ucc_team_shrink(uint64_t *failed_ranks, ucc_team_h *team);
+
 
 END_C_DECLS
 #endif
