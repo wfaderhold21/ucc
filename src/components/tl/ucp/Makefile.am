@@ -52,7 +52,8 @@ allreduce =                           \
 barrier =                     \
 	barrier/barrier.h         \
 	barrier/barrier.c         \
-	barrier/barrier_knomial.c
+	barrier/barrier_knomial.c \
+	barrier/barrier_onesided.c
 
 bcast =                       \
 	bcast/bcast.h             \

@@ -122,6 +122,12 @@ typedef struct ucc_tl_ucp_task {
             ucc_knomial_pattern_t   p;
         } barrier;
         struct {
+            ucc_knomial_pattern_t   p;
+            int                     *flags;      // Points to global work buffer
+            int                     *counters;   // Points to global work buffer + size
+            int                     *phase_complete; // Points to global work buffer + size + n_phases
+        } barrier_onesided;
+        struct {
             int                     phase;
             ucc_knomial_pattern_t   p;
             void                   *scratch;

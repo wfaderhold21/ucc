@@ -48,6 +48,8 @@ typedef struct ucc_tl_ucp_lib_config {
     uint32_t                 fanin_kn_radix;
     uint32_t                 fanout_kn_radix;
     uint32_t                 barrier_kn_radix;
+    uint32_t                 barrier_alg;
+    uint32_t                 barrier_onesided_radix;
     size_t                   allreduce_sliding_window_buf_size;
     uint32_t                 allreduce_sliding_window_put_window_size;
     uint32_t                 allreduce_sliding_window_num_get_bufs;
@@ -89,6 +91,14 @@ typedef enum ucc_tl_ucp_local_copy_type {
     UCC_TL_UCP_LOCAL_COPY_TYPE_AUTO,
     UCC_TL_UCP_LOCAL_COPY_TYPE_LAST
 } ucc_tl_ucp_local_copy_type_t;
+
+typedef enum ucc_tl_ucp_barrier_alg {
+    UCC_TL_UCP_BARRIER_ALG_KNOMIAL,
+    UCC_TL_UCP_BARRIER_ALG_ONESIDED,
+    UCC_TL_UCP_BARRIER_ALG_LAST
+} ucc_tl_ucp_barrier_alg_t;
+
+extern const char* barrier_algs[];
 
 typedef struct ucc_tl_ucp_context_config {
     ucc_tl_context_config_t      super;

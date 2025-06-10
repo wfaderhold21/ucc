@@ -222,6 +222,16 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_lib_config_t, use_reordering),
      UCC_CONFIG_TYPE_BOOL},
 
+    {"BARRIER_ALG", "knomial",
+     "Barrier algorithm to use. Options: knomial, onesided",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t, barrier_alg),
+     UCC_CONFIG_TYPE_ENUM(barrier_algs)},
+
+    {"BARRIER_ONESIDED_RADIX", "4",
+     "Radix of the onesided barrier algorithm",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t, barrier_onesided_radix),
+     UCC_CONFIG_TYPE_UINT},
+
     {NULL}};
 
 const char* ucc_tl_ucp_local_copy_names[] = {
@@ -420,3 +430,9 @@ __attribute__((constructor)) static void tl_ucp_iface_init(void)
     /* no need to check return value, plugins can be absent */
     (void)ucc_components_load("tlcp_ucp", &ucc_tl_ucp.super.coll_plugins);
 }
+
+const char* barrier_algs[] = {
+    [UCC_TL_UCP_BARRIER_ALG_KNOMIAL]  = "knomial",
+    [UCC_TL_UCP_BARRIER_ALG_ONESIDED] = "onesided",
+    [UCC_TL_UCP_BARRIER_ALG_LAST]     = NULL
+};

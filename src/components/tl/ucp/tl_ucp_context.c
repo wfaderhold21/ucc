@@ -614,7 +614,8 @@ static void ucc_tl_ucp_ctx_remote_pack_data(ucc_tl_ucp_context_t *ctx,
 ucc_status_t ucc_tl_ucp_get_context_attr(const ucc_base_context_t *context,
                                          ucc_base_ctx_attr_t      *attr)
 {
-    ucc_tl_ucp_context_t *ctx = ucc_derived_of(context, ucc_tl_ucp_context_t);
+    ucc_tl_ucp_context_t *ctx    = ucc_derived_of(context, ucc_tl_ucp_context_t);
+    ucc_tl_ucp_lib_t     *lib    = ucc_derived_of(ctx->super.super.lib, ucc_tl_ucp_lib_t);
     uint64_t *            offset = (uint64_t *)attr->attr.ctx_addr;
     ucs_status_t          ucs_status;
     size_t                packed_length;
@@ -682,8 +683,14 @@ ucc_status_t ucc_tl_ucp_get_context_attr(const ucc_base_context_t *context,
     }
 
     if (attr->attr.mask & UCC_CONTEXT_ATTR_FIELD_WORK_BUFFER_SIZE) {
-        attr->attr.global_work_buffer_size =
-            ONESIDED_SYNC_SIZE + ONESIDED_REDUCE_SIZE;
+        ucc_rank_t            size  = UCC_TL_CTX_OOB(ctx).n_oob_eps;
+        int                   radix = lib->cfg.barrier_onesided_radix;
+        int                   n_iters;
+        ucc_knomial_pattern_t p;
+
+        ucc_knomial_pattern_init(size, 0, radix, &p);
+        n_iters = p.n_iters;
+        attr->attr.global_work_buffer_size = size * sizeof(int) + 2 * n_iters * sizeof(int);
     }
 
     attr->topo_required = ctx->topo_required;
