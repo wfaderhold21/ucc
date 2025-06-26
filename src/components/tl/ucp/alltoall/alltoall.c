@@ -81,6 +81,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
 
     ALLTOALL_TASK_CHECK(coll_args->args, tl_team);
 
+    /* memory handles do not support work buffers, so check here */
     if (!(coll_args->args.mask & UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER)) {
         tl_error(UCC_TL_TEAM_LIB(tl_team),
                  "global work buffer not provided nor associated with team");
@@ -89,12 +90,17 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
     }
     if (coll_args->args.mask & UCC_COLL_ARGS_FIELD_FLAGS) {
         if (!(coll_args->args.flags & UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS)) {
-            tl_error(UCC_TL_TEAM_LIB(tl_team),
-                     "non memory mapped buffers are not supported");
-            status = UCC_ERR_NOT_SUPPORTED;
-            goto out;
+            status = ucc_tl_ucp_coll_dynamic_segment_init(&coll_args->args, task);
+            if (UCC_OK != status) {
+                tl_error(UCC_TL_TEAM_LIB(tl_team),
+                         "failed to initialize dynamic segments");
+                goto out;
+            }
+            /* this is not true, but will be */
+            coll_args->flags |= UCC_COLL_ARGS_FLAG_DST_MEMH_GLOBAL;
         }
     }
+    /* TODO: make clear in case of non-mapped buffers */
     if (!(coll_args->args.mask & UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH)) {
         coll_args->args.src_memh.global_memh = NULL;
     }
@@ -114,11 +120,6 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
     task->super.post     = ucc_tl_ucp_alltoall_onesided_start;
     task->super.progress = ucc_tl_ucp_alltoall_onesided_progress;
 
-    status = ucc_tl_ucp_coll_dynamic_segment_init(&coll_args->args, task);
-    if (UCC_OK != status) {
-        tl_error(UCC_TL_TEAM_LIB(tl_team),
-                 "failed to initialize dynamic segments");
-    }
 out:
     return status;
 }
