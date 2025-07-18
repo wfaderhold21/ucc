@@ -74,7 +74,7 @@
         }                                                                      \
     } while (0)
 
-#define DO_DT_REDUCE_INT(type, _srcs, _dst, _op, _count, _n_srcs)              \
+#define DO_DT_REDUCE_INT(type, _srcs, _dst, _op, _count, _n_srcs, _flags, _alpha) \
     do {                                                                       \
         const type **restrict s = (const type **)_srcs;                        \
         type *restrict        d = (type * ) _dst;                              \
@@ -82,8 +82,8 @@
         case UCC_OP_AVG:                                                       \
         case UCC_OP_SUM:                                                       \
             DO_DT_REDUCE_WITH_OP(type, s, d, _count, _n_srcs, DO_OP_SUM);      \
-            if (flags & UCC_EEE_TASK_FLAG_REDUCE_WITH_ALPHA) {                 \
-                VEC_OP(d, _count, task->alpha);                                \
+            if (_flags & UCC_EEE_TASK_FLAG_REDUCE_WITH_ALPHA) {                 \
+                VEC_OP(d, _count, _alpha);                                \
             }                                                                  \
             break;                                                             \
         case UCC_OP_MIN:                                                       \
@@ -227,38 +227,55 @@
 ucc_status_t ucc_ec_cpu_reduce(ucc_eee_task_reduce_t *task, void * restrict dst,
                                void * const * restrict srcs, uint16_t flags)
 {
+    /* Validate input parameters */
+    if (!task || !dst || !srcs) {
+        return UCC_ERR_INVALID_PARAM;
+    }
+    
+    /* Validate task fields */
+    if (task->count == 0) {
+        return UCC_ERR_INVALID_PARAM;
+    }
+    
+    /* Check if srcs array is valid */
+    for (int i = 0; i < task->n_srcs; i++) {
+        if (!srcs[i]) {
+            return UCC_ERR_INVALID_PARAM;
+        }
+    }
+
     switch (task->dt) {
     case UCC_DT_INT8:
         DO_DT_REDUCE_INT(int8_t, srcs, dst, task->op, task->count,
-                         task->n_srcs);
+                         task->n_srcs, flags, task->alpha);
         break;
     case UCC_DT_INT16:
         DO_DT_REDUCE_INT(int16_t, srcs, dst, task->op, task->count,
-                         task->n_srcs);
+                         task->n_srcs, flags, task->alpha);
         break;
     case UCC_DT_INT32:
         DO_DT_REDUCE_INT(int32_t, srcs, dst, task->op, task->count,
-                         task->n_srcs);
+                         task->n_srcs, flags, task->alpha);
         break;
     case UCC_DT_INT64:
         DO_DT_REDUCE_INT(int64_t, srcs, dst, task->op, task->count,
-                         task->n_srcs);
+                         task->n_srcs, flags, task->alpha);
         break;
     case UCC_DT_UINT8:
         DO_DT_REDUCE_INT(uint8_t, srcs, dst, task->op, task->count,
-                         task->n_srcs);
+                         task->n_srcs, flags, task->alpha);
         break;
     case UCC_DT_UINT16:
         DO_DT_REDUCE_INT(uint16_t, srcs, dst, task->op, task->count,
-                         task->n_srcs);
+                         task->n_srcs, flags, task->alpha);
         break;
     case UCC_DT_UINT32:
         DO_DT_REDUCE_INT(uint32_t, srcs, dst, task->op, task->count,
-                         task->n_srcs);
+                         task->n_srcs, flags, task->alpha);
         break;
     case UCC_DT_UINT64:
         DO_DT_REDUCE_INT(uint64_t, srcs, dst, task->op, task->count,
-                         task->n_srcs);
+                         task->n_srcs, flags, task->alpha);
         break;
     case UCC_DT_FLOAT32:
 #if SIZEOF_FLOAT == 4
@@ -319,4 +336,45 @@ ucc_status_t ucc_ec_cpu_reduce(ucc_eee_task_reduce_t *task, void * restrict dst,
     }
 
     return UCC_OK;
+}
+
+ucc_status_t ucc_ec_cpu_reduce_strided(void *src1, void *src2, void *dst,
+                                       size_t n_vectors, size_t count,
+                                       size_t stride, ucc_datatype_t dt,
+                                       ucc_reduction_op_t op, uint16_t flags)
+{
+    /* For strided reduction, we need to handle multiple vectors */
+    if (n_vectors == 0) {
+        return UCC_OK;
+    }
+
+    /* If we only have 1 vector, just copy src1 to dst */
+    if (n_vectors == 1) {
+        size_t data_size = count * ucc_dt_size(dt);
+        memcpy(dst, src1, data_size);
+        return UCC_OK;
+    }
+
+    /* If we only have 2 vectors, use the simple case */
+    if (n_vectors == 2) {
+        /* Create a temporary array of source pointers for the regular reduce function */
+        void *srcs[2] = {src1, src2};
+        
+        /* Create a temporary task structure */
+        ucc_eee_task_reduce_t task = {
+            .dt = dt,
+            .op = op,
+            .count = count,
+            .n_srcs = 2,
+            .alpha = 1.0
+        };
+
+        /* Use the regular reduce function */
+        return ucc_ec_cpu_reduce(&task, dst, srcs, flags);
+    }
+
+    /* For more than 2 vectors, we need to implement a proper strided reduction */
+    /* This is a simplified implementation - in practice, you'd want to optimize this */
+    ec_error(&ucc_ec_cpu.super, "strided reduction with %zu vectors not implemented", n_vectors);
+    return UCC_ERR_NOT_SUPPORTED;
 }
