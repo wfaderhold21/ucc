@@ -1242,6 +1242,11 @@ ucc_status_t ucc_mem_map_export(ucc_context_h         context,
     int                       tls;
     int                       tlh_index;
 
+    if (!params) {
+        ucc_error("params cannot be NULL");
+        return UCC_ERR_INVALID_PARAM;
+    }
+
     if (mode == UCC_MEM_MAP_MODE_EXPORT) {
         local_memh = (ucc_mem_map_memh_t *)ucc_calloc(1, sizeof(ucc_mem_map_memh_t),
                                                       "local memh");
@@ -1443,6 +1448,10 @@ ucc_status_t ucc_mem_map(ucc_context_h context, ucc_mem_map_mode_t mode,
     if (mode == UCC_MEM_MAP_MODE_IMPORT || mode == UCC_MEM_MAP_MODE_IMPORT_OFFLOAD) {
         return ucc_mem_map_import(context, mode, params, memh_size, memh);
     }
+    if (!params) {
+        ucc_error("params cannot be NULL");
+        return UCC_ERR_INVALID_PARAM;
+    }
     if (params->n_segments > 1) {
         ucc_error("UCC only supports one mapping per call");
         return UCC_ERR_INVALID_PARAM;
@@ -1462,6 +1471,11 @@ ucc_status_t ucc_mem_unmap(ucc_mem_map_mem_h *memh)
 
     if (!memh) {
         ucc_warn("unable to free NULL memh");
+        return UCC_ERR_INVALID_PARAM;
+    }
+
+    if (!*memh) {
+        ucc_warn("unable to free NULL memory handle");
         return UCC_ERR_INVALID_PARAM;
     }
 
