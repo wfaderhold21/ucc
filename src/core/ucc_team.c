@@ -653,3 +653,15 @@ static void ucc_team_release_id(ucc_team_t *team)
         set_id_bit(ctx->ids.pool, team->id);
     }
 }
+
+ucc_status_t ucc_team_shrink(uint64_t *failed_ranks, ucc_team_h *team)
+{
+    /* Resilience feature is not yet implemented.
+     * This stub function is provided to support compilation and testing
+     * of resilience infrastructure.
+     */
+    (void)failed_ranks; /* suppress unused parameter warning */
+    (void)team;         /* suppress unused parameter warning */
+
+    return UCC_ERR_NOT_SUPPORTED;
+}

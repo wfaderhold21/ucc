@@ -933,12 +933,12 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     ucc_free(context->all_tls.names);
     ucc_free(context->tl_ctx);
     ucc_free(context->ids.pool);
-    
+
     /* Clean up failure tracking resources */
     if (context->failure_info.ep_list) {
         ucc_free(context->failure_info.ep_list);
     }
-    
+
     ucc_free(context);
     return UCC_OK;
 }
@@ -1003,7 +1003,7 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
             do {
                 tmp_status = context->params.oob.req_test(req);
             } while (tmp_status == UCC_INPROGRESS);
-            
+
             if (UCC_OK == tmp_status) {
                 context->params.oob.req_free(req);
             }
@@ -1050,7 +1050,7 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
             continue;
         }
         ucc_tl_lib_t *tl_lib = ucc_derived_of(tl_ctx->super.lib, ucc_tl_lib_t);
-        
+
         /* Check if TL supports abort */
         if (tl_lib->iface->context.abort) {
             tmp_status = tl_lib->iface->context.abort(&tl_ctx->super);
@@ -1112,7 +1112,7 @@ ucc_status_t ucc_context_recover(ucc_context_h context)
             continue;
         }
         tl_lib = ucc_derived_of(tl_ctx->super.lib, ucc_tl_lib_t);
-        
+
         /* Check if TL supports recovery */
         if (tl_lib->iface->context.recover) {
             tmp_status = tl_lib->iface->context.recover(&tl_ctx->super);

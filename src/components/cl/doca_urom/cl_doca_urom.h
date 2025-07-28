@@ -96,6 +96,12 @@ ucc_status_t ucc_cl_doca_urom_coll_init(ucc_base_coll_args_t *coll_args,
                                         ucc_base_team_t      *team,
                                         ucc_coll_task_t     **task);
 
+ucc_status_t ucc_cl_doca_urom_get_context_attr(const ucc_base_context_t *context,
+                                               ucc_base_ctx_attr_t      *base_attr);
+
+ucc_status_t ucc_cl_doca_urom_context_recover(ucc_base_context_t *context);
+ucc_status_t ucc_cl_doca_urom_context_abort(ucc_base_context_t *context);
+
 #define UCC_CL_DOCA_UROM_TEAM_CTX(_team)                                       \
     (ucc_derived_of((_team)->super.super.context, ucc_cl_doca_urom_context_t))
 

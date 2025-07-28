@@ -759,21 +759,23 @@ ucc_status_t ucc_tl_ucp_context_abort(ucc_base_context_t *context)
         service_worker->ucp_worker = NULL;
     }
 
-    /* Mark endpoints as invalid */
-    if (worker->eps) {
-        for (i = 0; i < tl_ctx->n_eps; i++) {
-            if (worker->eps[i]) {
-                ucp_ep_destroy(worker->eps[i]);
-                worker->eps[i] = NULL;
+    /* Mark endpoints as invalid if OOB is available */
+    if (context->ucc_context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
+        if (worker->eps) {
+            for (i = 0; i < context->ucc_context->params.oob.n_oob_eps; i++) {
+                if (worker->eps[i]) {
+                    ucp_ep_destroy(worker->eps[i]);
+                    worker->eps[i] = NULL;
+                }
             }
         }
-    }
 
-    if (service_worker->eps) {
-        for (i = 0; i < tl_ctx->n_eps; i++) {
-            if (service_worker->eps[i]) {
-                ucp_ep_destroy(service_worker->eps[i]);
-                service_worker->eps[i] = NULL;
+        if (service_worker->eps) {
+            for (i = 0; i < context->ucc_context->params.oob.n_oob_eps; i++) {
+                if (service_worker->eps[i]) {
+                    ucp_ep_destroy(service_worker->eps[i]);
+                    service_worker->eps[i] = NULL;
+                }
             }
         }
     }

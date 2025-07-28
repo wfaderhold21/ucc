@@ -19,6 +19,7 @@ ucc_status_t ucc_cl_hier_get_context_attr(const ucc_base_context_t *context,
                                           ucc_base_ctx_attr_t      *base_attr);
 
 ucc_status_t ucc_cl_hier_context_recover(ucc_base_context_t *context);
+ucc_status_t ucc_cl_hier_context_abort(ucc_base_context_t *context);
 
 static ucc_config_field_t ucc_cl_hier_lib_config_table[] = {
     {"", "", NULL, ucc_offsetof(ucc_cl_hier_lib_config_t, super),

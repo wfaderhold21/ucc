@@ -114,6 +114,32 @@ ucc_status_t ucc_cl_hier_context_recover(ucc_base_context_t *context)
             }
         }
     }
-    
+
+    return status;
+}
+
+ucc_status_t ucc_cl_hier_context_abort(ucc_base_context_t *context)
+{
+    /* CL HIER context abort: delegate to underlying TL contexts */
+    const ucc_cl_hier_context_t *ctx =
+        ucc_derived_of(context, ucc_cl_hier_context_t);
+    ucc_status_t status = UCC_OK;
+    ucc_status_t tmp_status;
+    int i;
+
+    for (i = 0; i < ctx->super.n_tl_ctxs; i++) {
+        if (UCC_TL_CTX_IFACE(ctx->super.tl_ctxs[i])->context.abort) {
+            tmp_status = UCC_TL_CTX_IFACE(ctx->super.tl_ctxs[i])
+                         ->context.abort(&ctx->super.tl_ctxs[i]->super);
+            if (UCC_OK != tmp_status) {
+                cl_warn(ctx->super.super.lib,
+                       "failed to abort TL context %s: %s",
+                       UCC_TL_CTX_IFACE(ctx->super.tl_ctxs[i])->super.name,
+                       ucc_status_string(tmp_status));
+                status = tmp_status;
+            }
+        }
+    }
+
     return status;
 }

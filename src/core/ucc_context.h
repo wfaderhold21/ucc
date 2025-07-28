@@ -78,7 +78,7 @@ typedef struct ucc_context {
     uint64_t                 cl_flags;
     ucc_tl_team_t           *service_team;
     int32_t                  throttle_progress;
-    
+
     /* Failure tracking fields */
     int                      is_failed;          /*!< Flag indicating if context is in failed state */
     ucc_failure_info_t       failure_info;       /*!< Information about failed processes */

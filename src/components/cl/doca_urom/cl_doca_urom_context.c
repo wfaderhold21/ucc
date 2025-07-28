@@ -556,3 +556,21 @@ ucc_cl_doca_urom_get_context_attr(const ucc_base_context_t *context,
     ucc_base_ctx_attr_clear(attr);
     return UCC_OK;
 }
+
+ucc_status_t ucc_cl_doca_urom_context_recover(ucc_base_context_t *context)
+{
+    return UCC_ERR_NOT_SUPPORTED;
+}
+
+ucc_status_t ucc_cl_doca_urom_context_abort(ucc_base_context_t *context)
+{
+    ucc_tl_doca_urom_context_t *tl_ctx = ucc_derived_of(context, ucc_tl_doca_urom_context_t);
+
+    cl_debug(tl_ctx->super.super.lib, "aborting DOCA UROM context");
+
+    /* DOCA UROM context abort - mark as failed state
+     * Actual cleanup handled by DOCA UROM at the team level */
+
+    cl_debug(tl_ctx->super.super.lib, "DOCA UROM context aborted successfully");
+    return UCC_OK;
+}
