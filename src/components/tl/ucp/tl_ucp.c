@@ -32,6 +32,10 @@ ucc_status_t ucc_tl_ucp_get_lib_properties(ucc_base_lib_properties_t *prop);
 ucc_status_t ucc_tl_ucp_get_context_attr(const ucc_base_context_t *context,
                                          ucc_base_ctx_attr_t      *base_attr);
 
+ucc_status_t ucc_tl_ucp_context_recover(ucc_base_context_t *context);
+
+ucc_status_t ucc_tl_ucp_context_abort(ucc_base_context_t *context);
+
 ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
     {"", "", NULL, ucc_offsetof(ucc_tl_ucp_lib_config_t, super),
      UCC_CONFIG_TYPE_TABLE(ucc_tl_lib_config_table)},
@@ -381,6 +385,8 @@ UCC_TL_UCP_PROFILE_FUNC_VOID(ucc_tl_ucp_pre_register_mem, (team, addr, length,
 
 __attribute__((constructor)) static void tl_ucp_iface_init(void)
 {
+    ucc_tl_ucp.super.context.recover = ucc_tl_ucp_context_recover;
+    ucc_tl_ucp.super.context.abort = ucc_tl_ucp_context_abort;
     ucc_tl_ucp.super.scoll.allgather = ucc_tl_ucp_service_allgather;
     ucc_tl_ucp.super.scoll.allreduce = ucc_tl_ucp_service_allreduce;
     ucc_tl_ucp.super.scoll.bcast     = ucc_tl_ucp_service_bcast;

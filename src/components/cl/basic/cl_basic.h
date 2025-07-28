@@ -55,4 +55,8 @@ UCC_CLASS_DECLARE(ucc_cl_basic_team_t, ucc_base_context_t *,
 #define UCC_CL_BASIC_TEAM_CTX(_team)                                           \
     (ucc_derived_of((_team)->super.super.context, ucc_cl_basic_context_t))
 
+ucc_status_t ucc_cl_basic_get_context_attr(const ucc_base_context_t *context,
+                                           ucc_base_ctx_attr_t      *attr);
+ucc_status_t ucc_cl_basic_context_recover(ucc_base_context_t *context);
+
 #endif

@@ -103,6 +103,28 @@ UCC_CLASS_INIT_FUNC(ucc_tl_rccl_context_t,
     return UCC_OK;
 }
 
+ucc_status_t
+ucc_tl_rccl_context_recover(ucc_base_context_t *ctx)
+{
+    return UCC_ERR_NOT_SUPPORTED;
+}
+
+ucc_status_t
+ucc_tl_rccl_context_abort(ucc_base_context_t *ctx)
+{
+    ucc_tl_rccl_context_t *tl_ctx = ucc_derived_of(ctx, ucc_tl_rccl_context_t);
+
+    tl_debug(tl_ctx->super.super.lib, "aborting RCCL context");
+
+    /* RCCL communicators are handled at the team level.
+     * The context abort primarily marks the state as failed
+     * and any active RCCL communicators will be destroyed
+     * during team cleanup operations. */
+
+    tl_debug(tl_ctx->super.super.lib, "RCCL context aborted successfully");
+    return UCC_OK;
+}
+
 UCC_CLASS_CLEANUP_FUNC(ucc_tl_rccl_context_t)
 {
     tl_debug(self->super.super.lib, "finalizing tl context: %p", self);

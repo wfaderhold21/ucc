@@ -92,7 +92,7 @@ ucc_tl_ucp_context_service_init(const char *prefix, ucp_params_t ucp_params,
     service_prefix = NULL;
 
     UCP_CHECK(ucp_init(&ucp_params, ucp_config, &ucp_context_service),
-              "failed to init ucp context for service worker", err_cfg, ctx);
+              "failed to init ucp context for service worker", err_worker_create, ctx);
     ucp_config_release(ucp_config);
     ucp_config = NULL;
 
@@ -125,7 +125,6 @@ err_thread_mode:
     ucp_worker_destroy(ucp_worker_service);
 err_worker_create:
     ucp_cleanup(ucp_context_service);
-err_cfg:
     if (ucp_config) {
         ucp_config_release(ucp_config);
     }
@@ -689,4 +688,96 @@ ucc_status_t ucc_tl_ucp_get_context_attr(const ucc_base_context_t *context,
     attr->topo_required = ctx->topo_required;
 
     return UCC_OK;
+}
+
+ucc_status_t ucc_tl_ucp_context_recover(ucc_context_h context)
+{
+    ucc_tl_ucp_context_t *tl_ctx = ucc_derived_of(context, ucc_tl_ucp_context_t);
+    ucc_status_t status = UCC_OK;
+    ucs_status_ptr_t ucs_status_ptr;
+    ucc_rank_t i;
+    ucc_tl_ucp_worker_t *worker = &tl_ctx->worker;
+    ucc_tl_ucp_worker_t *service_worker = &tl_ctx->service_worker;
+
+    if (!(context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB)) {
+        tl_error(tl_ctx->super.super.lib, "OOB is required for recovery");
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    // Handle regular worker endpoints
+    for (i = 0; i < context->params.oob.n_oob_eps; i++) {
+        if (worker->eps[i]) {
+            // Close the endpoint
+            ucs_status_ptr = ucp_ep_close_nb(worker->eps[i], UCP_EP_CLOSE_MODE_FLUSH);
+            if (UCS_PTR_IS_ERR(ucs_status_ptr)) {
+                tl_error(tl_ctx->super.super.lib, "failed to close endpoint");
+                status = UCC_ERR_INVALID_PARAM;
+                goto out;
+            }
+            worker->eps[i] = NULL;
+        }
+    }
+
+    // Handle service worker endpoints if enabled
+    if (service_worker && service_worker->eps) {
+        for (i = 0; i < context->params.oob.n_oob_eps; i++) {
+            if (service_worker->eps[i]) {
+                ucs_status_ptr = ucp_ep_close_nb(service_worker->eps[i], UCP_EP_CLOSE_MODE_FLUSH);
+                if (UCS_PTR_IS_ERR(ucs_status_ptr)) {
+                    tl_error(tl_ctx->super.super.lib, "failed to close service endpoint");
+                    status = UCC_ERR_INVALID_PARAM;
+                    goto out;
+                }
+                service_worker->eps[i] = NULL;
+            }
+        }
+    }
+
+out:
+    return status;
+}
+
+ucc_status_t ucc_tl_ucp_context_abort(ucc_base_context_t *context)
+{
+    ucc_tl_ucp_context_t *tl_ctx = ucc_derived_of(context, ucc_tl_ucp_context_t);
+    ucc_status_t status = UCC_OK;
+    ucc_rank_t i;
+    ucc_tl_ucp_worker_t *worker = &tl_ctx->worker;
+    ucc_tl_ucp_worker_t *service_worker = &tl_ctx->service_worker;
+
+    tl_debug(tl_ctx->super.super.lib, "aborting UCP context");
+
+    /* Cancel ongoing requests on regular worker */
+    if (worker->ucp_worker) {
+        ucp_worker_destroy(worker->ucp_worker);
+        worker->ucp_worker = NULL;
+    }
+
+    /* Cancel ongoing requests on service worker */
+    if (service_worker->ucp_worker) {
+        ucp_worker_destroy(service_worker->ucp_worker);
+        service_worker->ucp_worker = NULL;
+    }
+
+    /* Mark endpoints as invalid */
+    if (worker->eps) {
+        for (i = 0; i < tl_ctx->n_eps; i++) {
+            if (worker->eps[i]) {
+                ucp_ep_destroy(worker->eps[i]);
+                worker->eps[i] = NULL;
+            }
+        }
+    }
+
+    if (service_worker->eps) {
+        for (i = 0; i < tl_ctx->n_eps; i++) {
+            if (service_worker->eps[i]) {
+                ucp_ep_destroy(service_worker->eps[i]);
+                service_worker->eps[i] = NULL;
+            }
+        }
+    }
+
+    tl_debug(tl_ctx->super.super.lib, "UCP context aborted successfully");
+    return status;
 }

@@ -91,3 +91,29 @@ ucc_cl_hier_get_context_attr(const ucc_base_context_t *context, /* NOLINT */
     attr->topo_required = 1;
     return UCC_OK;
 }
+
+ucc_status_t ucc_cl_hier_context_recover(ucc_base_context_t *context)
+{
+    /* CL HIER context recovery: delegate to underlying TL contexts */
+    const ucc_cl_hier_context_t *ctx =
+        ucc_derived_of(context, ucc_cl_hier_context_t);
+    ucc_status_t status = UCC_OK;
+    ucc_status_t tmp_status;
+    int i;
+
+    for (i = 0; i < ctx->super.n_tl_ctxs; i++) {
+        if (UCC_TL_CTX_IFACE(ctx->super.tl_ctxs[i])->context.recover) {
+            tmp_status = UCC_TL_CTX_IFACE(ctx->super.tl_ctxs[i])
+                         ->context.recover(&ctx->super.tl_ctxs[i]->super);
+            if (UCC_OK != tmp_status) {
+                cl_warn(ctx->super.super.lib,
+                       "failed to recover TL context %s: %s",
+                       UCC_TL_CTX_IFACE(ctx->super.tl_ctxs[i])->super.name,
+                       ucc_status_string(tmp_status));
+                status = tmp_status;
+            }
+        }
+    }
+    
+    return status;
+}

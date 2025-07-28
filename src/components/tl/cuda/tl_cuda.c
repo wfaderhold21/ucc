@@ -63,7 +63,11 @@ static ucs_config_field_t ucc_tl_cuda_context_config_table[] = {
     {NULL}};
 
 ucc_status_t ucc_tl_cuda_get_context_attr(const ucc_base_context_t *context,
-                                          ucc_base_ctx_attr_t *base_attr);
+                                          ucc_base_ctx_attr_t      *base_attr);
+
+ucc_status_t ucc_tl_cuda_context_recover(ucc_base_context_t *context);
+
+ucc_status_t ucc_tl_cuda_context_abort(ucc_base_context_t *context);
 
 UCC_CLASS_DEFINE_NEW_FUNC(ucc_tl_cuda_context_t, ucc_base_context_t,
                           const ucc_base_context_params_t *,
@@ -89,7 +93,8 @@ UCC_TL_IFACE_DECLARE(cuda, CUDA);
 
 __attribute__((constructor)) static void tl_cuda_iface_init(void)
 {
-
+    ucc_tl_cuda.super.context.recover = ucc_tl_cuda_context_recover;
+    ucc_tl_cuda.super.context.abort = ucc_tl_cuda_context_abort;
     ucc_tl_cuda.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_ALLGATHER)] =
         ucc_tl_cuda_allgather_algs;
     ucc_tl_cuda.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_ALLGATHERV)] =

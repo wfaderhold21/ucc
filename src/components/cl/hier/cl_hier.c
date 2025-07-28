@@ -18,6 +18,8 @@ ucc_status_t ucc_cl_hier_get_lib_properties(ucc_base_lib_properties_t *prop);
 ucc_status_t ucc_cl_hier_get_context_attr(const ucc_base_context_t *context,
                                           ucc_base_ctx_attr_t      *base_attr);
 
+ucc_status_t ucc_cl_hier_context_recover(ucc_base_context_t *context);
+
 static ucc_config_field_t ucc_cl_hier_lib_config_table[] = {
     {"", "", NULL, ucc_offsetof(ucc_cl_hier_lib_config_t, super),
      UCC_CONFIG_TYPE_TABLE(ucc_cl_lib_config_table)},

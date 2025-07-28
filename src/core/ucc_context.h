@@ -78,6 +78,10 @@ typedef struct ucc_context {
     uint64_t                 cl_flags;
     ucc_tl_team_t           *service_team;
     int32_t                  throttle_progress;
+    
+    /* Failure tracking fields */
+    int                      is_failed;          /*!< Flag indicating if context is in failed state */
+    ucc_failure_info_t       failure_info;       /*!< Information about failed processes */
 } ucc_context_t;
 
 typedef struct ucc_context_config {
@@ -101,6 +105,11 @@ ucc_status_t ucc_context_create_proc_info(ucc_lib_h                   lib,
                                           const ucc_context_config_h  config,
                                           ucc_context_h              *context,
                                           ucc_proc_info_t            *proc_info);
+
+ucc_status_t ucc_context_destroy(ucc_context_t *context);
+
+ucc_status_t ucc_context_abort(ucc_context_h context);
+ucc_status_t ucc_context_recover(ucc_context_h context);
 
 /* Any internal UCC component (TL, CL, etc) may register its own
    progress callback fn (and argument for the callback) into core

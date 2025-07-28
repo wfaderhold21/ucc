@@ -16,6 +16,10 @@ ucc_status_t ucc_tl_nccl_get_lib_properties(ucc_base_lib_properties_t *prop);
 ucc_status_t ucc_tl_nccl_get_context_attr(const ucc_base_context_t *context,
                                           ucc_base_ctx_attr_t      *base_attr);
 
+ucc_status_t ucc_tl_nccl_context_recover(ucc_base_context_t *context);
+
+ucc_status_t ucc_tl_nccl_context_abort(ucc_base_context_t *context);
+
 static ucc_config_field_t ucc_tl_nccl_lib_config_table[] = {
     {"", "", NULL, ucc_offsetof(ucc_tl_nccl_lib_config_t, super),
      UCC_CONFIG_TYPE_TABLE(ucc_tl_lib_config_table)},
@@ -83,4 +87,6 @@ __attribute__((constructor)) static void tl_nccl_iface_init(void)
 {
     ucc_tl_nccl.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_ALLGATHERV)] =
         ucc_tl_nccl_allgatherv_algs;
+    ucc_tl_nccl.super.context.recover = ucc_tl_nccl_context_recover;
+    ucc_tl_nccl.super.context.abort = ucc_tl_nccl_context_abort;
 }

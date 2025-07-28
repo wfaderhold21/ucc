@@ -16,6 +16,10 @@ ucc_status_t ucc_tl_self_get_lib_attr(const ucc_base_lib_t *lib,
 ucc_status_t ucc_tl_self_get_context_attr(const ucc_base_context_t *context,
                                           ucc_base_ctx_attr_t      *base_attr);
 
+ucc_status_t ucc_tl_self_context_recover(ucc_base_context_t *ctx);
+
+ucc_status_t ucc_tl_self_context_abort(ucc_base_context_t *ctx);
+
 ucc_status_t ucc_tl_self_get_lib_properties(ucc_base_lib_properties_t *prop);
 
 static ucc_config_field_t ucc_tl_self_lib_config_table[] = {
@@ -57,3 +61,9 @@ ucc_status_t ucc_tl_self_team_get_scores(ucc_base_team_t   *tl_team,
                                          ucc_coll_score_t **score);
 
 UCC_TL_IFACE_DECLARE(self, SELF);
+
+__attribute__((constructor)) static void tl_self_iface_init(void)
+{
+    ucc_tl_self.super.context.recover = ucc_tl_self_context_recover;
+    ucc_tl_self.super.context.abort = ucc_tl_self_context_abort;
+}

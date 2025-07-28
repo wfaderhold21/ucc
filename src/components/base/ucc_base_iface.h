@@ -123,6 +123,8 @@ typedef struct ucc_base_context_iface {
     void         (*destroy)(ucc_base_context_t *ctx);
     ucc_status_t (*get_attr)(const ucc_base_context_t *context,
                              ucc_base_ctx_attr_t      *attr);
+    ucc_status_t (*abort)(ucc_base_context_t *ctx);
+    ucc_status_t (*recover)(ucc_base_context_t *ctx);
 } ucc_base_context_iface_t;
 
 
@@ -236,6 +238,8 @@ typedef struct ucc_base_coll_alg_info {
         .super.context.destroy =                                               \
             UCC_CLASS_DELETE_FUNC_NAME(ucc_##_f##_name##_context_t),           \
         .super.context.get_attr = ucc_##_f##_name##_get_context_attr,          \
+        .super.context.recover = ucc_##_f##_name##_context_recover,            \
+        .super.context.abort = ucc_##_f##_name##_context_abort,                \
         .super.team.create_post =                                              \
             UCC_CLASS_NEW_FUNC_NAME(ucc_##_f##_name##_team_t),                 \
         .super.team.create_test = ucc_##_f##_name##_team_create_test,          \

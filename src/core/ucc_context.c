@@ -933,8 +933,220 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     ucc_free(context->all_tls.names);
     ucc_free(context->tl_ctx);
     ucc_free(context->ids.pool);
+    
+    /* Clean up failure tracking resources */
+    if (context->failure_info.ep_list) {
+        ucc_free(context->failure_info.ep_list);
+    }
+    
     ucc_free(context);
     return UCC_OK;
+}
+
+ucc_status_t ucc_context_abort(ucc_context_h context)
+{
+    int                i;
+    ucc_status_t       status = UCC_OK;
+    ucc_status_t       tmp_status;
+    uint64_t          *alive_mask = NULL;
+    uint64_t          *failed_ranks = NULL;
+    int                num_failed = 0;
+    ucc_coll_args_t    args;
+
+    if (NULL == context) {
+        ucc_error("ucc_context_abort: invalid context handle: NULL");
+        return UCC_ERR_INVALID_PARAM;
+    }
+
+    if (context->is_failed) {
+        ucc_debug("context is already in failed state");
+        return UCC_OK;
+    }
+
+    /* Mark context as failed first to halt collective operations */
+    context->is_failed = 1;
+
+    /* Allocate temporary buffer for failure detection reduction */
+    if (context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
+        size_t n_eps = context->params.oob.n_oob_eps;
+        alive_mask = ucc_calloc(n_eps, sizeof(uint64_t), "alive_mask");
+        if (!alive_mask) {
+            ucc_error("failed to allocate alive_mask");
+            return UCC_ERR_NO_MEMORY;
+        }
+
+        /* Mark this process as alive (1) */
+        alive_mask[context->params.oob.oob_ep] = 1;
+
+        /* Perform allreduce to determine which processes are alive */
+        memset(&args, 0, sizeof(args));
+        args.mask              = UCC_COLL_ARGS_FIELD_FLAGS;
+        args.coll_type         = UCC_COLL_TYPE_ALLREDUCE;
+        args.op                = UCC_OP_SUM;
+        args.src.info.buffer   = alive_mask;
+        args.src.info.count    = n_eps;
+        args.src.info.datatype = UCC_DT_UINT64;
+        args.src.info.mem_type = UCC_MEMORY_TYPE_HOST;
+        args.dst.info.buffer   = alive_mask;
+        args.dst.info.count    = n_eps;
+        args.dst.info.datatype = UCC_DT_UINT64;
+        args.dst.info.mem_type = UCC_MEMORY_TYPE_HOST;
+        args.flags             = UCC_COLL_ARGS_FLAG_IN_PLACE;
+
+        /* Use OOB allgather instead of collective since context is being aborted */
+        void *req = NULL;
+        tmp_status = context->params.oob.allgather(alive_mask, alive_mask, 
+                                                  n_eps * sizeof(uint64_t),
+                                                  context->params.oob.coll_info, &req);
+        if (UCC_OK == tmp_status && req) {
+            /* Wait for completion */
+            do {
+                tmp_status = context->params.oob.req_test(req);
+            } while (tmp_status == UCC_INPROGRESS);
+            
+            if (UCC_OK == tmp_status) {
+                context->params.oob.req_free(req);
+            }
+        }
+
+        /* Count failed processes and build failure list */
+        for (i = 0; i < n_eps; i++) {
+            if (alive_mask[i] == 0) {
+                num_failed++;
+            }
+        }
+
+        if (num_failed > 0) {
+            failed_ranks = ucc_malloc(num_failed * sizeof(uint64_t), "failed_ranks");
+            if (!failed_ranks) {
+                ucc_error("failed to allocate failed_ranks");
+                ucc_free(alive_mask);
+                return UCC_ERR_NO_MEMORY;
+            }
+
+            int failed_idx = 0;
+            for (i = 0; i < n_eps; i++) {
+                if (alive_mask[i] == 0) {
+                    failed_ranks[failed_idx++] = i;
+                }
+            }
+        }
+
+        ucc_free(alive_mask);
+    }
+
+    /* Store failure information in context */
+    if (context->failure_info.ep_list) {
+        ucc_free(context->failure_info.ep_list);
+    }
+    context->failure_info.ep_list = failed_ranks;
+    context->failure_info.num_eps = num_failed;
+
+    /* Call abort on each TL context */
+    for (i = 0; i < context->n_tl_ctx; i++) {
+        ucc_tl_context_t *tl_ctx = context->tl_ctx[i];
+        if ((context->service_team) && (tl_ctx == context->service_ctx)) {
+            /* Skip service context as it may be in use by other contexts */
+            continue;
+        }
+        ucc_tl_lib_t *tl_lib = ucc_derived_of(tl_ctx->super.lib, ucc_tl_lib_t);
+        
+        /* Check if TL supports abort */
+        if (tl_lib->iface->context.abort) {
+            tmp_status = tl_lib->iface->context.abort(&tl_ctx->super);
+            if (UCC_OK != tmp_status) {
+                ucc_warn("failed to abort tl context %s: %s",
+                         tl_lib->iface->super.name,
+                         ucc_status_string(tmp_status));
+                /* Continue with other TLs even if one fails */
+                if (UCC_OK == status) {
+                    status = tmp_status;
+                }
+            }
+        }
+    }
+
+    /* If service team exists, try to abort it */
+    if (context->service_team) {
+        ucc_tl_lib_t *tl_lib = ucc_derived_of(context->service_ctx->super.lib, ucc_tl_lib_t);
+        if (tl_lib->iface->context.abort) {
+            tmp_status = tl_lib->iface->context.abort(&context->service_ctx->super);
+            if (UCC_OK != tmp_status) {
+                ucc_warn("failed to abort service tl context %s: %s",
+                         tl_lib->iface->super.name,
+                         ucc_status_string(tmp_status));
+                if (UCC_OK == status) {
+                    status = tmp_status;
+                }
+            }
+        }
+    }
+
+    ucc_info("context aborted, %d failed processes detected", num_failed);
+    return status;
+}
+
+ucc_status_t ucc_context_recover(ucc_context_h context)
+{
+    ucc_tl_context_t *tl_ctx;
+    ucc_tl_lib_t     *tl_lib;
+    int               i;
+    ucc_status_t      status = UCC_OK;
+    ucc_status_t      tmp_status;
+
+    if (NULL == context) {
+        ucc_error("ucc_context_recover: invalid context handle: NULL");
+        return UCC_ERR_INVALID_PARAM;
+    }
+
+    if (!context->is_failed) {
+        ucc_debug("context is not in failed state");
+        return UCC_OK;
+    }
+
+    /* Attempt to recover each TL context */
+    for (i = 0; i < context->n_tl_ctx; i++) {
+        tl_ctx = context->tl_ctx[i];
+        if ((context->service_team) && (tl_ctx == context->service_ctx)) {
+            /* Skip service context as it may be in use by other contexts */
+            continue;
+        }
+        tl_lib = ucc_derived_of(tl_ctx->super.lib, ucc_tl_lib_t);
+        
+        /* Check if TL supports recovery */
+        if (tl_lib->iface->context.recover) {
+            tmp_status = tl_lib->iface->context.recover(&tl_ctx->super);
+            if (UCC_OK != tmp_status) {
+                ucc_warn("failed to recover tl context %s: %s",
+                         tl_lib->iface->super.name,
+                         ucc_status_string(tmp_status));
+                /* Continue with other TLs even if one fails */
+                status = tmp_status;
+            }
+        }
+    }
+
+    /* If service team exists, try to recover it */
+    if (context->service_team) {
+        tl_lib = ucc_derived_of(context->service_ctx->super.lib, ucc_tl_lib_t);
+        if (tl_lib->iface->context.recover) {
+            tmp_status = tl_lib->iface->context.recover(&context->service_ctx->super);
+            if (UCC_OK != tmp_status) {
+                ucc_warn("failed to recover service tl context %s: %s",
+                         tl_lib->iface->super.name,
+                         ucc_status_string(tmp_status));
+                status = tmp_status;
+            }
+        }
+    }
+
+    /* Unmark context as failed to allow collective operations to resume */
+    /* Note: failed processes list is preserved for querying */
+    context->is_failed = 0;
+
+    ucc_info("context recovered, %d failed processes remain in failure list", 
+             context->failure_info.num_eps);
+    return status;
 }
 
 typedef struct ucc_context_progress_entry {
@@ -1141,6 +1353,11 @@ ucc_status_t ucc_context_get_attr(ucc_context_t      *context,
             }
         }
         context_attr->global_work_buffer_size = max_buffer_size;
+    }
+
+    if (context_attr->mask & UCC_CONTEXT_ATTR_FIELD_FAILED_RANKS) {
+        context_attr->failed_ranks.ep_list = context->failure_info.ep_list;
+        context_attr->failed_ranks.num_eps = context->failure_info.num_eps;
     }
 
     return status;

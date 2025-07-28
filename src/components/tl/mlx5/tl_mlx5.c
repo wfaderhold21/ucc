@@ -242,7 +242,13 @@ UCC_TL_IFACE_DECLARE(mlx5, MLX5);
 
 ucc_status_t ucc_tl_mlx5_context_create_epilog(ucc_base_context_t *context);
 
+ucc_status_t ucc_tl_mlx5_context_recover(ucc_base_context_t *context);
+
+ucc_status_t ucc_tl_mlx5_context_abort(ucc_base_context_t *context);
+
 __attribute__((constructor)) static void tl_mlx5_iface_init(void)
 {
     ucc_tl_mlx5.super.context.create_epilog = ucc_tl_mlx5_context_create_epilog;
+    ucc_tl_mlx5.super.context.recover = ucc_tl_mlx5_context_recover;
+    ucc_tl_mlx5.super.context.abort = ucc_tl_mlx5_context_abort;
 }

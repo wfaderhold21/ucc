@@ -978,6 +978,7 @@ typedef struct ucc_context_attr {
     ucc_context_addr_h      ctx_addr;
     ucc_context_addr_len_t  ctx_addr_len;
     uint64_t                global_work_buffer_size;
+    ucc_failure_info_t      failed_ranks;
 } ucc_context_attr_t;
 
 /**
@@ -2236,7 +2237,7 @@ ucc_status_t ucc_collective_triggered_post(ucc_ee_h ee, ucc_ev_t *ee_event);
 /**
  * @ingroup UCC_RESILIENCE
  *
- * @brief The routine recovers a valid UCC context from a node failure.
+ * @brief The routine aborts collective operations and marks context as failed.
  *
  * @param [in] ctx      Handle to a valid UCC context
  *
@@ -2244,12 +2245,36 @@ ucc_status_t ucc_collective_triggered_post(ucc_ee_h ee, ucc_ev_t *ee_event);
  *
  * @b Description
  *
- * @ref ucc_context_recover is a collective operation over the processes in a
- * context that stops the execution of collective operations on the context,
- * ctx, and recovers from a node failure. To ensure recovery, failed
- * processes will be marked and be queryable through @ref ucc_context_query.
- * Any team created using this context should be considered invalid and
- * continued usage for collective operations can result in undefined behavior.
+ * @ref ucc_context_abort is a collective operation over the processes in a
+ * context that halts the execution of collective operations on the context,
+ * marks the context as failed, determines failed processes through a reduction
+ * operation, and maintains a list of failed processes. After calling this routine,
+ * the context is in a failed state and collective operations cannot proceed
+ * until @ref ucc_context_recover is called.
+ *
+ * @endparblock
+ *
+ * @return Error code as defined by @ref ucc_status_t
+ */
+ucc_status_t ucc_context_abort(ucc_context_h ctx);
+
+/**
+ * @ingroup UCC_RESILIENCE
+ *
+ * @brief The routine recovers a UCC context from a failed state.
+ *
+ * @param [in] ctx      Handle to a UCC context in failed state
+ *
+ * @parblock
+ *
+ * @b Description
+ *
+ * @ref ucc_context_recover unmarks the context as failed, allowing collective
+ * operations to resume. The list of failed processes determined during
+ * @ref ucc_context_abort is preserved and can be queried. Any team created
+ * using this context should be considered invalid and continued usage for
+ * collective operations can result in undefined behavior until teams are
+ * recreated excluding failed processes.
  *
  * @endparblock
  *
