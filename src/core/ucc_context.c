@@ -13,6 +13,7 @@
 #include "utils/ucc_list.h"
 #include "utils/ucc_string.h"
 #include "ucc_progress_queue.h"
+#include "ucc_resilience.h"
 
 static uint32_t ucc_context_seq_num = 0;
 static ucc_config_field_t ucc_context_config_table[] = {
@@ -951,7 +952,6 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
     uint64_t          *alive_mask = NULL;
     uint64_t          *failed_ranks = NULL;
     int                num_failed = 0;
-    ucc_coll_args_t    args;
 
     if (NULL == context) {
         ucc_error("ucc_context_abort: invalid context handle: NULL");
@@ -966,73 +966,64 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
     /* Mark context as failed first to halt collective operations */
     context->is_failed = 1;
 
+    /* Iterate over progress queue and mark all collectives as failed */
+    if (context->pq && !ucc_progress_queue_is_empty(context->pq)) {
+        ucc_debug("emptying the progress queue and marking collectives as failed");
+
+        /* Drain the progress queue by repeatedly calling the progress function
+           until all tasks are processed or failed */
+        ucc_coll_task_t *task;
+        int failed_count = 0;
+
+        /* For thread safety, use the queue's own dequeue mechanism if available */
+        if (context->pq->dequeue != NULL) {
+            /* Multi-threaded progress queue - drain using dequeue */
+            do {
+                context->pq->dequeue(context->pq, &task);
+                if (task) {
+                    task->status = UCC_ERR_NO_RESOURCE;
+                    task->super.status = UCC_ERR_NO_RESOURCE;
+                    ucc_task_complete(task);
+                    failed_count++;
+                }
+            } while (task != NULL);
+        } else {
+            /* Single-threaded progress queue - we need to access the internal list
+               Since the structure is private, we use the derived_of pattern */
+            typedef struct {
+                ucc_progress_queue_t super;
+                ucc_list_link_t      list;
+            } ucc_pq_st_internal_t;
+
+            ucc_pq_st_internal_t *pq_st = ucc_derived_of(context->pq, ucc_pq_st_internal_t);
+            ucc_coll_task_t *tmp;
+
+            ucc_list_for_each_safe(task, tmp, &pq_st->list, list_elem) {
+                task->status = UCC_ERR_NO_RESOURCE;
+                task->super.status = UCC_ERR_NO_RESOURCE;
+                ucc_list_del(&task->list_elem);
+                ucc_task_complete(task);
+                failed_count++;
+            }
+        }
+
+        ucc_debug("marked %d collectives as failed in progress queue", failed_count);
+    }
+
     /* Allocate temporary buffer for failure detection reduction */
     if (context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
-        size_t n_eps = context->params.oob.n_oob_eps;
-        alive_mask = ucc_calloc(n_eps, sizeof(uint64_t), "alive_mask");
-        if (!alive_mask) {
-            ucc_error("failed to allocate alive_mask");
-            return UCC_ERR_NO_MEMORY;
+        /* Use socket-based failure detection instead of problematic OOB collective */
+        ucc_status_t detection_status = ucc_detect_failed_processes(context,
+                                                                   &alive_mask,
+                                                                   &failed_ranks,
+                                                                   &num_failed);
+        if (detection_status != UCC_OK) {
+            ucc_warn("failure detection failed: %s, proceeding with local abort only",
+                     ucc_status_string(detection_status));
+            /* Continue with abort even if failure detection fails */
+        } else {
+            ucc_info("detected %d failed processes during context abort", num_failed);
         }
-
-        /* Mark this process as alive (1) */
-        alive_mask[context->params.oob.oob_ep] = 1;
-
-        /* Perform allreduce to determine which processes are alive */
-        memset(&args, 0, sizeof(args));
-        args.mask              = UCC_COLL_ARGS_FIELD_FLAGS;
-        args.coll_type         = UCC_COLL_TYPE_ALLREDUCE;
-        args.op                = UCC_OP_SUM;
-        args.src.info.buffer   = alive_mask;
-        args.src.info.count    = n_eps;
-        args.src.info.datatype = UCC_DT_UINT64;
-        args.src.info.mem_type = UCC_MEMORY_TYPE_HOST;
-        args.dst.info.buffer   = alive_mask;
-        args.dst.info.count    = n_eps;
-        args.dst.info.datatype = UCC_DT_UINT64;
-        args.dst.info.mem_type = UCC_MEMORY_TYPE_HOST;
-        args.flags             = UCC_COLL_ARGS_FLAG_IN_PLACE;
-
-        /* Use OOB allgather instead of collective since context is being aborted */
-        void *req = NULL;
-        tmp_status = context->params.oob.allgather(alive_mask, alive_mask, 
-                                                  n_eps * sizeof(uint64_t),
-                                                  context->params.oob.coll_info, &req);
-        if (UCC_OK == tmp_status && req) {
-            /* Wait for completion */
-            do {
-                tmp_status = context->params.oob.req_test(req);
-            } while (tmp_status == UCC_INPROGRESS);
-
-            if (UCC_OK == tmp_status) {
-                context->params.oob.req_free(req);
-            }
-        }
-
-        /* Count failed processes and build failure list */
-        for (i = 0; i < n_eps; i++) {
-            if (alive_mask[i] == 0) {
-                num_failed++;
-            }
-        }
-
-        if (num_failed > 0) {
-            failed_ranks = ucc_malloc(num_failed * sizeof(uint64_t), "failed_ranks");
-            if (!failed_ranks) {
-                ucc_error("failed to allocate failed_ranks");
-                ucc_free(alive_mask);
-                return UCC_ERR_NO_MEMORY;
-            }
-
-            int failed_idx = 0;
-            for (i = 0; i < n_eps; i++) {
-                if (alive_mask[i] == 0) {
-                    failed_ranks[failed_idx++] = i;
-                }
-            }
-        }
-
-        ucc_free(alive_mask);
     }
 
     /* Store failure information in context */
@@ -1064,6 +1055,11 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
                 }
             }
         }
+    }
+
+    /* Clean up memory allocated by failure detection */
+    if (alive_mask) {
+        ucc_free(alive_mask);
     }
 
     /* If service team exists, try to abort it */

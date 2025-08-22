@@ -108,6 +108,7 @@ libucc_la_SOURCES =                   \
 	core/ucc_team.c                   \
 	core/ucc_ee.c                     \
 	core/ucc_coll.c                   \
+	core/ucc_resilience.c             \
 	core/ucc_progress_queue.c         \
 	core/ucc_progress_queue_st.c      \
 	core/ucc_progress_queue_mt.c      \

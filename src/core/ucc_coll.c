@@ -182,6 +182,13 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_init,
         ucc_error("team %p is used before team create is completed", team);
         return UCC_ERR_INVALID_PARAM;
     }
+
+    /* Check if context is in failed state - halt collective operations */
+    if (ucc_unlikely(team->contexts[0]->is_failed)) {
+        ucc_error("context is in failed state, collective operations halted");
+        return UCC_ERR_NO_RESOURCE;
+    }
+
     /* Global check to reduce the amount of checks throughout
        all TLs */
 
