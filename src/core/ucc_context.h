@@ -82,6 +82,7 @@ typedef struct ucc_context {
     /* Failure tracking fields */
     int                      is_failed;          /*!< Flag indicating if context is in failed state */
     ucc_failure_info_t       failure_info;       /*!< Information about failed processes */
+    uint32_t                 failure_detection_method; /*!< Method for failure detection: 0=hybrid, 1=sockets only, 2=service team only */
 } ucc_context_t;
 
 typedef struct ucc_context_config {
@@ -96,6 +97,7 @@ typedef struct ucc_context_config {
     uint32_t                  lock_free_progress_q;
     uint32_t                  internal_oob;
     uint32_t                  throttle_progress;
+    uint32_t                  failure_detection_method; /*!< Method for failure detection: 0=hybrid, 1=sockets only, 2=service team only */
 } ucc_context_config_t;
 
 /* Internal function for context creation that takes explicit

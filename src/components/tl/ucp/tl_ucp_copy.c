@@ -153,6 +153,11 @@ ucc_status_t ucc_tl_ucp_ucp_copy_test(ucc_tl_ucp_context_t *ctx,
 {
     ucs_status_ptr_t req_status = (ucs_status_ptr_t)copy_task;
 
+    /* If context was aborted, workers are already destroyed */
+    if (ctx->is_aborted) {
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
     ucp_worker_progress(ctx->worker.ucp_worker);
     return ucs_status_to_ucc_status(ucp_request_check_status(req_status));
 }

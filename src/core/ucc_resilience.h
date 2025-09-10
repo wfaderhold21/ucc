@@ -11,6 +11,11 @@
 #include "ucc_context.h"
 #include <pthread.h>
 
+/* Failure detection method constants */
+#define UCC_FAILURE_DETECTION_HYBRID      0  /*!< Try service team first, fallback to sockets */
+#define UCC_FAILURE_DETECTION_SOCKETS     1  /*!< Use socket-based detection only */
+#define UCC_FAILURE_DETECTION_SERVICE     2  /*!< Use service team-based detection only */
+
 /* Heartbeat server state */
 typedef struct ucc_heartbeat_server {
     int                server_socket;
@@ -54,6 +59,56 @@ ucc_status_t ucc_detect_failed_processes(ucc_context_t *context,
                                         uint64_t **alive_mask,
                                         uint64_t **failed_ranks,
                                         int *num_failed);
+
+/**
+ * @brief Detect failed processes using service team-based OOB communication
+ *
+ * @param context       UCC context with service team
+ * @param alive_mask    Output array indicating which processes are alive (1) or failed (0)
+ * @param failed_ranks  Output array of failed process ranks
+ * @param num_failed    Output number of failed processes
+ *
+ * @return UCC_OK on success, error code otherwise
+ */
+ucc_status_t ucc_service_team_failure_detection(ucc_context_t *context,
+                                               uint64_t **alive_mask,
+                                               uint64_t **failed_ranks,
+                                               int *num_failed);
+
+/**
+ * @brief Hybrid failure detection: try service team OOB first, fallback to sockets
+ *
+ * @param context       UCC context
+ * @param alive_mask    Output array indicating which processes are alive (1) or failed (0)
+ * @param failed_ranks  Output array of failed process ranks
+ * @param num_failed    Output number of failed processes
+ *
+ * @return UCC_OK on success, error code otherwise
+ */
+ucc_status_t ucc_hybrid_failure_detection(ucc_context_t *context,
+                                         uint64_t **alive_mask,
+                                         uint64_t **failed_ranks,
+                                         int *num_failed);
+
+/**
+ * @brief Set the failure detection method for a context
+ *
+ * @param context       UCC context
+ * @param method        Failure detection method (see UCC_FAILURE_DETECTION_* constants)
+ *
+ * @return UCC_OK on success, error code otherwise
+ */
+ucc_status_t ucc_set_failure_detection_method(ucc_context_t *context, uint32_t method);
+
+/**
+ * @brief Get the current failure detection method for a context
+ *
+ * @param context       UCC context
+ * @param method        Output: current failure detection method
+ *
+ * @return UCC_OK on success, error code otherwise
+ */
+ucc_status_t ucc_get_failure_detection_method(ucc_context_t *context, uint32_t *method);
 
 /**
  * @brief Test if a specific process is alive using socket connection

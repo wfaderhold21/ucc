@@ -93,6 +93,11 @@ void ucc_tl_ucp_close_eps(ucc_tl_ucp_worker_t * worker,
      ucs_status_ptr_t             close_req;
      ucp_request_param_t          param;
 
+     /* If context was aborted, workers are already destroyed */
+     if (ctx->is_aborted) {
+         return;
+     }
+
      param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
      param.flags        = 0; // 0 means FLUSH
      ep                 = get_next_ep_to_close(worker, ctx, &i);

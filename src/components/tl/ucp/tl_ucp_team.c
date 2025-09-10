@@ -139,14 +139,19 @@ ucc_status_t ucc_tl_ucp_team_destroy(ucc_base_team_t *tl_team)
 
 static ucc_status_t ucc_tl_ucp_team_preconnect(ucc_tl_ucp_team_t *team)
 {
-    ucc_rank_t src, dst, size, rank;
-    ucc_status_t status;
-    int i;
+    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
+    ucc_rank_t            rank = UCC_TL_TEAM_RANK(team);
+    ucc_rank_t            size = UCC_TL_TEAM_SIZE(team);
+    ucc_rank_t            i, src, dst;
+    ucc_status_t          status;
 
-    size = UCC_TL_TEAM_SIZE(team);
-    rank = UCC_TL_TEAM_RANK(team);
+    /* If context was aborted, workers are already destroyed */
+    if (ctx->is_aborted) {
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
     if (!team->preconnect_task) {
-        team->preconnect_task             = ucc_tl_ucp_get_task(team);
+        team->preconnect_task = ucc_tl_ucp_get_task(team);
         team->preconnect_task->tagged.tag = 0;
         team->preconnect_task->super.bargs.args.mask = 0;
     }

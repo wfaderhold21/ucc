@@ -38,12 +38,30 @@ unsigned ucc_tl_ucp_service_worker_progress(void *progress_arg)
     int                   throttling_count =
         ucc_atomic_fadd32(&ctx->service_worker_throttling_count, 1);
 
+    /* If context was aborted, workers are already destroyed */
+    if (ctx->is_aborted) {
+        return 0;
+    }
+
     if (throttling_count == ctx->cfg.service_throttling_thresh) {
         ctx->service_worker_throttling_count = 0;
         return ucp_worker_progress(ctx->service_worker.ucp_worker);
     }
 
     return 0;
+}
+
+/* Wrapper function for main worker progress to check abort flag */
+unsigned ucc_tl_ucp_worker_progress(void *progress_arg)
+{
+    ucc_tl_ucp_context_t *ctx = (ucc_tl_ucp_context_t *)progress_arg;
+
+    /* If context was aborted, workers are already destroyed */
+    if (ctx->is_aborted) {
+        return 0;
+    }
+
+    return ucp_worker_progress(ctx->worker.ucp_worker);
 }
 
 static inline ucc_status_t
@@ -156,6 +174,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     UCC_CLASS_CALL_SUPER_INIT(ucc_tl_context_t, &tl_ucp_config->super,
                               params->context);
     memcpy(&self->cfg, tl_ucp_config, sizeof(*tl_ucp_config));
+    self->is_aborted = 0;  /* Initialize abort flag */
     lib = ucc_derived_of(self->super.super.lib, ucc_tl_ucp_lib_t);
     prefix = strdup(params->prefix);
     if (!prefix) {
@@ -271,8 +290,8 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
 
     CHECK(UCC_OK != ucc_context_progress_register(
                         params->context,
-                        (ucc_context_progress_fn_t)ucp_worker_progress,
-                        self->worker.ucp_worker),
+                        (ucc_context_progress_fn_t)ucc_tl_ucp_worker_progress,
+                        self),
           "failed to register progress function", err_thread_mode,
           UCC_ERR_NO_MESSAGE, self);
 
@@ -359,6 +378,11 @@ static void ucc_tl_ucp_context_barrier(ucc_tl_ucp_context_t *ctx,
     char         sbuf;
     void        *req;
 
+    /* If context was aborted, workers are already destroyed */
+    if (ctx->is_aborted) {
+        return;
+    }
+
     if (ucc_unlikely(oob->n_oob_eps < 2)) {
         return;
     }
@@ -419,7 +443,10 @@ ucc_status_t ucc_tl_ucp_rinfo_destroy(ucc_tl_ucp_context_t *ctx)
 static inline void ucc_tl_ucp_eps_cleanup(ucc_tl_ucp_worker_t * worker,
                                           ucc_tl_ucp_context_t *ctx)
 {
-    ucc_tl_ucp_close_eps(worker, ctx);
+    /* If context was aborted, endpoints are already destroyed */
+    if (!ctx->is_aborted) {
+        ucc_tl_ucp_close_eps(worker, ctx);
+    }
     if (worker->eps) {
         ucc_free(worker->eps);
     } else {
@@ -442,27 +469,36 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
     if (self->remote_info) {
         ucc_tl_ucp_rinfo_destroy(self);
     }
-    ucc_context_progress_deregister(
-        self->super.super.ucc_context,
-        (ucc_context_progress_fn_t)ucp_worker_progress,
-        self->worker.ucp_worker);
-    if (self->cfg.service_worker != 0) {
+
+    /* If context was aborted, workers are already destroyed */
+    if (!self->is_aborted) {
         ucc_context_progress_deregister(
             self->super.super.ucc_context,
-            (ucc_context_progress_fn_t)ucc_tl_ucp_service_worker_progress,
+            (ucc_context_progress_fn_t)ucc_tl_ucp_worker_progress,
             self);
+        if (self->cfg.service_worker != 0) {
+            ucc_context_progress_deregister(
+                self->super.super.ucc_context,
+                (ucc_context_progress_fn_t)ucc_tl_ucp_service_worker_progress,
+                self);
+        }
     }
+
     ucc_mpool_cleanup(&self->req_mp, 1);
     ucc_tl_ucp_eps_cleanup(&self->worker, self);
     if (self->cfg.service_worker != 0) {
         ucc_tl_ucp_eps_cleanup(&self->service_worker, self);
     }
-    if (UCC_TL_CTX_HAS_OOB(self)) {
-        ucc_tl_ucp_context_barrier(self, &UCC_TL_CTX_OOB(self));
-    }
-    ucc_tl_ucp_worker_cleanup(self->worker);
-    if (self->cfg.service_worker != 0) {
-        ucc_tl_ucp_worker_cleanup(self->service_worker);
+
+    /* Skip barrier and worker cleanup if context was aborted */
+    if (!self->is_aborted) {
+        if (UCC_TL_CTX_HAS_OOB(self)) {
+            ucc_tl_ucp_context_barrier(self, &UCC_TL_CTX_OOB(self));
+        }
+        ucc_tl_ucp_worker_cleanup(self->worker);
+        if (self->cfg.service_worker != 0) {
+            ucc_tl_ucp_worker_cleanup(self->service_worker);
+        }
     }
 }
 
@@ -704,6 +740,9 @@ ucc_status_t ucc_tl_ucp_context_recover(ucc_context_h context)
         return UCC_ERR_NOT_SUPPORTED;
     }
 
+    /* Clear the abort flag on recovery */
+    tl_ctx->is_aborted = 0;
+
     // Handle regular worker endpoints
     for (i = 0; i < context->params.oob.n_oob_eps; i++) {
         if (worker->eps[i]) {
@@ -747,6 +786,28 @@ ucc_status_t ucc_tl_ucp_context_abort(ucc_base_context_t *context)
 
     tl_debug(tl_ctx->super.super.lib, "aborting UCP context");
 
+    /* Mark context as aborted to prevent cleanup issues */
+    tl_ctx->is_aborted = 1;
+
+    /* Mark endpoints as invalid during abort - let worker destruction handle cleanup */
+    if (context->ucc_context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
+        if (worker->eps) {
+            for (i = 0; i < context->ucc_context->params.oob.n_oob_eps; i++) {
+                if (worker->eps[i]) {
+                    worker->eps[i] = NULL;
+                }
+            }
+        }
+
+        if (service_worker->eps) {
+            for (i = 0; i < context->ucc_context->params.oob.n_oob_eps; i++) {
+                if (service_worker->eps[i]) {
+                    service_worker->eps[i] = NULL;
+                }
+            }
+        }
+    }
+
     /* Cancel ongoing requests on regular worker */
     if (worker->ucp_worker) {
         ucp_worker_destroy(worker->ucp_worker);
@@ -757,27 +818,6 @@ ucc_status_t ucc_tl_ucp_context_abort(ucc_base_context_t *context)
     if (service_worker->ucp_worker) {
         ucp_worker_destroy(service_worker->ucp_worker);
         service_worker->ucp_worker = NULL;
-    }
-
-    /* Mark endpoints as invalid if OOB is available */
-    if (context->ucc_context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
-        if (worker->eps) {
-            for (i = 0; i < context->ucc_context->params.oob.n_oob_eps; i++) {
-                if (worker->eps[i]) {
-                    ucp_ep_destroy(worker->eps[i]);
-                    worker->eps[i] = NULL;
-                }
-            }
-        }
-
-        if (service_worker->eps) {
-            for (i = 0; i < context->ucc_context->params.oob.n_oob_eps; i++) {
-                if (service_worker->eps[i]) {
-                    ucp_ep_destroy(service_worker->eps[i]);
-                    service_worker->eps[i] = NULL;
-                }
-            }
-        }
     }
 
     tl_debug(tl_ctx->super.super.lib, "UCP context aborted successfully");

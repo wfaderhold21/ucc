@@ -204,6 +204,7 @@ typedef struct ucc_tl_ucp_context {
     uint64_t                    n_rinfo_segs;
     uint64_t                    ucp_memory_types;
     int                         topo_required;
+    int                         is_aborted;  /* Flag to track if context has been aborted */
     struct {
         ucc_tl_ucp_copy_post_fn_t     post;
         ucc_tl_ucp_copy_test_fn_t     test;
@@ -261,4 +262,8 @@ void ucc_tl_ucp_pre_register_mem(ucc_tl_ucp_team_t *team, void *addr,
 ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t *ctx,
                                             ucc_mem_map_params_t  map,
                                             ucc_team_oob_coll_t   oob);
+
+/* Progress function declarations */
+unsigned ucc_tl_ucp_service_worker_progress(void *progress_arg);
+unsigned ucc_tl_ucp_worker_progress(void *progress_arg);
 #endif

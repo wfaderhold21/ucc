@@ -1012,17 +1012,17 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
 
     /* Allocate temporary buffer for failure detection reduction */
     if (context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
-        /* Use socket-based failure detection instead of problematic OOB collective */
-        ucc_status_t detection_status = ucc_detect_failed_processes(context,
-                                                                   &alive_mask,
-                                                                   &failed_ranks,
-                                                                   &num_failed);
+        /* Use hybrid failure detection: try service team OOB first, fallback to sockets */
+        ucc_status_t detection_status = ucc_hybrid_failure_detection(context,
+                                                                     &alive_mask,
+                                                                     &failed_ranks,
+                                                                     &num_failed);
         if (detection_status != UCC_OK) {
-            ucc_warn("failure detection failed: %s, proceeding with local abort only",
+            ucc_warn("hybrid failure detection failed: %s, proceeding with local abort only",
                      ucc_status_string(detection_status));
             /* Continue with abort even if failure detection fails */
         } else {
-            ucc_info("detected %d failed processes during context abort", num_failed);
+            ucc_info("hybrid failure detection completed: %d failed processes detected during context abort", num_failed);
         }
     }
 
