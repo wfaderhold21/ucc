@@ -87,6 +87,4 @@ __attribute__((constructor)) static void tl_nccl_iface_init(void)
 {
     ucc_tl_nccl.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_ALLGATHERV)] =
         ucc_tl_nccl_allgatherv_algs;
-    ucc_tl_nccl.super.context.recover = ucc_tl_nccl_context_recover;
-    ucc_tl_nccl.super.context.abort = ucc_tl_nccl_context_abort;
 }

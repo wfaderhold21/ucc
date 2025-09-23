@@ -50,23 +50,4 @@ ucc_tl_self_get_context_attr(const ucc_base_context_t *context, /* NOLINT */
     return UCC_OK;
 }
 
-ucc_status_t
-ucc_tl_self_context_recover(ucc_base_context_t *ctx)
-{
-    return UCC_ERR_NOT_SUPPORTED;
-}
 
-ucc_status_t
-ucc_tl_self_context_abort(ucc_base_context_t *ctx)
-{
-    ucc_tl_self_context_t *tl_ctx = ucc_derived_of(ctx, ucc_tl_self_context_t);
-
-    tl_debug(tl_ctx->super.super.lib, "aborting SELF context");
-
-    /* SELF TL context is stateless for collective operations.
-     * Abort operation is essentially a no-op since there are
-     * no persistent resources or connections to clean up. */
-
-    tl_debug(tl_ctx->super.super.lib, "SELF context aborted successfully");
-    return UCC_OK;
-}

@@ -59,5 +59,6 @@ ucc_status_t ucc_cl_basic_get_context_attr(const ucc_base_context_t *context,
                                            ucc_base_ctx_attr_t      *attr);
 ucc_status_t ucc_cl_basic_context_recover(ucc_base_context_t *context);
 ucc_status_t ucc_cl_basic_context_abort(ucc_base_context_t *context);
+ucc_status_t ucc_cl_basic_team_shrink(ucc_base_team_t *cl_team, uint64_t *failed_ranks, uint32_t nr_ranks);
 
 #endif

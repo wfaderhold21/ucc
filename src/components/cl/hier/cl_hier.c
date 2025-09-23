@@ -106,6 +106,8 @@ ucc_status_t ucc_cl_hier_team_create_test(ucc_base_team_t *cl_team);
 
 ucc_status_t ucc_cl_hier_team_destroy(ucc_base_team_t *cl_team);
 
+ucc_status_t ucc_cl_hier_team_shrink(ucc_base_team_t *cl_team, uint64_t *failed_ranks, uint32_t nr_ranks);
+
 ucc_status_t ucc_cl_hier_team_get_scores(ucc_base_team_t   *cl_team,
                                          ucc_coll_score_t **score);
 UCC_CL_IFACE_DECLARE(hier, HIER);

@@ -493,6 +493,28 @@ ucc_status_t ucc_team_create_test(ucc_team_h team)
     return ucc_team_create_test_single(team->contexts[0], team);
 }
 
+static ucc_status_t ucc_tl_team_destroy_single(ucc_tl_team_t *tl_team, ucc_context_t *ctx)
+{
+    ucc_tl_iface_t *tl_iface = UCC_TL_TEAM_IFACE(tl_team);
+    return tl_iface->team.destroy(&tl_team->super);
+}
+
+static ucc_status_t ucc_tl_team_create_single(ucc_context_t *ctx, 
+                                              const ucc_base_team_params_t *params,
+                                              ucc_tl_team_t **tl_team)
+{
+    ucc_tl_context_t *tl_ctx = ctx->service_ctx;
+    ucc_tl_iface_t *tl_iface = UCC_TL_CTX_IFACE(tl_ctx);
+    ucc_status_t status;
+    
+    status = tl_iface->team.create_post(&tl_ctx->super, params, (ucc_base_team_t**)tl_team);
+    if (UCC_OK != status) {
+        return status;
+    }
+    
+    return tl_iface->team.create_test(&(*tl_team)->super);
+}
+
 static ucc_status_t ucc_team_destroy_single(ucc_team_h team)
 {
     ucc_cl_iface_t *cl_iface;
@@ -654,14 +676,199 @@ static void ucc_team_release_id(ucc_team_t *team)
     }
 }
 
-ucc_status_t ucc_team_shrink(uint64_t *failed_ranks, ucc_team_h *team)
+ucc_status_t ucc_team_shrink(uint64_t *failed_ranks, uint32_t nr_ranks, ucc_team_h *team)
 {
-    /* Resilience feature is not yet implemented.
-     * This stub function is provided to support compilation and testing
-     * of resilience infrastructure.
-     */
-    (void)failed_ranks; /* suppress unused parameter warning */
-    (void)team;         /* suppress unused parameter warning */
+    ucc_team_t *t;
+    ucc_rank_t *new_ctx_ranks = NULL;
+    ucc_ep_map_t new_ctx_map;
+    ucc_rank_t i, j, k;
+    ucc_rank_t new_size;
+    ucc_rank_t failed_team_rank;
+    ucc_rank_t ctx_rank;
+    ucc_status_t status = UCC_OK;
+    int is_failed_rank;
 
-    return UCC_ERR_NOT_SUPPORTED;
+    if (!failed_ranks || !team) {
+        return UCC_ERR_INVALID_PARAM;
+    }
+
+    if (!*team) {
+        return UCC_ERR_INVALID_PARAM;
+    }
+
+    t = *team;
+
+    if (nr_ranks == 0) {
+        /* No ranks to remove */
+        return UCC_OK;
+    }
+
+    if (nr_ranks >= t->size) {
+        /* Cannot remove all ranks */
+        ucc_error("cannot remove all ranks from team (trying to remove %u out of %u)",
+                  nr_ranks, t->size);
+        return UCC_ERR_INVALID_PARAM;
+    }
+
+    new_size = t->size - nr_ranks;
+    ucc_debug("shrinking team from size %u to %u, removing %u ranks", 
+              t->size, new_size, nr_ranks);
+
+    /* Step 1: Identify and validate failed ranks */
+    /* Convert context ranks to team ranks and validate they exist in the team */
+    for (i = 0; i < nr_ranks; i++) {
+        ctx_rank = (ucc_rank_t)failed_ranks[i];
+        
+        /* Find the team rank that corresponds to this context rank */
+        is_failed_rank = 0;
+        for (j = 0; j < t->size; j++) {
+            if (ucc_ep_map_eval(t->ctx_map, j) == ctx_rank) {
+                is_failed_rank = 1;
+                break;
+            }
+        }
+        
+        if (!is_failed_rank) {
+            ucc_warn("failed rank %u (context rank) not found in team", ctx_rank);
+            continue; /* Skip this rank, it's not in the team */
+        }
+    }
+
+    /* Step 2: Create new context ranks array without failed ranks */
+    if (t->ctx_ranks) {
+        new_ctx_ranks = ucc_malloc(new_size * sizeof(ucc_rank_t), "new_ctx_ranks");
+        if (!new_ctx_ranks) {
+            ucc_error("failed to allocate %zd bytes for new ctx ranks array",
+                      new_size * sizeof(ucc_rank_t));
+            return UCC_ERR_NO_MEMORY;
+        }
+
+        k = 0;
+        for (i = 0; i < t->size; i++) {
+            ctx_rank = ucc_ep_map_eval(t->ctx_map, i);
+            is_failed_rank = 0;
+            
+            /* Check if this context rank is in the failed ranks list */
+            for (j = 0; j < nr_ranks; j++) {
+                if (ctx_rank == (ucc_rank_t)failed_ranks[j]) {
+                    is_failed_rank = 1;
+                    break;
+                }
+            }
+            
+            if (!is_failed_rank) {
+                new_ctx_ranks[k++] = ctx_rank;
+            }
+        }
+        ucc_assert(k == new_size);
+    }
+
+    /* Step 3: Update team size */
+    t->size = new_size;
+
+    /* Step 4: Update rank mappings - shift ranks greater than failed ranks down by 1 */
+    /* This is a simplified approach - in practice, you might need more sophisticated
+     * rank remapping depending on the team's usage patterns */
+    
+    /* Update the current process's rank if it's affected */
+    for (i = 0; i < nr_ranks; i++) {
+        ctx_rank = (ucc_rank_t)failed_ranks[i];
+        failed_team_rank = UCC_RANK_INVALID;
+        
+        /* Find the team rank that corresponds to this failed context rank */
+        for (j = 0; j < t->size + nr_ranks; j++) { /* Use old size for lookup */
+            if (ucc_ep_map_eval(t->ctx_map, j) == ctx_rank) {
+                failed_team_rank = j;
+                break;
+            }
+        }
+        
+        if (failed_team_rank != UCC_RANK_INVALID && t->rank > failed_team_rank) {
+            t->rank--;
+        }
+    }
+
+    /* Step 5: Redefine the ctx_map */
+    if (t->ctx_ranks) {
+        /* Free old ctx_ranks and replace with new ones */
+        ucc_free(t->ctx_ranks);
+        t->ctx_ranks = new_ctx_ranks;
+        
+        /* Create new ctx_map from the updated ranks array */
+        new_ctx_map = ucc_ep_map_from_array(&t->ctx_ranks, new_size, 
+                                           t->contexts[0]->addr_storage.size, 0);
+        t->ctx_map = new_ctx_map;
+    } else {
+        /* If no ctx_ranks array, we need to handle the map differently */
+        /* For now, we'll create a simple mapping - this might need refinement */
+        if (t->ctx_map.type == UCC_EP_MAP_FULL) {
+            /* For full mapping, just update the ep_num */
+            t->ctx_map.ep_num = new_size;
+        } else {
+            /* For other map types, we need more sophisticated handling */
+            ucc_warn("team shrink with non-FULL ctx_map type %d not fully supported",
+                     t->ctx_map.type);
+        }
+    }
+
+    /* Step 6: Update base team parameters */
+    t->bp.size = new_size;
+    t->bp.rank = t->rank;
+
+    /* Step 7: Update CL teams - delegate to each CL team */
+    for (i = 0; i < t->n_cl_teams; i++) {
+        if (t->cl_teams[i]) {
+            ucc_cl_iface_t *cl_iface = UCC_CL_TEAM_IFACE(t->cl_teams[i]);
+            if (cl_iface->team.shrink) {
+                status = cl_iface->team.shrink(&t->cl_teams[i]->super, failed_ranks, nr_ranks);
+                if (UCC_OK != status) {
+                    ucc_warn("CL team %d shrink failed: %s", i, ucc_status_string(status));
+                }
+            } else {
+                ucc_debug("CL team %d does not support shrink", i);
+            }
+        }
+    }
+
+    /* Step 8: Update TL teams - recreate with new parameters */
+    /* For TL teams, we need to destroy and recreate them with updated parameters */
+    if (t->service_team) {
+        ucc_tl_iface_t *tl_iface = UCC_TL_TEAM_IFACE(t->service_team);
+        if (tl_iface->team.shrink) {
+            status = tl_iface->team.shrink(&t->service_team->super, failed_ranks, nr_ranks);
+            if (UCC_OK != status) {
+                ucc_warn("Service TL team shrink failed: %s", ucc_status_string(status));
+            }
+        } else {
+            /* If shrink not supported, destroy and recreate */
+            ucc_debug("Service TL team does not support shrink, recreating");
+            status = ucc_tl_team_destroy_single(t->service_team, t->contexts[0]);
+            if (UCC_OK == status) {
+                /* Recreate service team with new parameters */
+                ucc_base_team_params_t new_params = t->bp;
+                new_params.size = new_size;
+                new_params.rank = t->rank;
+                new_params.map = new_ctx_map;
+                status = ucc_tl_team_create_single(t->contexts[0], &new_params, &t->service_team);
+                if (UCC_OK != status) {
+                    ucc_warn("Failed to recreate service TL team: %s", ucc_status_string(status));
+                }
+            }
+        }
+    }
+
+    /* Step 9: Rebuild score map if it exists */
+    if (t->score_map) {
+        ucc_coll_score_free_map(t->score_map);
+        t->score_map = NULL;
+        /* Rebuild score map with new team size */
+        status = ucc_team_build_score_map(t);
+        if (UCC_OK != status) {
+            ucc_warn("failed to rebuild score map after team shrink: %s",
+                     ucc_status_string(status));
+        }
+    }
+
+    ucc_debug("team shrink completed: new size %u, new rank %u", t->size, t->rank);
+    return UCC_OK;
 }

@@ -6,6 +6,7 @@
 
 #include "tl_ucp.h"
 #include "utils/ucc_malloc.h"
+#include "utils/ucc_compiler_def.h"
 #include "components/mc/ucc_mc.h"
 #include "components/mc/base/ucc_mc_base.h"
 #include "allreduce/allreduce.h"
@@ -340,6 +341,73 @@ void         ucc_tl_ucp_service_update_id(ucc_base_team_t *team, uint16_t id);
 ucc_status_t ucc_tl_ucp_team_get_scores(ucc_base_team_t   *tl_team,
                                         ucc_coll_score_t **score);
 
+ucc_status_t ucc_tl_ucp_team_shrink(ucc_base_team_t *tl_team, uint64_t *failed_ranks, uint32_t nr_ranks)
+{
+    ucc_tl_ucp_team_t    *team = ucc_derived_of(tl_team, ucc_tl_ucp_team_t);
+    ucc_tl_ucp_context_t *ctx  = UCC_TL_UCP_TEAM_CTX(team);
+    ucc_rank_t            i, j;
+    int                   is_failed_rank;
+
+    if (!failed_ranks || nr_ranks == 0) {
+        return UCC_OK;
+    }
+
+    tl_debug(UCC_TL_TEAM_LIB(team), "UCP team shrink: updating team structure for %u failed ranks", nr_ranks);
+
+    /* Team shrink should only update team structure, not close endpoints */
+    /* Endpoints to failed processes should be closed in context_abort */
+    
+    /* Mark endpoints to failed ranks as invalid in regular worker */
+    if (team->worker && team->worker->eps) {
+        for (i = 0; i < ctx->super.super.ucc_context->params.oob.n_oob_eps; i++) {
+            if (team->worker->eps[i]) {
+                /* Check if this rank is in the failed ranks list */
+                is_failed_rank = 0;
+                for (j = 0; j < nr_ranks; j++) {
+                    if (failed_ranks[j] == i) {
+                        is_failed_rank = 1;
+                        break;
+                    }
+                }
+                
+                if (is_failed_rank) {
+                    /* Mark endpoint as invalid - actual closing happens in context_abort */
+                    team->worker->eps[i] = NULL;
+                    tl_debug(UCC_TL_TEAM_LIB(team), 
+                            "marked endpoint to failed rank %u as invalid", i);
+                }
+            }
+        }
+    }
+
+    /* Mark endpoints to failed ranks as invalid in service worker if enabled */
+    if (ctx->cfg.service_worker != 0 && ctx->service_worker.eps) {
+        for (i = 0; i < ctx->super.super.ucc_context->params.oob.n_oob_eps; i++) {
+            if (ctx->service_worker.eps[i]) {
+                /* Check if this rank is in the failed ranks list */
+                is_failed_rank = 0;
+                for (j = 0; j < nr_ranks; j++) {
+                    if (failed_ranks[j] == i) {
+                        is_failed_rank = 1;
+                        break;
+                    }
+                }
+                
+                if (is_failed_rank) {
+                    /* Mark endpoint as invalid - actual closing happens in context_abort */
+                    ctx->service_worker.eps[i] = NULL;
+                    tl_debug(UCC_TL_TEAM_LIB(team), 
+                            "marked service endpoint to failed rank %u as invalid", i);
+                }
+            }
+        }
+    }
+
+    tl_debug(UCC_TL_TEAM_LIB(team), "UCP team shrink completed - endpoints marked as invalid");
+    
+    return UCC_OK;
+}
+
 UCC_TL_IFACE_DECLARE(ucp, UCP);
 
 ucs_memory_type_t ucc_memtype_to_ucs[UCC_MEMORY_TYPE_LAST + 1] = {
@@ -385,8 +453,6 @@ UCC_TL_UCP_PROFILE_FUNC_VOID(ucc_tl_ucp_pre_register_mem, (team, addr, length,
 
 __attribute__((constructor)) static void tl_ucp_iface_init(void)
 {
-    ucc_tl_ucp.super.context.recover = ucc_tl_ucp_context_recover;
-    ucc_tl_ucp.super.context.abort = ucc_tl_ucp_context_abort;
     ucc_tl_ucp.super.scoll.allgather = ucc_tl_ucp_service_allgather;
     ucc_tl_ucp.super.scoll.allreduce = ucc_tl_ucp_service_allreduce;
     ucc_tl_ucp.super.scoll.bcast     = ucc_tl_ucp_service_bcast;

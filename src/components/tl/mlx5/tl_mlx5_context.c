@@ -375,24 +375,4 @@ ucc_status_t ucc_tl_mlx5_context_create_epilog(ucc_base_context_t *context)
     return ucc_tl_mlx5_context_ib_ctx_pd_setup(context);
 }
 
-ucc_status_t
-ucc_tl_mlx5_context_recover(ucc_base_context_t *ctx)
-{
-    return UCC_ERR_NOT_SUPPORTED;
-}
 
-ucc_status_t
-ucc_tl_mlx5_context_abort(ucc_base_context_t *ctx)
-{
-    ucc_tl_mlx5_context_t *tl_ctx = ucc_derived_of(ctx, ucc_tl_mlx5_context_t);
-
-    tl_debug(tl_ctx->super.super.lib, "aborting MLX5 context");
-
-    /* MLX5 context abort involves cleaning up any outstanding 
-     * queue pairs, protection domains, and other MLX5 resources.
-     * The specific implementation depends on the current MLX5 
-     * resource management. */
-
-    tl_debug(tl_ctx->super.super.lib, "MLX5 context aborted successfully");
-    return UCC_OK;
-}

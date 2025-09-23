@@ -94,23 +94,4 @@ ucc_tl_cuda_get_context_attr(const ucc_base_context_t *context, /* NOLINT */
     return UCC_OK;
 }
 
-ucc_status_t
-ucc_tl_cuda_context_recover(ucc_base_context_t *ctx)
-{
-    return UCC_ERR_NOT_SUPPORTED;
-}
 
-ucc_status_t
-ucc_tl_cuda_context_abort(ucc_base_context_t *ctx)
-{
-    ucc_tl_cuda_context_t *tl_ctx = ucc_derived_of(ctx, ucc_tl_cuda_context_t);
-
-    tl_debug(tl_ctx->super.super.lib, "aborting CUDA context");
-
-    /* CUDA context abort involves stopping any ongoing CUDA operations
-     * and invalidating CUDA streams if necessary. The specific implementation
-     * depends on how CUDA resources are managed at the context level. */
-
-    tl_debug(tl_ctx->super.super.lib, "CUDA context aborted successfully");
-    return UCC_OK;
-}

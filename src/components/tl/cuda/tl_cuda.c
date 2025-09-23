@@ -93,8 +93,6 @@ UCC_TL_IFACE_DECLARE(cuda, CUDA);
 
 __attribute__((constructor)) static void tl_cuda_iface_init(void)
 {
-    ucc_tl_cuda.super.context.recover = ucc_tl_cuda_context_recover;
-    ucc_tl_cuda.super.context.abort = ucc_tl_cuda_context_abort;
     ucc_tl_cuda.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_ALLGATHER)] =
         ucc_tl_cuda_allgather_algs;
     ucc_tl_cuda.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_ALLGATHERV)] =

@@ -836,6 +836,8 @@ ucc_status_t ucc_context_create_proc_info(ucc_lib_h                   lib,
         status = UCC_ERR_NO_RESOURCE;
         goto error_ctx_create_epilog;
     }
+    ctx->failure_info.ep_list = NULL;
+    ctx->failure_info.num_eps = 0;
 
     ucc_debug("created ucc context %p for lib %s", ctx, lib->full_prefix);
     *context = ctx;
@@ -946,9 +948,7 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
 
 ucc_status_t ucc_context_abort(ucc_context_h context)
 {
-    int                i;
     ucc_status_t       status = UCC_OK;
-    ucc_status_t       tmp_status;
     uint64_t          *alive_mask = NULL;
     uint64_t          *failed_ranks = NULL;
     int                num_failed = 0;
@@ -966,12 +966,11 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
     /* Mark context as failed first to halt collective operations */
     context->is_failed = 1;
 
+#if 1
     /* Iterate over progress queue and mark all collectives as failed */
     if (context->pq && !ucc_progress_queue_is_empty(context->pq)) {
         ucc_debug("emptying the progress queue and marking collectives as failed");
 
-        /* Drain the progress queue by repeatedly calling the progress function
-           until all tasks are processed or failed */
         ucc_coll_task_t *task;
         int failed_count = 0;
 
@@ -1009,7 +1008,21 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
 
         ucc_debug("marked %d collectives as failed in progress queue", failed_count);
     }
-
+    #endif
+    printf("context->service_team: %p\n", context->service_team);
+    #if 0
+    ucc_tl_team_t * service_team = context->service_team;
+    ucc_subset_t s;
+    memset(&s.map, 0, sizeof(ucc_ep_map_t));
+    s.map.type = UCC_EP_MAP_FULL;
+    s.map.ep_num = context->params.oob.n_oob_eps;
+    s.myrank = context->rank;
+    alive_mask = ucc_malloc(context->params.oob.n_oob_eps * sizeof(size_t), "alive_mask");
+    size_t rank = 1;
+    ucc_coll_task_t *req;
+    status = UCC_TL_TEAM_IFACE(service_team)->scoll.allgather(&service_team->super, &rank, alive_mask, sizeof(size_t), s, &req);
+    #endif
+#if 1
     /* Allocate temporary buffer for failure detection reduction */
     if (context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
         /* Use hybrid failure detection: try service team OOB first, fallback to sockets */
@@ -1025,71 +1038,25 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
             ucc_info("hybrid failure detection completed: %d failed processes detected during context abort", num_failed);
         }
     }
-
+#endif
     /* Store failure information in context */
     if (context->failure_info.ep_list) {
         ucc_free(context->failure_info.ep_list);
     }
     context->failure_info.ep_list = failed_ranks;
     context->failure_info.num_eps = num_failed;
-
-    /* Call abort on each TL context */
-    for (i = 0; i < context->n_tl_ctx; i++) {
-        ucc_tl_context_t *tl_ctx = context->tl_ctx[i];
-        if ((context->service_team) && (tl_ctx == context->service_ctx)) {
-            /* Skip service context as it may be in use by other contexts */
-            continue;
-        }
-        ucc_tl_lib_t *tl_lib = ucc_derived_of(tl_ctx->super.lib, ucc_tl_lib_t);
-
-        /* Check if TL supports abort */
-        if (tl_lib->iface->context.abort) {
-            tmp_status = tl_lib->iface->context.abort(&tl_ctx->super);
-            if (UCC_OK != tmp_status) {
-                ucc_warn("failed to abort tl context %s: %s",
-                         tl_lib->iface->super.name,
-                         ucc_status_string(tmp_status));
-                /* Continue with other TLs even if one fails */
-                if (UCC_OK == status) {
-                    status = tmp_status;
-                }
-            }
-        }
-    }
-
+    #if 0
     /* Clean up memory allocated by failure detection */
     if (alive_mask) {
         ucc_free(alive_mask);
     }
-
-    /* If service team exists, try to abort it */
-    if (context->service_team) {
-        ucc_tl_lib_t *tl_lib = ucc_derived_of(context->service_ctx->super.lib, ucc_tl_lib_t);
-        if (tl_lib->iface->context.abort) {
-            tmp_status = tl_lib->iface->context.abort(&context->service_ctx->super);
-            if (UCC_OK != tmp_status) {
-                ucc_warn("failed to abort service tl context %s: %s",
-                         tl_lib->iface->super.name,
-                         ucc_status_string(tmp_status));
-                if (UCC_OK == status) {
-                    status = tmp_status;
-                }
-            }
-        }
-    }
-
+    #endif
     ucc_info("context aborted, %d failed processes detected", num_failed);
     return status;
 }
 
 ucc_status_t ucc_context_recover(ucc_context_h context)
 {
-    ucc_tl_context_t *tl_ctx;
-    ucc_tl_lib_t     *tl_lib;
-    int               i;
-    ucc_status_t      status = UCC_OK;
-    ucc_status_t      tmp_status;
-
     if (NULL == context) {
         ucc_error("ucc_context_recover: invalid context handle: NULL");
         return UCC_ERR_INVALID_PARAM;
@@ -1100,49 +1067,13 @@ ucc_status_t ucc_context_recover(ucc_context_h context)
         return UCC_OK;
     }
 
-    /* Attempt to recover each TL context */
-    for (i = 0; i < context->n_tl_ctx; i++) {
-        tl_ctx = context->tl_ctx[i];
-        if ((context->service_team) && (tl_ctx == context->service_ctx)) {
-            /* Skip service context as it may be in use by other contexts */
-            continue;
-        }
-        tl_lib = ucc_derived_of(tl_ctx->super.lib, ucc_tl_lib_t);
-
-        /* Check if TL supports recovery */
-        if (tl_lib->iface->context.recover) {
-            tmp_status = tl_lib->iface->context.recover(&tl_ctx->super);
-            if (UCC_OK != tmp_status) {
-                ucc_warn("failed to recover tl context %s: %s",
-                         tl_lib->iface->super.name,
-                         ucc_status_string(tmp_status));
-                /* Continue with other TLs even if one fails */
-                status = tmp_status;
-            }
-        }
-    }
-
-    /* If service team exists, try to recover it */
-    if (context->service_team) {
-        tl_lib = ucc_derived_of(context->service_ctx->super.lib, ucc_tl_lib_t);
-        if (tl_lib->iface->context.recover) {
-            tmp_status = tl_lib->iface->context.recover(&context->service_ctx->super);
-            if (UCC_OK != tmp_status) {
-                ucc_warn("failed to recover service tl context %s: %s",
-                         tl_lib->iface->super.name,
-                         ucc_status_string(tmp_status));
-                status = tmp_status;
-            }
-        }
-    }
-
     /* Unmark context as failed to allow collective operations to resume */
     /* Note: failed processes list is preserved for querying */
     context->is_failed = 0;
 
     ucc_info("context recovered, %d failed processes remain in failure list", 
              context->failure_info.num_eps);
-    return status;
+    return UCC_OK;
 }
 
 typedef struct ucc_context_progress_entry {

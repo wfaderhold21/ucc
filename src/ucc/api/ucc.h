@@ -2289,6 +2289,7 @@ ucc_status_t ucc_context_recover(ucc_context_h ctx);
  * from the team.
  *
  * @param [in]    *failed_ranks      Array of indices of failed ranks
+ * @param [in]    nr_ranks           Number of failed ranks in the array
  * @param [inout] *team              Team to be shrunk
  *
  * @parblock
@@ -2302,7 +2303,7 @@ ucc_status_t ucc_context_recover(ucc_context_h ctx);
  *
  * @return Error code as defined by @ref ucc_status_t
  */
-ucc_status_t ucc_team_shrink(uint64_t *failed_ranks, ucc_team_h *team);
+ucc_status_t ucc_team_shrink(uint64_t *failed_ranks, uint32_t nr_ranks, ucc_team_h *team);
 
 
 END_C_DECLS

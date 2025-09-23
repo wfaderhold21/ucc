@@ -224,24 +224,4 @@ ucc_tl_nccl_get_context_attr(const ucc_base_context_t *context, /* NOLINT */
     return UCC_OK;
 }
 
-ucc_status_t
-ucc_tl_nccl_context_recover(ucc_base_context_t *ctx)
-{
-    return UCC_ERR_NOT_SUPPORTED;
-}
 
-ucc_status_t
-ucc_tl_nccl_context_abort(ucc_base_context_t *ctx)
-{
-    ucc_tl_nccl_context_t *tl_ctx = ucc_derived_of(ctx, ucc_tl_nccl_context_t);
-
-    tl_debug(tl_ctx->super.super.lib, "aborting NCCL context");
-
-    /* NCCL communicators are handled at the team level.
-     * The context abort primarily marks the state as failed
-     * and any active NCCL communicators will be destroyed
-     * during team cleanup operations. */
-
-    tl_debug(tl_ctx->super.super.lib, "NCCL context aborted successfully");
-    return UCC_OK;
-}

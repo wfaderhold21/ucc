@@ -193,6 +193,37 @@ UCC_CLASS_CLEANUP_FUNC(ucc_cl_hier_team_t)
 UCC_CLASS_DEFINE_DELETE_FUNC(ucc_cl_hier_team_t, ucc_base_team_t);
 UCC_CLASS_DEFINE(ucc_cl_hier_team_t, ucc_cl_team_t);
 
+ucc_status_t ucc_cl_hier_team_shrink(ucc_base_team_t *cl_team, uint64_t *failed_ranks, uint32_t nr_ranks)
+{
+    ucc_cl_hier_team_t    *team   = ucc_derived_of(cl_team, ucc_cl_hier_team_t);
+    ucc_status_t           status = UCC_OK;
+    int                    i, j;
+    ucc_hier_sbgp_t       *hs;
+
+    /* Hierarchical CL team shrink - delegate to TL teams in each SBGP */
+    for (i = 0; i < UCC_HIER_SBGP_LAST; i++) {
+        hs = &team->sbgps[i];
+        if (hs->state == UCC_HIER_SBGP_ENABLED) {
+            for (j = 0; j < hs->n_tls; j++) {
+                if (hs->tl_teams[j]) {
+                    ucc_tl_iface_t *tl_iface = UCC_TL_TEAM_IFACE(hs->tl_teams[j]);
+                    if (tl_iface->team.shrink) {
+                        status = tl_iface->team.shrink(&hs->tl_teams[j]->super, failed_ranks, nr_ranks);
+                        if (UCC_OK != status) {
+                            ucc_warn("TL team %d in SBGP %d shrink failed: %s", 
+                                    j, i, ucc_status_string(status));
+                        }
+                    } else {
+                        ucc_debug("TL team %d in SBGP %d does not support shrink", j, i);
+                    }
+                }
+            }
+        }
+    }
+
+    return status;
+}
+
 ucc_status_t ucc_cl_hier_team_destroy(ucc_base_team_t *cl_team)
 {
     ucc_cl_hier_team_t    *team   = ucc_derived_of(cl_team, ucc_cl_hier_team_t);

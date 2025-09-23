@@ -524,23 +524,4 @@ ucc_status_t ucc_tl_sharp_get_context_attr(const ucc_base_context_t *context, /*
     return UCC_OK;
 }
 
-ucc_status_t
-ucc_tl_sharp_context_recover(ucc_base_context_t *ctx)
-{
-    return UCC_ERR_NOT_SUPPORTED;
-}
 
-ucc_status_t
-ucc_tl_sharp_context_abort(ucc_base_context_t *ctx)
-{
-    ucc_tl_sharp_context_t *tl_ctx = ucc_derived_of(ctx, ucc_tl_sharp_context_t);
-
-    tl_debug(tl_ctx->super.super.lib, "aborting SHARP context");
-
-    /* SHARP contexts are stateless for abort operations.
-     * The actual failure handling is done at the team level
-     * when collective operations detect failures. */
-
-    tl_debug(tl_ctx->super.super.lib, "SHARP context aborted successfully");
-    return UCC_OK;
-}

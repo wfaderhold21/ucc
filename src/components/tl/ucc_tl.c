@@ -303,6 +303,15 @@ UCC_CLASS_INIT_FUNC(ucc_tl_team_t, ucc_tl_context_t *tl_context,
     return UCC_OK;
 }
 
+ucc_status_t ucc_tl_team_shrink(ucc_base_team_t *team, uint64_t *failed_ranks, uint32_t nr_ranks)
+{
+    /* Default TL team shrink implementation - not supported by default */
+    (void)team;
+    (void)failed_ranks;
+    (void)nr_ranks;
+    return UCC_ERR_NOT_SUPPORTED;
+}
+
 UCC_CLASS_CLEANUP_FUNC(ucc_tl_team_t)
 {
 }

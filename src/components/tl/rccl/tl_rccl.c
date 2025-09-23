@@ -75,8 +75,6 @@ UCC_TL_IFACE_DECLARE(rccl, RCCL);
 
 __attribute__((constructor)) static void tl_rccl_iface_init(void)
 {
-    ucc_tl_rccl.super.context.recover = ucc_tl_rccl_context_recover;
-    ucc_tl_rccl.super.context.abort = ucc_tl_rccl_context_abort;
     ucc_tl_rccl.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_ALLGATHERV)] =
         ucc_tl_rccl_allgatherv_algs;
 }

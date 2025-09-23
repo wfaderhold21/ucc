@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "ucc_resilience.h"
+#include "ucc_service_coll.h"
 #include "utils/ucc_malloc.h"
 #include "utils/ucc_log.h"
 #include <sys/socket.h>
@@ -17,8 +18,12 @@
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <stdbool.h>
 
 #define UCC_HEARTBEAT_BASE_PORT 45000
+
+/* Service team failure detection timeout */
+#define UCC_SERVICE_TEAM_TIMEOUT_SECONDS 20
 
 /* Heartbeat server thread function */
 static void* ucc_heartbeat_server_thread(void* arg)
@@ -414,12 +419,21 @@ ucc_status_t ucc_detect_failed_processes(ucc_context_t *context,
 }
 
 ucc_status_t ucc_service_team_failure_detection(ucc_context_t *context,
-                                               uint64_t **alive_mask,
-                                               uint64_t **failed_ranks,
-                                               int *num_failed)
+                                                uint64_t **alive_mask,
+                                                uint64_t **failed_ranks,
+                                                int *num_failed)
 {
     size_t n_eps;
-    uint64_t *mask = NULL;
+//    uint64_t *mask = NULL;
+    uint64_t *failed = NULL;
+    int failed_count = 0;
+    int i;
+    ucc_status_t status = UCC_OK;
+    uint64_t *heartbeat_data = NULL;
+    uint64_t *gathered_heartbeats = NULL;
+    ucc_tl_team_t *service_team;
+    ucc_subset_t s;
+    ucc_coll_task_t *req;
 
     if (!context || !alive_mask || !failed_ranks || !num_failed) {
         return UCC_ERR_INVALID_PARAM;
@@ -434,35 +448,126 @@ ucc_status_t ucc_service_team_failure_detection(ucc_context_t *context,
         ucc_debug("no service team available for OOB failure detection");
         return UCC_ERR_NOT_SUPPORTED;
     }
-
-    /* For now, we'll use a simplified approach that doesn't require
-       accessing the complex TL structures. We'll mark all processes
-       as potentially alive and let the hybrid approach fall back
-       to socket-based detection if needed. */
-
+    service_team = context->service_team;
     n_eps = context->params.oob.n_oob_eps;
-
+    memset(&s.map, 0, sizeof(ucc_ep_map_t));
+    s.map.type = UCC_EP_MAP_FULL;
+    s.map.ep_num = context->params.oob.n_oob_eps;
+    s.myrank = context->rank;
+   
     /* Allocate buffers */
-    mask = ucc_calloc(n_eps, sizeof(uint64_t), "alive_mask");
+/*    mask = ucc_calloc(n_eps, sizeof(uint64_t), "alive_mask");
     if (!mask) {
         ucc_error("failed to allocate alive_mask");
         return UCC_ERR_NO_MEMORY;
+    }*/
+
+    /* Allocate heartbeat data - each process sends its rank as heartbeat */
+    heartbeat_data = ucc_malloc(sizeof(uint64_t), "heartbeat_data");
+    if (!heartbeat_data) {
+        ucc_error("failed to allocate heartbeat_data");
+        //ucc_free(mask);
+        return UCC_ERR_NO_MEMORY;
     }
 
-    /* Mark this process as alive */
-    mask[context->params.oob.oob_ep] = 1;
+    /* Allocate buffer for gathered heartbeats from all processes */
+    gathered_heartbeats = ucc_malloc(n_eps * sizeof(uint64_t), "gathered_heartbeats");
+    if (!gathered_heartbeats) {
+        ucc_error("failed to allocate gathered_heartbeats");
+        //ucc_free(mask);
+        ucc_free(heartbeat_data);
+        return UCC_ERR_NO_MEMORY;
+    }
 
-    ucc_debug("attempting simplified service team-based failure detection for %zu processes", n_eps);
+    /* Prepare heartbeat data - send our rank */
+    *heartbeat_data = 1;//(uint64_t)context->params.oob.oob_ep;
 
-    /* Since we can't easily access the service team's OOB interface
-       from this core module without complex dependencies, we'll
-       return a status that indicates the service team approach
-       should be tried but we can't complete it here. */
+    ucc_debug("attempting service team-based failure detection for %zu processes", n_eps);
+    /* Use the service team's OOB interface to perform allgather of heartbeats */
+    status = UCC_TL_TEAM_IFACE(service_team)->scoll.allgather(&service_team->super, heartbeat_data, gathered_heartbeats, sizeof(size_t), s, &req);
+    if (status != UCC_OK) {
+        ucc_error("failed to call service allgather");
+        ucc_free(heartbeat_data);
+        return UCC_ERR_NO_MEMORY;
+    }
 
-    ucc_debug("service team failure detection not fully implemented in core module");
-    ucc_free(mask);
+    /* Wait for allgather to complete with timeout */
+    struct timespec start_time, current_time;
+    const int timeout_seconds = UCC_SERVICE_TEAM_TIMEOUT_SECONDS;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    
+    while (UCC_INPROGRESS == (status = ucc_collective_test(&req->super))) {
+        /* Check for timeout */
+        clock_gettime(CLOCK_MONOTONIC, &current_time);
+        double elapsed = (current_time.tv_sec - start_time.tv_sec) + 
+                       (current_time.tv_nsec - start_time.tv_nsec) / 1e9;
+        
+        if (elapsed > timeout_seconds) {
+            ucc_debug("OOB allgather timeout after %.1f seconds", elapsed);
+            break;
+        }
+        ucc_context_progress(context);
+    }
+    if (req->super.status == UCC_INPROGRESS) {
+        req->super.status = UCC_OK;
+    }
+    ucc_collective_finalize_internal(req);
 
-    return UCC_ERR_NOT_SUPPORTED;
+    /* Process the receive buffer as the failure mask */
+    if (status == UCC_OK) {
+        /* Allgather completed successfully - no failures */
+        ucc_debug("allgather completed successfully - no failures");
+    } else {
+        /* Timeout occurred - check the receive buffer for failures */
+        ucc_debug("timeout occurred - checking receive buffer for failures");
+        for (i = 0; i < n_eps; i++) {
+            if (!gathered_heartbeats[i]) {
+                printf("[%d] FAILED! %d\n", context->rank, i);
+                failed_count++;
+            }
+        }
+    }
+    printf("failed count: %d\n", failed_count);
+
+    failed = ucc_malloc(n_eps * sizeof(size_t), "failed_ranks");
+    /* Build failed ranks list if there are failures */
+    if (failed_count > 0) {
+/*        failed = ucc_malloc(failed_count * sizeof(size_t), "failed_ranks");
+        if (!failed) {
+            ucc_error("failed to allocate failed_ranks");
+            status = UCC_ERR_NO_MEMORY;
+            goto cleanup;
+        }*/
+        
+        int failed_idx = 0;
+        for (i = 0; i < n_eps; i++) {
+            if (gathered_heartbeats[i] == 0) {
+                failed[failed_idx++] = i;
+            }
+        }
+        printf("failed[0]: %lu, failed_idx: %d\n", failed[0], failed_idx);
+    }
+
+    *alive_mask = gathered_heartbeats; //mask;
+    *failed_ranks = failed;
+    *num_failed = failed_count;
+
+    ucc_info("service team failure detection completed: %d failed processes detected", 
+             failed_count);
+
+    ucc_free(heartbeat_data);
+//    ucc_free(gathered_heartbeats);
+    return UCC_OK;
+#if 0
+cleanup:
+    /*if (oob_req) {
+        context->params.oob.req_free(oob_req);
+    }*/
+    //ucc_free(mask);
+    ucc_free(heartbeat_data);
+    ucc_free(gathered_heartbeats);
+    return status;
+    #endif
 }
 
 ucc_status_t ucc_hybrid_failure_detection(ucc_context_t *context,
@@ -470,7 +575,7 @@ ucc_status_t ucc_hybrid_failure_detection(ucc_context_t *context,
                                          uint64_t **failed_ranks,
                                          int *num_failed)
 {
-    ucc_status_t status;
+    ucc_status_t status = UCC_OK;
 
     if (!context || !alive_mask || !failed_ranks || !num_failed) {
         return UCC_ERR_INVALID_PARAM;
@@ -485,18 +590,9 @@ ucc_status_t ucc_hybrid_failure_detection(ucc_context_t *context,
         ucc_debug("no OOB information available, skipping failure detection");
         return UCC_OK;
     }
-
-    /* Check if context is already in failed state - if so, skip failure detection */
-    if (context->is_failed) {
-        ucc_debug("context already in failed state, skipping failure detection");
-        return UCC_OK;
-    }
-
+#if 0
     /* Determine failure detection method based on configuration */
     uint32_t method = context->failure_detection_method;
-    if (method == 0) {
-        method = 0; /* Default to hybrid */
-    }
 
     ucc_debug("starting failure detection with method %u (0=hybrid, 1=sockets, 2=service team)", method);
 
@@ -506,42 +602,37 @@ ucc_status_t ucc_hybrid_failure_detection(ucc_context_t *context,
         return ucc_detect_failed_processes(context, alive_mask,
                                          failed_ranks, num_failed);
     }
-
+#endif
     /* Method 2: Service team only */
-    if (method == 2) {
+    #if 0
         if (!context->service_team) {
             ucc_warn("service team-only method requested but no service team available, falling back to sockets");
             return ucc_detect_failed_processes(context, alive_mask,
                                              failed_ranks, num_failed);
         }
-
+    #endif
         ucc_debug("using service team-based failure detection only");
-        /* Since service team detection is simplified in core module,
-           we'll fall back to sockets for now */
-        ucc_warn("service team-only method not fully implemented in core module, falling back to sockets");
-        return ucc_detect_failed_processes(context, alive_mask,
-                                         failed_ranks, num_failed);
-    }
-
+        return ucc_service_team_failure_detection(context, alive_mask,
+                                                failed_ranks, num_failed);
+#if 0
     /* Method 0: Hybrid (default) - try service team first, fallback to sockets */
     ucc_debug("using hybrid failure detection: service team first, then sockets");
 
     /* First try service team-based OOB if available */
-    /* Temporarily disabled service team path to avoid crashes */
-    if (0 && context->service_team && context->service_team != (void*)0x1) {
+    if (context->service_team && context->service_team != (void*)0x1) {
         ucc_debug("attempting service team-based failure detection");
         status = ucc_service_team_failure_detection(context, alive_mask,
                                                   failed_ranks, num_failed);
 
-        /* Since service team detection is simplified, it will return NOT_SUPPORTED */
         if (status == UCC_OK) {
             ucc_info("hybrid failure detection: service team method succeeded");
             return UCC_OK;
         } else {
-            ucc_debug("hybrid failure detection: service team method not fully implemented, falling back to sockets");
+            ucc_debug("hybrid failure detection: service team method failed (%s), falling back to sockets", 
+                     ucc_status_string(status));
         }
     } else {
-        ucc_debug("service team path temporarily disabled, using socket-based detection");
+        ucc_debug("no service team available, using socket-based detection");
     }
 
     /* Fall back to socket-based detection */
@@ -555,7 +646,7 @@ ucc_status_t ucc_hybrid_failure_detection(ucc_context_t *context,
         ucc_warn("hybrid failure detection: socket method also failed (%s)",
                  ucc_status_string(status));
     }
-
+#endif
     return status;
 }
 

@@ -60,10 +60,17 @@ ucc_status_t ucc_tl_self_coll_init(ucc_base_coll_args_t *coll_args,
 ucc_status_t ucc_tl_self_team_get_scores(ucc_base_team_t   *tl_team,
                                          ucc_coll_score_t **score);
 
+ucc_status_t ucc_tl_self_team_shrink(ucc_base_team_t *tl_team, uint64_t *failed_ranks, uint32_t nr_ranks)
+{
+    /* Self TL team shrink - not supported as self TL doesn't have real communication */
+    (void)tl_team;
+    (void)failed_ranks;
+    (void)nr_ranks;
+    return UCC_ERR_NOT_SUPPORTED;
+}
+
 UCC_TL_IFACE_DECLARE(self, SELF);
 
 __attribute__((constructor)) static void tl_self_iface_init(void)
 {
-    ucc_tl_self.super.context.recover = ucc_tl_self_context_recover;
-    ucc_tl_self.super.context.abort = ucc_tl_self_context_abort;
 }

@@ -103,6 +103,30 @@ ucc_status_t ucc_cl_basic_team_destroy(ucc_base_team_t *cl_team)
     return status;
 }
 
+ucc_status_t ucc_cl_basic_team_shrink(ucc_base_team_t *cl_team, uint64_t *failed_ranks, uint32_t nr_ranks)
+{
+    ucc_cl_basic_team_t    *team = ucc_derived_of(cl_team, ucc_cl_basic_team_t);
+    ucc_status_t            status = UCC_OK;
+    int                     i;
+
+    /* Basic CL team shrink - delegate to TL teams */
+    for (i = 0; i < team->n_tl_teams; i++) {
+        if (team->tl_teams[i]) {
+            ucc_tl_iface_t *tl_iface = UCC_TL_TEAM_IFACE(team->tl_teams[i]);
+            if (tl_iface->team.shrink) {
+                status = tl_iface->team.shrink(&team->tl_teams[i]->super, failed_ranks, nr_ranks);
+                if (UCC_OK != status) {
+                    ucc_warn("TL team %d shrink failed: %s", i, ucc_status_string(status));
+                }
+            } else {
+                ucc_debug("TL team %d does not support shrink", i);
+            }
+        }
+    }
+
+    return status;
+}
+
 ucc_status_t ucc_cl_basic_team_create_test(ucc_base_team_t *cl_team)
 {
     ucc_cl_basic_team_t    *team = ucc_derived_of(cl_team, ucc_cl_basic_team_t);
