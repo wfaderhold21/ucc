@@ -238,6 +238,75 @@ free_task:
     ucc_tl_ucp_put_task(task);
     return status;
 }
+ucc_status_t ucc_tl_ucp_allgather_linear_start(ucc_coll_task_t *coll_task);
+void ucc_tl_ucp_allgather_linear_progress(ucc_coll_task_t *coll_task);
+
+ucc_status_t ucc_tl_ucp_allgather_linear_init(ucc_base_coll_args_t *coll_args,
+                                              ucc_base_team_t      *team,
+                                              ucc_coll_task_t     **task_h);
+
+ucc_status_t ucc_tl_ucp_service_ft_allgather(ucc_base_team_t *team, void *sbuf,
+                                              void *rbuf, size_t msgsize,
+                                              ucc_subset_t      subset,
+                                              ucc_coll_task_t **task_p)
+{
+    ucc_tl_ucp_team_t   *tl_team  = ucc_derived_of(team, ucc_tl_ucp_team_t);
+    ucc_tl_ucp_task_t   *task     = ucc_tl_ucp_get_task(tl_team);
+    uint32_t             npolls   =
+        UCC_TL_UCP_TEAM_CTX(tl_team)->cfg.oob_npolls;
+    //int                  in_place =
+    //    sbuf == PTR_OFFSET(rbuf, msgsize * subset.myrank);
+    ucc_base_coll_args_t bargs    = {
+        .args = {
+            .coll_type = UCC_COLL_TYPE_ALLGATHER,
+            .mask      = UCC_COLL_ARGS_FIELD_FLAGS,
+            .flags     = 0,//in_place ? UCC_COLL_ARGS_FLAG_IN_PLACE : 0,
+            .src.info = {.buffer   = sbuf,
+                         .count    = msgsize,
+                         .datatype = UCC_DT_UINT8,
+                         .mem_type = UCC_MEMORY_TYPE_HOST},
+            .dst.info = {.buffer   = rbuf,
+                         .count    = msgsize * subset.map.ep_num,
+                         .datatype = UCC_DT_UINT8,
+                         .mem_type = UCC_MEMORY_TYPE_HOST}
+        }
+    };
+    ucc_status_t       status;
+
+    status               = ucc_coll_task_init(&task->super, &bargs, team);
+    if (status != UCC_OK) {
+        goto free_task;
+    }
+    task->flags                         = UCC_TL_UCP_TASK_FLAG_SUBSET;
+    task->subset                        = subset;
+    task->tagged.tag                    = UCC_TL_UCP_SERVICE_TAG;
+    task->n_polls                       = npolls;
+    task->super.progress                = ucc_tl_ucp_allgather_linear_progress;
+    task->super.finalize                = ucc_tl_ucp_coll_finalize;
+
+    /* Initialize the allgather linear algorithm */
+    task->allgather_linear.nreqs = UCC_TL_TEAM_SIZE(tl_team) - 1;
+
+    /* Initialize executor for the linear algorithm */
+    status = ucc_tl_ucp_service_coll_start_executor(&task->super);
+    if (status != UCC_OK) {
+        goto free_task;
+    }
+
+    status = ucc_tl_ucp_allgather_linear_start(&task->super);
+    if (status < UCC_OK) {
+        goto stop_executor;
+    }
+
+    *task_p = &task->super;
+    return status;
+stop_executor:
+    ucc_tl_ucp_service_coll_stop_executor(&task->super);
+    ucc_tl_ucp_coll_finalize(&task->super);
+free_task:
+    ucc_tl_ucp_put_task(task);
+    return status;
+}
 
 void ucc_tl_ucp_service_update_id(ucc_base_team_t *team, uint16_t id) {
     ucc_tl_ucp_team_t *tl_team = ucc_derived_of(team, ucc_tl_ucp_team_t);

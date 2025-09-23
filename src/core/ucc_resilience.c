@@ -484,7 +484,7 @@ ucc_status_t ucc_service_team_failure_detection(ucc_context_t *context,
 
     ucc_debug("attempting service team-based failure detection for %zu processes", n_eps);
     /* Use the service team's OOB interface to perform allgather of heartbeats */
-    status = UCC_TL_TEAM_IFACE(service_team)->scoll.allgather(&service_team->super, heartbeat_data, gathered_heartbeats, sizeof(size_t), s, &req);
+    status = UCC_TL_TEAM_IFACE(service_team)->scoll.ft_allgather(&service_team->super, heartbeat_data, gathered_heartbeats, sizeof(size_t), s, &req);
     if (status != UCC_OK) {
         ucc_error("failed to call service allgather");
         ucc_free(heartbeat_data);
