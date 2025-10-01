@@ -65,21 +65,22 @@ out:
 
 void ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask)
 {
-    ucc_tl_ucp_task_t  *task     = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
-    ucc_tl_ucp_team_t  *team     = TASK_TEAM(task);
-    ptrdiff_t           src      = (ptrdiff_t)TASK_ARGS(task).src.info.buffer;
-    ptrdiff_t           dest     = (ptrdiff_t)TASK_ARGS(task).dst.info.buffer;
-    size_t              nelems   = TASK_ARGS(task).src.info.count;
-    ucc_rank_t          grank    = UCC_TL_TEAM_RANK(team);
-    ucc_rank_t          gsize    = UCC_TL_TEAM_SIZE(team);
-    long               *pSync    = TASK_ARGS(task).global_work_buffer;
-    ucc_mem_map_mem_h   src_memh;
-    ucc_mem_map_mem_h  *dst_memh;
-    ucc_rank_t          peer;
-    ucc_status_t        status;
+    ucc_tl_ucp_task_t *task   = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
+    ucc_tl_ucp_team_t *team   = TASK_TEAM(task);
+    ptrdiff_t          src    = (ptrdiff_t)TASK_ARGS(task).src.info.buffer;
+    ptrdiff_t          dest   = (ptrdiff_t)TASK_ARGS(task).dst.info.buffer;
+    size_t             nelems = TASK_ARGS(task).src.info.count;
+    ucc_rank_t         grank  = UCC_TL_TEAM_RANK(team);
+    ucc_rank_t         gsize  = UCC_TL_TEAM_SIZE(team);
+    long              *pSync  = TASK_ARGS(task).global_work_buffer;
+    ucc_mem_map_mem_h  src_memh;
+    ucc_mem_map_mem_h *dst_memh;
+    ucc_rank_t         peer;
+    ucc_status_t       status;
 
     /* Handle dynamic segment exchange if needed */
-    if (task->flags & UCC_TL_UCP_TASK_FLAG_USE_DYN_SEG && task->onesided.put_posted < gsize) {
+    if (task->flags & UCC_TL_UCP_TASK_FLAG_USE_DYN_SEG &&
+        task->onesided.put_posted < gsize) {
         status = ucc_tl_ucp_test_dynamic_segment(task);
         if (status == UCC_INPROGRESS) {
             return;
@@ -95,13 +96,14 @@ void ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask)
 
         nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
         for (peer = (grank + 1) % gsize; task->onesided.put_posted < gsize;
-            peer = (peer + 1) % gsize) {
+             peer = (peer + 1) % gsize) {
             UCPCHECK_GOTO(ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems),
-                                            PTR_OFFSET(dest, grank * nelems), nelems,
-                                            peer, src_memh, dst_memh, team, task),
-                      task, out);
-            UCPCHECK_GOTO(ucc_tl_ucp_atomic_inc(pSync, peer, dst_memh, team), task,
-                          out);
+                                            PTR_OFFSET(dest, grank * nelems),
+                                            nelems, peer, src_memh, dst_memh,
+                                            team, task),
+                          task, out);
+            UCPCHECK_GOTO(ucc_tl_ucp_atomic_inc(pSync, peer, dst_memh, team),
+                          task, out);
         }
     }
     if (ucc_tl_ucp_test_onesided(task, gsize) == UCC_INPROGRESS) {
