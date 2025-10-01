@@ -55,7 +55,6 @@ TestAlltoallv::TestAlltoallv(ucc_test_team_t &_team, TestCaseParams &params) :
 
     MPI_Comm_rank(team.comm, &rank);
     MPI_Comm_size(team.comm, &nprocs);
-    //MPI_Barrier(team.comm);
 
     if (TEST_SKIP_NONE != skip_reduce(test_max_size < (msgsize * nprocs),
                                       TEST_SKIP_MEM_LIMIT, team.comm)) {

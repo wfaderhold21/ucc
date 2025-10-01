@@ -86,8 +86,6 @@ enum ucc_tl_ucp_task_flags {
     UCC_TL_UCP_TASK_FLAG_SUBSET      = UCC_BIT(0),
     /* indicates usage of dynamic segments */
     UCC_TL_UCP_TASK_FLAG_USE_DYN_SEG = UCC_BIT(1),
-    /* indicates onesided operations have been started */
-    UCC_TL_UCP_TASK_FLAG_OPS_STARTED = UCC_BIT(2),
 };
 
 typedef struct ucc_tl_ucp_allreduce_sw_pipeline
