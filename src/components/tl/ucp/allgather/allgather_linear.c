@@ -23,6 +23,13 @@ ucc_status_t ucc_tl_ucp_allgather_linear_start(ucc_coll_task_t *coll_task)
     ucc_datatype_t        dt        = TASK_ARGS(task).dst.info.datatype;
     ucc_rank_t            trank     = UCC_TL_TEAM_RANK(team);
     ucc_rank_t            tsize     = UCC_TL_TEAM_SIZE(team);
+/*    tl_debug(UCC_TL_TEAM_LIB(team),
+             "ft_agl start: team=%p params.size=%u params.rank=%u trank=%u tsize=%u",
+             (void*)team,
+             team->super.super.params.size,
+             team->super.super.params.rank,
+             trank,
+             tsize);*/
     size_t                data_size = (count / tsize) * ucc_dt_size(dt);
     ucc_status_t          status;
 
@@ -114,6 +121,13 @@ void ucc_tl_ucp_allgather_linear_progress(ucc_coll_task_t *coll_task)
     ucc_tl_ucp_context_t *ctx       = UCC_TL_UCP_TEAM_CTX(team);
     ucc_rank_t            trank     = UCC_TL_TEAM_RANK(team);
     ucc_rank_t            tsize     = UCC_TL_TEAM_SIZE(team);
+    tl_debug(UCC_TL_TEAM_LIB(team),
+             "ft_agl prog: team=%p params.size=%u params.rank=%u trank=%u tsize=%u",
+             (void*)team,
+             team->super.super.params.size,
+             team->super.super.params.rank,
+             trank,
+             tsize);
     void                 *rbuf      = TASK_ARGS(task).dst.info.buffer;
     ucc_memory_type_t     rmem      = TASK_ARGS(task).dst.info.mem_type;
     ucc_datatype_t        dt        = TASK_ARGS(task).dst.info.datatype;

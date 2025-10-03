@@ -75,6 +75,8 @@ gtest_SOURCES =                           \
 	core/test_context_config.cc           \
 	core/test_context.cc                  \
 	core/test_resilience.cc               \
+	core/test_hybrid_resilience.cc        \
+	core/test_hybrid_resilience_simple.cc \
 	core/test_mc.cc                       \
 	core/test_mc_reduce.cc                \
 	core/test_team.cc                     \

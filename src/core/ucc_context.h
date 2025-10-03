@@ -111,7 +111,7 @@ ucc_status_t ucc_context_create_proc_info(ucc_lib_h                   lib,
 ucc_status_t ucc_context_destroy(ucc_context_t *context);
 
 ucc_status_t ucc_context_abort(ucc_context_h context);
-ucc_status_t ucc_context_recover(ucc_context_h context);
+ucc_status_t ucc_context_recover(ucc_context_h context, ucc_oob_coll_t *oob);
 
 /* Any internal UCC component (TL, CL, etc) may register its own
    progress callback fn (and argument for the callback) into core

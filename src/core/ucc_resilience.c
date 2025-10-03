@@ -23,7 +23,7 @@
 #define UCC_HEARTBEAT_BASE_PORT 45000
 
 /* Service team failure detection timeout */
-#define UCC_SERVICE_TEAM_TIMEOUT_SECONDS 20
+#define UCC_SERVICE_TEAM_TIMEOUT_SECONDS 1
 
 /* Heartbeat server thread function */
 static void* ucc_heartbeat_server_thread(void* arg)
@@ -424,13 +424,13 @@ ucc_status_t ucc_service_team_failure_detection(ucc_context_t *context,
                                                 int *num_failed)
 {
     size_t n_eps;
-//    uint64_t *mask = NULL;
     uint64_t *failed = NULL;
     int failed_count = 0;
     int i;
     ucc_status_t status = UCC_OK;
-    uint64_t *heartbeat_data = NULL;
-    uint64_t *gathered_heartbeats = NULL;
+    ucc_context_addr_header_t *heartbeat_addr = NULL;
+    ucc_context_addr_header_t *gathered_addrs = NULL;
+    size_t addr_size;
     ucc_tl_team_t *service_team;
     ucc_subset_t s;
     ucc_coll_task_t *req;
@@ -450,44 +450,35 @@ ucc_status_t ucc_service_team_failure_detection(ucc_context_t *context,
     }
     service_team = context->service_team;
     n_eps = context->params.oob.n_oob_eps;
+    ucc_debug("service team failure detection: n_eps=%zu, context->rank=%d", n_eps, context->rank);
     memset(&s.map, 0, sizeof(ucc_ep_map_t));
     s.map.type = UCC_EP_MAP_FULL;
     s.map.ep_num = context->params.oob.n_oob_eps;
     s.myrank = context->rank;
-   
-    /* Allocate buffers */
-/*    mask = ucc_calloc(n_eps, sizeof(uint64_t), "alive_mask");
-    if (!mask) {
-        ucc_error("failed to allocate alive_mask");
-        return UCC_ERR_NO_MEMORY;
-    }*/
 
-    /* Allocate heartbeat data - each process sends its rank as heartbeat */
-    heartbeat_data = ucc_malloc(sizeof(uint64_t), "heartbeat_data");
-    if (!heartbeat_data) {
-        ucc_error("failed to allocate heartbeat_data");
-        //ucc_free(mask);
+    /* Get the size of our context address to exchange */
+    if (!context->attr.ctx_addr || context->attr.ctx_addr_len == 0) {
+        ucc_error("context address not available for heartbeat exchange");
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+    addr_size = context->attr.ctx_addr_len;
+
+    /* Allocate buffer for gathered addresses from all processes */
+    gathered_addrs = ucc_malloc(n_eps * addr_size, "gathered_addrs");
+    if (!gathered_addrs) {
+        ucc_error("failed to allocate gathered_addrs");
         return UCC_ERR_NO_MEMORY;
     }
 
-    /* Allocate buffer for gathered heartbeats from all processes */
-    gathered_heartbeats = ucc_malloc(n_eps * sizeof(uint64_t), "gathered_heartbeats");
-    if (!gathered_heartbeats) {
-        ucc_error("failed to allocate gathered_heartbeats");
-        //ucc_free(mask);
-        ucc_free(heartbeat_data);
-        return UCC_ERR_NO_MEMORY;
-    }
+    /* Use context address directly - no need to copy */
+    heartbeat_addr = (ucc_context_addr_header_t *)context->attr.ctx_addr;
 
-    /* Prepare heartbeat data - send our rank */
-    *heartbeat_data = 1;//(uint64_t)context->params.oob.oob_ep;
-
-    ucc_debug("attempting service team-based failure detection for %zu processes", n_eps);
-    /* Use the service team's OOB interface to perform allgather of heartbeats */
-    status = UCC_TL_TEAM_IFACE(service_team)->scoll.ft_allgather(&service_team->super, heartbeat_data, gathered_heartbeats, sizeof(size_t), s, &req);
+    ucc_debug("attempting service team-based failure detection for %zu processes using addr_storage exchange", n_eps);
+    /* Use the service team's OOB interface to perform allgather of context addresses */
+    status = UCC_TL_TEAM_IFACE(service_team)->scoll.ft_allgather(&service_team->super, heartbeat_addr, gathered_addrs, addr_size, s, &req);
     if (status != UCC_OK) {
-        ucc_error("failed to call service allgather");
-        ucc_free(heartbeat_data);
+        ucc_error("failed to call service allgather for addr_storage exchange");
+        ucc_free(gathered_addrs);
         return UCC_ERR_NO_MEMORY;
     }
 
@@ -508,55 +499,130 @@ ucc_status_t ucc_service_team_failure_detection(ucc_context_t *context,
         }
         ucc_context_progress(context);
     }
+    
+    /* If the allgather timed out, we need to properly stop any executor before finalizing */
     if (req->super.status == UCC_INPROGRESS) {
+        ucc_debug("stopping FT allgather executor due to timeout");
+        
+        /* Stop the executor if it exists to prevent race conditions */
+        if (req->flags & UCC_COLL_TASK_FLAG_EXECUTOR_STOP && req->executor) {
+            ucc_status_t stop_status = ucc_ee_executor_stop(req->executor);
+            if (stop_status != UCC_OK) {
+                ucc_warn("failed to stop FT allgather executor: %s", 
+                         ucc_status_string(stop_status));
+            } else {
+                ucc_debug("FT allgather executor stopped successfully");
+            }
+            
+            /* Finalize the executor */
+            ucc_status_t finalize_status = ucc_ee_executor_finalize(req->executor);
+            if (finalize_status != UCC_OK) {
+                ucc_warn("failed to finalize FT allgather executor: %s", 
+                         ucc_status_string(finalize_status));
+            }
+            req->executor = NULL;
+            req->flags &= ~UCC_COLL_TASK_FLAG_EXECUTOR_STOP;
+        }
+        
         req->super.status = UCC_OK;
     }
     ucc_collective_finalize_internal(req);
 
-    /* Process the receive buffer as the failure mask */
+    /* Process the gathered addresses to detect failures */
+    uint64_t *mask = ucc_calloc(n_eps, sizeof(uint64_t), "alive_mask");
+    if (!mask) {
+        ucc_error("failed to allocate alive_mask");
+        ucc_free(gathered_addrs);
+        return UCC_ERR_NO_MEMORY;
+    }
+
     if (status == UCC_OK) {
-        /* Allgather completed successfully - no failures */
-        ucc_debug("allgather completed successfully - no failures");
+        /* Allgather completed successfully - analyze gathered addresses */
+        ucc_debug("allgather completed successfully - nothing to do");
+        
     } else {
-        /* Timeout occurred - check the receive buffer for failures */
-        ucc_debug("timeout occurred - checking receive buffer for failures");
+        /* Timeout occurred - this means some processes failed to participate */
+        ucc_debug("timeout occurred during addr_storage allgather - some processes failed (n_eps=%zu)", n_eps);
+        
+        /* When allgather times out, we need to be more careful about determining failures.
+         * The timeout could be due to one or more processes failing, but the surviving 
+         * processes that are still running this code are obviously alive.
+         * 
+         * Strategy: Mark processes as alive if they can still communicate, failed otherwise.
+         * Since we're running this code, we know our process is alive.
+         * For other processes, we'll use a simple heuristic: if we can't determine
+         * their status from the incomplete allgather, assume they failed.
+         */
+        
+        /* First, mark ourselves as definitely alive */
+        mask[context->rank] = 1;
+        ucc_debug("process %d (self): alive (executing this code)", context->rank);
+        
+        /* When allgather times out, we can't reliably determine which other processes
+         * are alive from the incomplete data. For now, conservatively assume all others
+         * have failed. This will trigger a service team rebuild with just the surviving
+         * processes that can still communicate.
+         */
         for (i = 0; i < n_eps; i++) {
-            if (!gathered_heartbeats[i]) {
-                printf("[%d] FAILED! %d\n", context->rank, i);
+            ucc_context_addr_header_t *addr_header = 
+                (ucc_context_addr_header_t *)((char*)gathered_addrs + i * addr_size);
+            
+            /* Check if the address header is valid and contains expected data */
+            ucc_debug("process %d: checking addr_header - n_components=%d, seq_num=%u", 
+                     i, addr_header->n_components, addr_header->ctx_id.seq_num);
+            if (addr_header->n_components > 0) {
+                /* Process is alive - has valid address information */
+                mask[i] = 1;
+                ucc_debug("process %d: alive (addr components: %d, seq_num: %u)", 
+                         i, addr_header->n_components, addr_header->ctx_id.seq_num);
+            } else {
+                /* Process failed or has invalid address */
+                mask[i] = 0;
                 failed_count++;
+                ucc_debug("process %d: failed (invalid address data - n_components=%d, seq_num=%u)", 
+                         i, addr_header->n_components, addr_header->ctx_id.seq_num);
             }
         }
-    }
-    printf("failed count: %d\n", failed_count);
 
-    failed = ucc_malloc(n_eps * sizeof(size_t), "failed_ranks");
+    }
+
     /* Build failed ranks list if there are failures */
     if (failed_count > 0) {
-/*        failed = ucc_malloc(failed_count * sizeof(size_t), "failed_ranks");
+        failed = ucc_malloc(failed_count * sizeof(uint64_t), "failed_ranks");
         if (!failed) {
             ucc_error("failed to allocate failed_ranks");
-            status = UCC_ERR_NO_MEMORY;
-            goto cleanup;
-        }*/
+            ucc_free(mask);
+            ucc_free(gathered_addrs);
+            return UCC_ERR_NO_MEMORY;
+        }
         
         int failed_idx = 0;
         for (i = 0; i < n_eps; i++) {
-            if (gathered_heartbeats[i] == 0) {
+            if (mask[i] == 0) {
                 failed[failed_idx++] = i;
             }
         }
-        printf("failed[0]: %lu, failed_idx: %d\n", failed[0], failed_idx);
+        ucc_debug("detected %d failed processes", failed_idx);
     }
 
-    *alive_mask = gathered_heartbeats; //mask;
+    *alive_mask = mask;
     *failed_ranks = failed;
     *num_failed = failed_count;
 
-    ucc_info("service team failure detection completed: %d failed processes detected", 
-             failed_count);
+    /* Update context addr_storage with the gathered addresses for future lookups */
+    if (context->addr_storage.storage) {
+        ucc_free(context->addr_storage.storage);
+    }
+    context->addr_storage.storage = gathered_addrs;
+    context->addr_storage.addr_len = addr_size;
+    context->addr_storage.size = n_eps;
+    /* Note: rank and flags should already be set from initial addr exchange */
 
-    ucc_free(heartbeat_data);
-//    ucc_free(gathered_heartbeats);
+    ucc_info("service team failure detection completed using addr_storage: %d failed processes detected", 
+             failed_count);
+    ucc_info("updated context addr_storage with %u processes, addr_len=%zu", 
+             context->addr_storage.size, context->addr_storage.addr_len);
+
     return UCC_OK;
 #if 0
 cleanup:

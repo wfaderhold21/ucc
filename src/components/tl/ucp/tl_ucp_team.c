@@ -112,14 +112,24 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
                  self->opt_radix, self->opt_radix_host);
     }
 
-    tl_debug(tl_context->lib, "posted tl team: %p", self);
+    tl_debug(tl_context->lib,
+             "posted tl team: %p params.size=%u params.rank=%u scope=%u",
+             self,
+             self->super.super.params.size,
+             self->super.super.params.rank,
+             self->super.super.params.scope);
     return UCC_OK;
 }
 
 UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_team_t)
 {
     ucc_config_parser_release_opts(&self->cfg, ucc_tl_ucp_lib_config_table);
-    tl_debug(self->super.super.context->lib, "finalizing tl team: %p", self);
+    tl_debug(self->super.super.context->lib,
+             "finalizing tl team: %p params.size=%u params.rank=%u scope=%u",
+             self,
+             self->super.super.params.size,
+             self->super.super.params.rank,
+             self->super.super.params.scope);
 }
 
 UCC_CLASS_DEFINE_DELETE_FUNC(ucc_tl_ucp_team_t, ucc_base_team_t);

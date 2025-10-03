@@ -61,7 +61,12 @@ ucc_status_t ucc_detect_failed_processes(ucc_context_t *context,
                                         int *num_failed);
 
 /**
- * @brief Detect failed processes using service team-based OOB communication
+ * @brief Detect failed processes using service team-based addr_storage exchange
+ *
+ * This function uses the service team's OOB interface to perform an allgather
+ * of context addresses (addr_storage) instead of simple heartbeat values.
+ * Processes that are alive will exchange their current address information,
+ * allowing detection of both process failures and address changes.
  *
  * @param context       UCC context with service team
  * @param alive_mask    Output array indicating which processes are alive (1) or failed (0)

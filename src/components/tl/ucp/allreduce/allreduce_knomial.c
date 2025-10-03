@@ -195,6 +195,7 @@ ucc_status_t ucc_tl_ucp_allreduce_knomial_start(ucc_coll_task_t *coll_task)
     ucc_status_t       status;
 
     UCC_TL_UCP_PROFILE_REQUEST_EVENT(coll_task, "ucp_allreduce_kn_start", 0);
+    printf("allreduce_knomial_start rank %d size %d\n", rank, size);
     task->allreduce_kn.phase = UCC_KN_PHASE_INIT;
     ucc_assert(UCC_IS_INPLACE(TASK_ARGS(task)) ||
                (TASK_ARGS(task).src.info.mem_type == mem_type));

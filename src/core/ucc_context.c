@@ -946,6 +946,160 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     return UCC_OK;
 }
 
+static ucc_status_t ucc_context_rebuild_service_team(ucc_context_t *context,
+                                                     uint64_t *alive_mask,
+                                                     int num_failed,
+                                                     size_t original_size,
+                                                     ucc_rank_t rank)
+{
+    ucc_status_t status = UCC_OK;
+    ucc_base_team_params_t t_params;
+    ucc_base_team_t *b_team;
+    ucc_tl_team_t *new_service_team = NULL;
+    ucc_rank_t new_size;
+    ucc_rank_t new_rank = UCC_RANK_MAX;
+    int i;
+
+    ucc_info("ucc_context_rebuild_service_team: context=%p, service_team=%p, alive_mask=%p, num_failed=%d", 
+             context, context->service_team, alive_mask, num_failed);
+
+    if (!context->service_team || !alive_mask) {
+        /* No service team to rebuild or no alive mask available */
+        ucc_info("skipping service team rebuild: service_team=%p, alive_mask=%p", 
+                 context->service_team, alive_mask);
+        return UCC_OK;
+    }
+
+    /* Calculate new team size and rank */
+    new_size = original_size - num_failed;
+    if (new_size <= 0) {
+        ucc_warn("all processes failed, cannot rebuild service team");
+        return UCC_ERR_NO_RESOURCE;
+    }
+
+    /* Check if current process is alive and find its new rank */
+    if (!alive_mask[rank]) {
+        ucc_warn("current process (rank %d) is not in alive mask, cannot rebuild service team", rank);
+        return UCC_ERR_NO_RESOURCE;
+    }
+
+#if 1
+    /* Calculate new rank by counting alive processes before our rank */
+    new_rank = 0;
+    for (i = 0; i < rank; i++) {
+        if (alive_mask[i]) {
+            new_rank++;
+        }
+    }
+#endif
+    /* Create new service team parameters */
+    memset(&t_params.map, 0, sizeof(ucc_ep_map_t));
+    memset(&t_params.params, 0, sizeof(ucc_team_params_t));
+    t_params.params.mask = UCC_TEAM_PARAM_FIELD_EP |
+                           UCC_TEAM_PARAM_FIELD_EP_RANGE |
+                           UCC_TEAM_PARAM_FIELD_OOB;
+    t_params.params.oob.allgather    = context->params.oob.allgather;
+    t_params.params.oob.req_test     = context->params.oob.req_test;
+    t_params.params.oob.req_free     = context->params.oob.req_free;
+    t_params.params.oob.coll_info    = context->params.oob.coll_info;
+    t_params.params.oob.n_oob_eps    = new_size;
+    t_params.params.ep_range = UCC_COLLECTIVE_EP_RANGE_CONTIG;
+    t_params.params.ep       = new_rank;
+    t_params.rank            = new_rank;
+    t_params.size            = new_size;
+    t_params.scope      = UCC_CL_LAST + 1; /* CORE scope id */
+    t_params.scope_id   = 0;
+    t_params.id         = 0;
+    t_params.team       = NULL;
+    t_params.map.type   = UCC_EP_MAP_FULL;
+    t_params.map.ep_num = new_size;
+
+    /* Debug: Show team creation parameters */
+    ucc_info("creating new service team with parameters:");
+    ucc_info("  - team size: %u", new_size);
+    ucc_info("  - my rank (ep): %lu", t_params.params.ep);
+    ucc_info("  - calculated new_rank: %u", new_rank);
+    ucc_info("  - original rank parameter: %u", rank);
+
+    /* Create new service team */
+    status = UCC_TL_CTX_IFACE(context->service_ctx)
+                 ->team.create_post(&context->service_ctx->super,
+                                    &t_params, &b_team);
+    if (UCC_OK != status) {
+        ucc_error("failed to create new service team post: %s", 
+                  ucc_status_string(status));
+        return status;
+    }
+
+    /* Wait for service team creation to complete */
+    do {
+        status = UCC_TL_CTX_IFACE(context->service_ctx)
+                     ->team.create_test(b_team);
+    } while (UCC_INPROGRESS == status);
+
+    if (status < 0) {
+        ucc_error("failed to create new service team: %s", 
+                  ucc_status_string(status));
+        return status;
+    }
+
+    new_service_team = ucc_derived_of(b_team, ucc_tl_team_t);
+
+    /* Debug: Show properties of the new service team */
+    ucc_info("new service team created successfully:");
+    ucc_info("  - team size: %u", new_service_team->super.params.size);
+    ucc_info("  - my rank in new team: %u", new_service_team->super.params.rank);
+    ucc_info("  - team pointer: %p", new_service_team);
+    ucc_info("  - scope: %d (should be %d for service team)", new_service_team->super.params.scope, UCC_CL_LAST + 1);
+
+    /* Destroy old service team */
+    if (context->service_team) {
+        ucc_info("destroying old service team: %p", context->service_team);
+        
+        /* Temporarily mark context as failed to halt any ongoing operations */
+        int was_failed = context->is_failed;
+        context->is_failed = 1;
+        
+        /* Try to destroy the service team - if it's in progress, we'll retry later */
+        status = UCC_TL_CTX_IFACE(context->service_ctx)
+                     ->team.destroy(&context->service_team->super);
+        
+        if (status == UCC_INPROGRESS) {
+            /* Don't progress anything - just let the destroy operation complete 
+               asynchronously to avoid progressing operations on the team being destroyed */
+            ucc_info("service team destruction in progress, will complete asynchronously");
+            status = UCC_OK; /* Consider this success for now */
+        }
+        
+        /* Restore original failed state */
+        context->is_failed = was_failed;
+        
+        if (status < 0) {
+            ucc_warn("failed to destroy old service team: %s", 
+                     ucc_status_string(status));
+        } else {
+            ucc_info("old service team destroyed successfully");
+        }
+    }
+
+    /* Update context with new service team */
+    context->service_team = new_service_team;
+    context->rank = new_rank;
+    
+    /* Update context OOB parameters to reflect new team size and rank */
+    context->params.oob.n_oob_eps = new_size;
+    context->params.oob.oob_ep = new_rank;
+
+    ucc_info("service team rebuilt: new_size=%u, new_rank=%u, updated OOB params: n_oob_eps=%u, oob_ep=%u", 
+             new_size, new_rank, context->params.oob.n_oob_eps, context->params.oob.oob_ep);
+
+    /* Note: TL contexts should automatically pick up the updated OOB parameters
+     * since they access them via UCC_TL_CTX_OOB(_ctx) which points to 
+     * context->params.oob that we just updated above */
+
+    return UCC_OK;
+}
+
 ucc_status_t ucc_context_abort(ucc_context_h context)
 {
     ucc_status_t       status = UCC_OK;
@@ -966,7 +1120,6 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
     /* Mark context as failed first to halt collective operations */
     context->is_failed = 1;
 
-#if 1
     /* Iterate over progress queue and mark all collectives as failed */
     if (context->pq && !ucc_progress_queue_is_empty(context->pq)) {
         ucc_debug("emptying the progress queue and marking collectives as failed");
@@ -1008,21 +1161,7 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
 
         ucc_debug("marked %d collectives as failed in progress queue", failed_count);
     }
-    #endif
     printf("context->service_team: %p\n", context->service_team);
-    #if 0
-    ucc_tl_team_t * service_team = context->service_team;
-    ucc_subset_t s;
-    memset(&s.map, 0, sizeof(ucc_ep_map_t));
-    s.map.type = UCC_EP_MAP_FULL;
-    s.map.ep_num = context->params.oob.n_oob_eps;
-    s.myrank = context->rank;
-    alive_mask = ucc_malloc(context->params.oob.n_oob_eps * sizeof(size_t), "alive_mask");
-    size_t rank = 1;
-    ucc_coll_task_t *req;
-    status = UCC_TL_TEAM_IFACE(service_team)->scoll.allgather(&service_team->super, &rank, alive_mask, sizeof(size_t), s, &req);
-    #endif
-#if 1
     /* Allocate temporary buffer for failure detection reduction */
     if (context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
         /* Use hybrid failure detection: try service team OOB first, fallback to sockets */
@@ -1038,13 +1177,15 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
             ucc_info("hybrid failure detection completed: %d failed processes detected during context abort", num_failed);
         }
     }
-#endif
     /* Store failure information in context */
     if (context->failure_info.ep_list) {
         ucc_free(context->failure_info.ep_list);
     }
     context->failure_info.ep_list = failed_ranks;
     context->failure_info.num_eps = num_failed;
+    
+    ucc_info("context abort: stored %d failed processes in failure_info", num_failed);
+
     #if 0
     /* Clean up memory allocated by failure detection */
     if (alive_mask) {
@@ -1055,8 +1196,11 @@ ucc_status_t ucc_context_abort(ucc_context_h context)
     return status;
 }
 
-ucc_status_t ucc_context_recover(ucc_context_h context)
+ucc_status_t ucc_context_recover(ucc_context_h context, ucc_oob_coll_t *oob)
 {
+    ucc_status_t status = UCC_OK;
+    uint64_t *alive_mask = NULL;
+    
     if (NULL == context) {
         ucc_error("ucc_context_recover: invalid context handle: NULL");
         return UCC_ERR_INVALID_PARAM;
@@ -1067,13 +1211,283 @@ ucc_status_t ucc_context_recover(ucc_context_h context)
         return UCC_OK;
     }
 
+    if (context->failure_info.num_eps == 0) {
+        ucc_debug("no failures detected, skipping recovery");
+        return UCC_OK;
+    }
+
+    /* Save original size before updating OOB */
+    size_t original_size = 0;
+    if (context->failure_info.num_eps > 0 && context->service_team && oob) {
+        original_size = context->params.oob.n_oob_eps;
+    }
+
+    /* Replace context's current OOB information with the provided OOB */
+    if (oob) {
+        ucc_info("updating context OOB information for recovery");
+        context->params.oob = *oob;
+        context->params.mask |= UCC_CONTEXT_PARAM_FIELD_OOB;
+    }
+
+    /* Rebuild service team if failures were detected and we have a service team */
+    ucc_info("context recover: checking rebuild conditions - num_failed=%d, service_team=%p, oob=%p", 
+             context->failure_info.num_eps, context->service_team, oob);
+    if (context->failure_info.num_eps > 0 && context->service_team && oob) {
+        ucc_info("rebuilding service team during recovery: num_failed=%d, service_team=%p", 
+                 context->failure_info.num_eps, context->service_team);
+        
+        /* Use the original context size to create the alive mask, not the new OOB size */
+        alive_mask = ucc_calloc(original_size, sizeof(uint64_t), "alive_mask_recover");
+        if (!alive_mask) {
+            ucc_error("failed to allocate alive_mask for recovery");
+            return UCC_ERR_NO_MEMORY;
+        }
+        
+        /* Initialize all as alive, then mark failed ones */
+        for (int i = 0; i < original_size; i++) {
+            alive_mask[i] = 1;
+        }
+        
+        /* Mark failed processes */
+        for (int i = 0; i < context->failure_info.num_eps; i++) {
+            uint64_t failed_rank = context->failure_info.ep_list[i];
+            if (failed_rank < original_size) {
+                alive_mask[failed_rank] = 0;
+            }
+        }
+        
+        /* Reinitialize ALL TL contexts with updated OOB parameters before rebuilding service team */
+        ucc_info("reinitializing all TL contexts with updated OOB parameters");
+        
+        /* Store old TL contexts and configs for recreation */
+        ucc_tl_context_t **old_tl_ctx = context->tl_ctx;
+        int old_n_tl_ctx = context->n_tl_ctx;
+        ucc_tl_context_t *old_service_ctx = context->service_ctx;
+        
+        /* Prepare base parameters for TL context creation */
+        ucc_base_context_params_t b_params;
+        ucc_copy_context_params(&b_params.params, &context->params);
+        b_params.params.oob = *oob;  /* Use the updated OOB parameters */
+        b_params.context = context;
+        b_params.estimated_num_eps = original_size - context->failure_info.num_eps;
+        b_params.estimated_num_ppn = 1; /* Use a reasonable default */
+        b_params.prefix = context->lib->full_prefix;
+        b_params.thread_mode = context->lib->attr.thread_mode;
+        
+        /* Allocate new TL context array */
+        context->tl_ctx = (ucc_tl_context_t **)ucc_malloc(
+            sizeof(ucc_tl_context_t *) * context->lib->n_tl_libs_opened, "tl_ctx_array_recover");
+        if (!context->tl_ctx) {
+            ucc_error("failed to allocate TL context array during recovery");
+            context->tl_ctx = old_tl_ctx; /* Restore old array */
+            return UCC_ERR_NO_MEMORY;
+        }
+        context->n_tl_ctx = 0;
+        context->service_ctx = NULL;
+        
+        /* Put service context reference if it exists */
+        if (old_service_ctx) {
+            ucc_tl_context_put(old_service_ctx);
+        }
+        
+        /* Destroy all old TL contexts */
+        for (int i = 0; i < old_n_tl_ctx; i++) {
+            ucc_tl_lib_t *tl_lib = ucc_derived_of(old_tl_ctx[i]->super.lib, ucc_tl_lib_t);
+            ucc_info("destroying old TL context: %s", tl_lib->iface->super.name);
+            tl_lib->iface->context.destroy(&old_tl_ctx[i]->super);
+        }
+        
+        /* Recreate all TL contexts with updated OOB parameters */
+        for (int i = 0; i < context->lib->n_tl_libs_opened; i++) {
+            ucc_tl_lib_t *tl_lib = context->lib->tl_libs[i];
+            ucc_tl_context_config_t *tl_config = NULL;
+            ucc_base_context_t *new_b_ctx;
+            ucc_base_lib_attr_t attr;
+            
+            /* Get TL lib attributes */
+            status = tl_lib->iface->lib.get_attr(&tl_lib->super, &attr);
+            if (UCC_OK != status) {
+                ucc_error("failed to query tl lib %s attr during recovery",
+                         tl_lib->iface->super.name);
+                goto cleanup_partial_tl_ctx;
+            }
+            
+            /* Check if service team is required and available */
+            int ctx_service_team = (b_params.params.mask & UCC_CONTEXT_PARAM_FIELD_OOB);
+            if ((attr.flags & UCC_BASE_LIB_FLAG_CTX_SERVICE_TEAM_REQUIRED) && (!ctx_service_team)) {
+                ucc_debug("skipping tl/%s context during recovery - service team not available",
+                         tl_lib->iface->super.name);
+                continue;
+            }
+            
+            /* Create TL config */
+            ucc_context_config_t temp_config;
+            temp_config.lib = context->lib;
+            status = ucc_tl_context_config_read(tl_lib, &temp_config, &tl_config);
+            if (UCC_OK != status) {
+                ucc_error("failed to read TL config for %s during recovery: %s", 
+                         tl_lib->iface->super.name, ucc_status_string(status));
+                continue; /* Skip this TL but continue with others */
+            }
+            
+            /* Create new TL context */
+            status = tl_lib->iface->context.create(&b_params, &tl_config->super.super, &new_b_ctx);
+            if (UCC_OK != status) {
+                ucc_warn("failed to recreate TL context for %s during recovery: %s", 
+                        tl_lib->iface->super.name, ucc_status_string(status));
+                ucc_base_config_release(&tl_config->super.super);
+                continue; /* Skip this TL but continue with others */
+            }
+            
+            /* Add to context */
+            context->tl_ctx[context->n_tl_ctx] = ucc_derived_of(new_b_ctx, ucc_tl_context_t);
+            context->n_tl_ctx++;
+            
+            /* Run create_epilog if it exists */
+            if (tl_lib->iface->context.create_epilog) {
+                status = tl_lib->iface->context.create_epilog(new_b_ctx);
+                if (UCC_OK != status) {
+                    ucc_error("TL context create_epilog failed for %s during recovery: %s", 
+                             tl_lib->iface->super.name, ucc_status_string(status));
+                    /* Continue anyway - context was created successfully */
+                }
+            }
+            
+            /* Clean up the config */
+            ucc_base_config_release(&tl_config->super.super);
+            
+            ucc_info("TL context %s recreated successfully", tl_lib->iface->super.name);
+        }
+        
+        /* Check if we have at least one TL context */
+        if (context->n_tl_ctx == 0) {
+            ucc_error("no TL contexts were recreated during recovery");
+            status = UCC_ERR_NOT_FOUND;
+            goto cleanup_partial_tl_ctx;
+        }
+        
+        /* Update all_tls names array */
+        if (context->all_tls.names) {
+            ucc_free(context->all_tls.names);
+        }
+        context->all_tls.count = context->n_tl_ctx;
+        context->all_tls.names = ucc_malloc(sizeof(char*) * context->n_tl_ctx, "all_tls_recover");
+        if (!context->all_tls.names) {
+            ucc_error("failed to allocate all_tls names during recovery");
+            status = UCC_ERR_NO_MEMORY;
+            goto cleanup_partial_tl_ctx;
+        }
+        for (int i = 0; i < context->n_tl_ctx; i++) {
+            context->all_tls.names[i] = (char*)ucc_derived_of(context->tl_ctx[i]->super.lib,
+                                                   ucc_tl_lib_t)->iface->super.name;
+        }
+        
+        /* Update service_ctx reference */
+        status = ucc_tl_context_get(context, "ucp", &context->service_ctx);
+        if (UCC_OK != status) {
+            ucc_warn("failed to get new service context reference during recovery: %s", 
+                    ucc_status_string(status));
+            /* Continue anyway - we may not have UCP or it may not be required */
+        }
+        
+        /* Clean up old TL context array */
+        ucc_free(old_tl_ctx);
+        
+        ucc_info("all TL contexts reinitialized successfully with new OOB parameters");
+        goto tl_reinit_complete;
+        
+cleanup_partial_tl_ctx:
+        /* Cleanup partially created contexts and restore old state */
+        for (int i = 0; i < context->n_tl_ctx; i++) {
+            ucc_tl_lib_t *tl_lib = ucc_derived_of(context->tl_ctx[i]->super.lib, ucc_tl_lib_t);
+            tl_lib->iface->context.destroy(&context->tl_ctx[i]->super);
+        }
+        ucc_free(context->tl_ctx);
+        context->tl_ctx = old_tl_ctx;
+        context->n_tl_ctx = old_n_tl_ctx;
+        context->service_ctx = old_service_ctx;
+        if (alive_mask) {
+            ucc_free(alive_mask);
+        }
+        return status;
+        
+tl_reinit_complete:
+
+        ucc_info("rebuilding service team during recovery: num_failed=%d, original_size=%zu", 
+                 context->failure_info.num_eps, original_size);
+        status = ucc_context_rebuild_service_team(context, alive_mask, 
+                                                 context->failure_info.num_eps, original_size, oob->oob_ep);
+        if (status != UCC_OK) {
+            ucc_warn("failed to rebuild service team during recovery: %s", 
+                     ucc_status_string(status));
+            /* Continue anyway - the context recovery should still succeed */
+        } else {
+            ucc_info("service team rebuilt successfully during recovery");
+        }
+        
+        /* Reinitialize topology information with updated addr_storage */
+        if (context->topo) {
+            ucc_info("reinitializing context topology after service team rebuild");
+            ucc_context_topo_cleanup(context->topo);
+            context->topo = NULL;
+        }
+        
+        if (context->addr_storage.size > 1) {
+            status = ucc_context_topo_init(&context->addr_storage, &context->topo);
+            if (UCC_OK != status) {
+                ucc_warn("failed to reinitialize context topology after recovery: %s", 
+                         ucc_status_string(status));
+                /* Continue anyway - topology is not critical for basic functionality */
+            } else {
+                ucc_info("context topology reinitialized successfully with %d processes", 
+                         context->addr_storage.size);
+            }
+        } else {
+            ucc_info("skipping topology reinitialization: insufficient processes (%d)", 
+                     context->addr_storage.size);
+        }
+        
+        ucc_free(alive_mask);
+    } else {
+        ucc_info("skipping service team rebuild during recovery: num_failed=%d, service_team=%p, oob=%p", 
+                 context->failure_info.num_eps, context->service_team, oob);
+    }
+
+    /* Check progress queue state before unmarking as failed */
+    int pq_empty = ucc_progress_queue_is_empty(context->pq);
+    ucc_info("context recovery: progress queue empty = %d", pq_empty);
+    
+    /* If progress queue is not empty, force drain it to avoid stale operations */
+    if (!pq_empty) {
+        ucc_warn("progress queue not empty during recovery - force draining to avoid stale operations");
+        
+        /* Temporarily keep context marked as failed while draining */
+        ucc_coll_task_t *task;
+        int drained_count = 0;
+        
+        if (context->pq->dequeue != NULL) {
+            /* Multi-threaded progress queue - drain using dequeue */
+            do {
+                context->pq->dequeue(context->pq, &task);
+                if (task) {
+                    task->status = UCC_ERR_NO_RESOURCE;
+                    task->super.status = UCC_ERR_NO_RESOURCE;
+                    ucc_task_complete(task);
+                    drained_count++;
+                }
+            } while (task != NULL);
+        }
+        
+        ucc_info("drained %d stale operations from progress queue during recovery", drained_count);
+    }
+    
     /* Unmark context as failed to allow collective operations to resume */
     /* Note: failed processes list is preserved for querying */
     context->is_failed = 0;
 
     ucc_info("context recovered, %d failed processes remain in failure list", 
              context->failure_info.num_eps);
-    return UCC_OK;
+    return status;
 }
 
 typedef struct ucc_context_progress_entry {

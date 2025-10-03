@@ -2264,6 +2264,7 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx);
  * @brief The routine recovers a UCC context from a failed state.
  *
  * @param [in] ctx      Handle to a UCC context in failed state
+ * @param [in] oob      Out-of-band collective interface for recovery operations
  *
  * @parblock
  *
@@ -2271,16 +2272,17 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx);
  *
  * @ref ucc_context_recover unmarks the context as failed, allowing collective
  * operations to resume. The list of failed processes determined during
- * @ref ucc_context_abort is preserved and can be queried. Any team created
- * using this context should be considered invalid and continued usage for
- * collective operations can result in undefined behavior until teams are
- * recreated excluding failed processes.
+ * @ref ucc_context_abort is preserved and can be queried. The provided OOB
+ * interface is used to rebuild the service team with the surviving processes.
+ * Any team created using this context should be considered invalid and continued
+ * usage for collective operations can result in undefined behavior until teams
+ * are recreated excluding failed processes.
  *
  * @endparblock
  *
  * @return Error code as defined by @ref ucc_status_t
  */
-ucc_status_t ucc_context_recover(ucc_context_h ctx);
+ucc_status_t ucc_context_recover(ucc_context_h ctx, ucc_oob_coll_t *oob);
 
 /**
  * @ingroup UCC_RESILIENCE
@@ -2303,7 +2305,7 @@ ucc_status_t ucc_context_recover(ucc_context_h ctx);
  *
  * @return Error code as defined by @ref ucc_status_t
  */
-ucc_status_t ucc_team_shrink(uint64_t *failed_ranks, uint32_t nr_ranks, ucc_team_h *team);
+ucc_status_t ucc_team_shrink(uint64_t *failed_ranks, uint32_t nr_ranks, ucc_team_h *team, ucc_team_h *new_team);
 
 
 END_C_DECLS

@@ -203,3 +203,75 @@ INSTANTIATE_TEST_CASE_P(
                       std::vector<int>({0, 1, 2, 3, 4, 5, 6, 7, 8}),
                       std::vector<int>({15, 14, 13, 12, 11, 10, 9}),
                       std::vector<int>({0, 2, 4, 6, 8})));
+
+class test_service_ft_allgather : public test_service_coll {
+    std::vector<std::vector<int>> sbuf;
+    std::vector<std::vector<int>> rbuf;
+
+  public:
+    test_service_ft_allgather(std::vector<int> _subset, size_t count,
+                              UccTeam_h _team)
+        : test_service_coll(_subset, _team)
+    {
+        sbuf.resize(_subset.size());
+        rbuf.resize(_subset.size());
+        for (auto i = 0; i < _subset.size(); i++) {
+            sbuf[i].resize(count);
+            rbuf[i].resize(count * _subset.size());
+            for (auto j = 0; j < count; j++) {
+                sbuf[i][j] = i + j + 1;
+            }
+            for (auto j = 0; j < count * _subset.size(); j++) {
+                rbuf[i][j] = 0;
+            }
+        }
+    }
+    void start()
+    {
+        ucc_status_t status;
+        for (auto i = 0; i < reqs.size(); i++) {
+            auto r = array[i];
+            status = ucc_service_ft_allgather(
+                team.get()->procs[r].team, sbuf[i].data(), rbuf[i].data(),
+                sbuf[i].size() * sizeof(int), subsets[i], &reqs[i]);
+            EXPECT_EQ(UCC_OK, status);
+        }
+    }
+    void check()
+    {
+        int size  = reqs.size();
+        int count = sbuf[0].size();
+        for (auto i = 0; i < size; i++) {
+            for (auto j = 0; j < rbuf[i].size(); j++) {
+                int check = (j % count) + 1 + (j / count);
+                EXPECT_EQ(check, rbuf[i][j]);
+            }
+        }
+    }
+};
+
+class test_scoll_ft_allgather
+    : public ucc::test,
+      public ::testing::WithParamInterface<std::vector<int>> {
+};
+
+UCC_TEST_P(test_scoll_ft_allgather, ft_allgather)
+{
+    /* Reversed team of size staticUccJobSize - last one in static teawms array */
+    auto team = UccJob::getStaticTeams().back();
+    ASSERT_EQ(team.get()->procs.size(), 16);
+    std::vector<int>       subset = GetParam();
+    test_service_ft_allgather t(subset, 4, team);
+    t.start();
+    t.wait();
+    t.check();
+}
+
+INSTANTIATE_TEST_CASE_P(
+    , test_scoll_ft_allgather,
+    ::testing::Values(std::vector<int>({1, 0}), std::vector<int>({2, 3}),
+                      std::vector<int>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+                                        12, 13, 14, 15}),
+                      std::vector<int>({0, 1, 2, 3, 4, 5, 6, 7, 8}),
+                      std::vector<int>({15, 14, 13, 12, 11, 10, 9}),
+                      std::vector<int>({0, 2, 4, 6, 8})));
