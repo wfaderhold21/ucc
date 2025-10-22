@@ -14,6 +14,9 @@
 #include "tl_ucp_ep.h"
 #include "utils/ucc_compiler_def.h"
 #include "tl_ucp_task.h"
+#include "utils/ucc_time.h"
+#include "utils/ucc_malloc.h"
+#include "utils/ucc_math.h"
 
 #define UCC_TL_UCP_MAKE_TAG(_user_tag, _tag, _rank, _id, _scope_id, _scope)    \
     ((((uint64_t) (_user_tag)) << UCC_TL_UCP_USER_TAG_BITS_OFFSET) |           \
@@ -716,5 +719,161 @@ static inline ucc_status_t ucc_tl_ucp_atomic_inc(void *     target,
             goto _label;                                                       \
         }                                                                      \
     } while (0)
+
+/* RTT-based congestion control: segmented PUT operation */
+static inline ucc_status_t ucc_tl_ucp_put_nb_segmented(
+    void *buffer, void *target, size_t msglen, ucc_rank_t dest_group_rank,
+    ucc_mem_map_mem_h src_memh, ucc_mem_map_mem_h *dest_memh,
+    ucc_tl_ucp_team_t *team, ucc_tl_ucp_task_t *task)
+{
+    size_t       segment_size = task->onesided.segment_size;
+    size_t       num_segments = (msglen + segment_size - 1) / segment_size;
+    size_t       offset       = task->onesided.bytes_posted;
+    uint32_t     seg_idx      = task->onesided.segments_posted;
+    ucc_status_t status;
+    double       current_time;
+
+    /* Allocate RTT segment tracking if not already done */
+    if (!task->onesided.rtt_segments) {
+        task->onesided.rtt_segments = ucc_malloc(
+            num_segments * sizeof(ucc_tl_ucp_rtt_segment_t), "rtt_segments");
+        if (!task->onesided.rtt_segments) {
+            return UCC_ERR_NO_MEMORY;
+        }
+        task->onesided.max_segments = num_segments;
+
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "Allocated %zu segments for RTT tracking (msglen=%zu, "
+                 "segment_size=%zu)",
+                 num_segments, msglen, segment_size);
+    }
+
+    /* Post segments with congestion window control */
+    while (offset < msglen && seg_idx < num_segments) {
+        /* Check congestion window before posting */
+        if (task->onesided.active_segments >=
+            (uint32_t)task->onesided.congestion_window) {
+            /* Window full, caller should check progress and retry */
+            tl_trace(UCC_TL_TEAM_LIB(team),
+                     "Congestion window full: active=%u, cwnd=%.2f",
+                     task->onesided.active_segments,
+                     task->onesided.congestion_window);
+            break;
+        }
+
+        size_t chunk_size = ucc_min(segment_size, msglen - offset);
+        current_time      = ucc_get_time();
+
+        /* Record send timestamp */
+        task->onesided.rtt_segments[seg_idx].send_timestamp = current_time;
+        task->onesided.rtt_segments[seg_idx].segment_size   = chunk_size;
+        task->onesided.rtt_segments[seg_idx].segment_id     = seg_idx;
+        task->onesided.rtt_segments[seg_idx].completion_timestamp = 0.0;
+
+        /* Post the segment - NOTE: this will increment put_posted */
+        status = ucc_tl_ucp_put_nb(
+            PTR_OFFSET(buffer, offset), PTR_OFFSET(target, offset), chunk_size,
+            dest_group_rank, src_memh, dest_memh, team, task);
+
+        if (UCC_OK != status) {
+            tl_error(UCC_TL_TEAM_LIB(team), "Failed to post PUT segment %u: %s",
+                     seg_idx, ucc_status_string(status));
+            return status;
+        }
+
+        task->onesided.active_segments++;
+        offset += chunk_size;
+        seg_idx++;
+
+        /* Update persistent state */
+        task->onesided.bytes_posted = offset;
+        task->onesided.segments_posted = seg_idx;
+
+        tl_trace(UCC_TL_TEAM_LIB(team),
+                 "Posted PUT segment %u: offset=%zu, size=%zu, active=%u",
+                 seg_idx - 1, offset - chunk_size, chunk_size,
+                 task->onesided.active_segments);
+    }
+
+    return (offset < msglen) ? UCC_INPROGRESS : UCC_OK;
+}
+
+/* RTT-based congestion control: segmented GET operation */
+static inline ucc_status_t ucc_tl_ucp_get_nb_segmented(
+    void *buffer, void *target, size_t msglen, ucc_rank_t dest_group_rank,
+    ucc_mem_map_mem_h src_memh, ucc_mem_map_mem_h *dest_memh,
+    ucc_tl_ucp_team_t *team, ucc_tl_ucp_task_t *task)
+{
+    size_t       segment_size = task->onesided.segment_size;
+    size_t       num_segments = (msglen + segment_size - 1) / segment_size;
+    size_t       offset       = task->onesided.bytes_posted;
+    uint32_t     seg_idx      = task->onesided.segments_posted;
+    ucc_status_t status;
+    double       current_time;
+
+    /* Allocate RTT segment tracking if not already done */
+    if (!task->onesided.rtt_segments) {
+        task->onesided.rtt_segments = ucc_malloc(
+            num_segments * sizeof(ucc_tl_ucp_rtt_segment_t), "rtt_segments");
+        if (!task->onesided.rtt_segments) {
+            return UCC_ERR_NO_MEMORY;
+        }
+        task->onesided.max_segments = num_segments;
+
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "Allocated %zu segments for RTT tracking (msglen=%zu, "
+                 "segment_size=%zu)",
+                 num_segments, msglen, segment_size);
+    }
+
+    /* Post segments with congestion window control */
+    while (offset < msglen && seg_idx < num_segments) {
+        /* Check congestion window before posting */
+        if (task->onesided.active_segments >=
+            (uint32_t)task->onesided.congestion_window) {
+            /* Window full, caller should check progress and retry */
+            tl_trace(UCC_TL_TEAM_LIB(team),
+                     "Congestion window full: active=%u, cwnd=%.2f",
+                     task->onesided.active_segments,
+                     task->onesided.congestion_window);
+            break;
+        }
+
+        size_t chunk_size = ucc_min(segment_size, msglen - offset);
+        current_time      = ucc_get_time();
+
+        /* Record send timestamp */
+        task->onesided.rtt_segments[seg_idx].send_timestamp = current_time;
+        task->onesided.rtt_segments[seg_idx].segment_size   = chunk_size;
+        task->onesided.rtt_segments[seg_idx].segment_id     = seg_idx;
+        task->onesided.rtt_segments[seg_idx].completion_timestamp = 0.0;
+
+        /* Post the segment - NOTE: this will increment get_posted */
+        status = ucc_tl_ucp_get_nb(
+            PTR_OFFSET(buffer, offset), PTR_OFFSET(target, offset), chunk_size,
+            dest_group_rank, src_memh, dest_memh, team, task);
+
+        if (UCC_OK != status) {
+            tl_error(UCC_TL_TEAM_LIB(team), "Failed to post GET segment %u: %s",
+                     seg_idx, ucc_status_string(status));
+            return status;
+        }
+
+        task->onesided.active_segments++;
+        offset += chunk_size;
+        seg_idx++;
+
+        /* Update persistent state */
+        task->onesided.bytes_posted = offset;
+        task->onesided.segments_posted = seg_idx;
+
+        tl_trace(UCC_TL_TEAM_LIB(team),
+                 "Posted GET segment %u: offset=%zu, size=%zu, active=%u",
+                 seg_idx - 1, offset - chunk_size, chunk_size,
+                 task->onesided.active_segments);
+    }
+
+    return (offset < msglen) ? UCC_INPROGRESS : UCC_OK;
+}
 
 #endif

@@ -101,6 +101,21 @@ typedef struct ucc_tl_ucp_context_config {
     ucc_tl_ucp_local_copy_type_t local_copy_type;
     int                          memtype_copy_enable;
     uint32_t                     exported_memory_handle;
+    /* RTT-based congestion control configuration */
+    uint32_t                     enable_rtt_congestion_control;
+    size_t                       rtt_segment_size;
+    size_t                       min_segment_size;
+    size_t                       max_segment_size;
+    double                       rtt_alpha;
+    double                       rtt_beta;
+    uint32_t                     initial_cwnd;
+    uint32_t                     max_cwnd;
+    double                       cwnd_growth_factor;
+    double                       cwnd_reduction_factor;
+    /* RTT threshold-based peer selection */
+    uint32_t                     enable_rtt_threshold_mode;
+    double                       rtt_threshold_us;         /* RTT threshold in microseconds */
+    uint32_t                     max_peer_skip_attempts;   /* Max times to skip a peer before forcing */
 } ucc_tl_ucp_context_config_t;
 
 typedef ucc_tl_ucp_lib_config_t ucc_tl_ucp_team_config_t;

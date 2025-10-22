@@ -6,6 +6,8 @@
 
 
 #include "tl_ucp_sendrecv.h"
+#include "tl_ucp_congestion.h"
+#include "utils/ucc_time.h"
 
 void ucc_tl_ucp_send_recv_counter_inc_st(uint32_t *counter)
 {
@@ -46,12 +48,39 @@ void ucc_tl_ucp_send_completion_cb_mt(void *request, ucs_status_t status,
 void ucc_tl_ucp_put_completion_cb(void *request, ucs_status_t status,
                                   void *user_data)
 {
-    ucc_tl_ucp_task_t *task = (ucc_tl_ucp_task_t *)user_data;
+    ucc_tl_ucp_task_t    *task = (ucc_tl_ucp_task_t *)user_data;
+    ucc_tl_ucp_context_t *ctx  = TASK_CTX(task);
+    double                completion_time;
+    uint32_t              segment_idx;
+
     if (ucc_unlikely(UCS_OK != status)) {
         tl_error(UCC_TASK_LIB(task), "failure in put completion %s",
                  ucs_status_string(status));
         task->super.status = ucs_status_to_ucc_status(status);
     }
+
+    /* Record completion timestamp and update RTT statistics if enabled */
+    if (ctx->cfg.enable_rtt_congestion_control && task->onesided.rtt_segments) {
+        completion_time = ucc_get_time();
+        segment_idx     = task->onesided.put_completed;
+
+        if (segment_idx < task->onesided.max_segments) {
+            task->onesided.rtt_segments[segment_idx].completion_timestamp =
+                completion_time;
+
+            /* Calculate RTT and update statistics */
+            double rtt =
+                completion_time -
+                task->onesided.rtt_segments[segment_idx].send_timestamp;
+            ucc_tl_ucp_update_rtt_stats(task, segment_idx, rtt);
+        }
+
+        /* Decrement active segments counter */
+        if (task->onesided.active_segments > 0) {
+            task->onesided.active_segments--;
+        }
+    }
+
     task->onesided.put_completed++;
     ucp_request_free(request);
 }
@@ -59,12 +88,39 @@ void ucc_tl_ucp_put_completion_cb(void *request, ucs_status_t status,
 void ucc_tl_ucp_get_completion_cb(void *request, ucs_status_t status,
                                   void *user_data)
 {
-    ucc_tl_ucp_task_t *task = (ucc_tl_ucp_task_t *)user_data;
+    ucc_tl_ucp_task_t    *task = (ucc_tl_ucp_task_t *)user_data;
+    ucc_tl_ucp_context_t *ctx  = TASK_CTX(task);
+    double                completion_time;
+    uint32_t              segment_idx;
+
     if (ucc_unlikely(UCS_OK != status)) {
         tl_error(UCC_TASK_LIB(task), "failure in get completion %s",
                  ucs_status_string(status));
         task->super.status = ucs_status_to_ucc_status(status);
     }
+
+    /* Record completion timestamp and update RTT statistics if enabled */
+    if (ctx->cfg.enable_rtt_congestion_control && task->onesided.rtt_segments) {
+        completion_time = ucc_get_time();
+        segment_idx     = task->onesided.get_completed;
+
+        if (segment_idx < task->onesided.max_segments) {
+            task->onesided.rtt_segments[segment_idx].completion_timestamp =
+                completion_time;
+
+            /* Calculate RTT and update statistics */
+            double rtt =
+                completion_time -
+                task->onesided.rtt_segments[segment_idx].send_timestamp;
+            ucc_tl_ucp_update_rtt_stats(task, segment_idx, rtt);
+        }
+
+        /* Decrement active segments counter */
+        if (task->onesided.active_segments > 0) {
+            task->onesided.active_segments--;
+        }
+    }
+
     task->onesided.get_completed++;
     ucp_request_free(request);
 }

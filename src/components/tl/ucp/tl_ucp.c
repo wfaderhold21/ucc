@@ -298,6 +298,72 @@ static ucs_config_field_t ucc_tl_ucp_context_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_context_config_t, exported_memory_handle),
      UCC_CONFIG_TYPE_BOOL},
 
+    {"ENABLE_RTT_CONGESTION_CONTROL", "n",
+     "Enable RTT-based congestion avoidance for one-sided operations",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, enable_rtt_congestion_control),
+     UCC_CONFIG_TYPE_BOOL},
+
+    {"RTT_SEGMENT_SIZE", "256k",
+     "Default segment size for RTT measurement in one-sided operations",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, rtt_segment_size),
+     UCC_CONFIG_TYPE_MEMUNITS},
+
+    {"MIN_SEGMENT_SIZE", "64k",
+     "Minimum segment size for RTT measurement",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, min_segment_size),
+     UCC_CONFIG_TYPE_MEMUNITS},
+
+    {"MAX_SEGMENT_SIZE", "1m",
+     "Maximum segment size for RTT measurement",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, max_segment_size),
+     UCC_CONFIG_TYPE_MEMUNITS},
+
+    {"RTT_ALPHA", "0.125",
+     "SRTT smoothing factor (alpha in RFC 6298)",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, rtt_alpha),
+     UCS_CONFIG_TYPE_DOUBLE},
+
+    {"RTT_BETA", "0.25",
+     "RTTVAR smoothing factor (beta in RFC 6298)",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, rtt_beta),
+     UCS_CONFIG_TYPE_DOUBLE},
+
+    {"INITIAL_CWND", "4",
+     "Initial congestion window (number of concurrent segments)",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, initial_cwnd),
+     UCC_CONFIG_TYPE_UINT},
+
+    {"MAX_CWND", "128",
+     "Maximum congestion window (0 = unlimited)",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, max_cwnd),
+     UCC_CONFIG_TYPE_UINT},
+
+    {"CWND_GROWTH_FACTOR", "1.0",
+     "Congestion window growth rate in congestion avoidance phase",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, cwnd_growth_factor),
+     UCS_CONFIG_TYPE_DOUBLE},
+
+    {"CWND_REDUCTION_FACTOR", "0.5",
+     "Window reduction factor on congestion detection",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, cwnd_reduction_factor),
+     UCS_CONFIG_TYPE_DOUBLE},
+
+    {"ENABLE_RTT_THRESHOLD_MODE", "n",
+     "Enable RTT threshold-based peer selection instead of congestion window. "
+     "When enabled, peers with RTT above threshold are temporarily skipped.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, enable_rtt_threshold_mode),
+     UCC_CONFIG_TYPE_BOOL},
+
+    {"RTT_THRESHOLD_US", "100.0",
+     "RTT threshold in microseconds. Peers with RTT above this are temporarily skipped.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, rtt_threshold_us),
+     UCS_CONFIG_TYPE_DOUBLE},
+
+    {"MAX_PEER_SKIP_ATTEMPTS", "3",
+     "Maximum number of times a peer can be skipped before forcing communication.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, max_peer_skip_attempts),
+     UCC_CONFIG_TYPE_UINT},
+
     {NULL}};
 
 UCC_CLASS_DEFINE_NEW_FUNC(ucc_tl_ucp_lib_t, ucc_base_lib_t,

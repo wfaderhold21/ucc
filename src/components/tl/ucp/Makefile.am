@@ -120,6 +120,8 @@ sources =                 \
 	tl_ucp_dpu_offload.c  \
 	tl_ucp_copy.c         \
 	tl_ucp_sendrecv.c     \
+	tl_ucp_congestion.h   \
+	tl_ucp_congestion.c   \
 	$(allgather)          \
 	$(allgatherv)         \
 	$(alltoall)           \

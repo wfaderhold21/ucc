@@ -36,6 +36,13 @@ enum ucc_tl_ucp_task_flags {
     UCC_TL_UCP_TASK_FLAG_SUBSET = UCC_BIT(0),
 };
 
+typedef struct ucc_tl_ucp_rtt_segment {
+    double   send_timestamp;         /* Time when segment was posted */
+    double   completion_timestamp;   /* Time when segment completed */
+    size_t   segment_size;           /* Size of this segment */
+    uint64_t segment_id;             /* Unique identifier */
+} ucc_tl_ucp_rtt_segment_t;
+
 typedef struct ucc_tl_ucp_task {
     ucc_coll_task_t super;
     uint32_t        flags;
@@ -52,6 +59,23 @@ typedef struct ucc_tl_ucp_task {
             uint32_t                    put_completed;
             uint32_t                    get_posted;
             uint32_t                    get_completed;
+            /* RTT-based congestion control fields */
+            ucc_tl_ucp_rtt_segment_t   *rtt_segments;      /* Array to track per-segment RTTs */
+            uint32_t                    max_segments;       /* Maximum concurrent segments */
+            uint32_t                    active_segments;    /* Currently in-flight segments */
+            uint32_t                    sample_count;       /* Number of RTT samples collected */
+            double                      smoothed_rtt;       /* Exponentially weighted moving avg RTT */
+            double                      rtt_variance;       /* RTT variance for adaptive control */
+            size_t                      segment_size;       /* Target size for message segmentation */
+            double                      congestion_window;  /* Current congestion window size */
+            double                      ssthresh;           /* Slow start threshold */
+            /* State for segmented operations */
+            uint32_t                    segments_posted;    /* Segments posted for current message */
+            size_t                      bytes_posted;       /* Bytes posted for current message */
+            /* Per-peer RTT tracking for threshold mode */
+            double                     *peer_rtt;           /* RTT per peer (microseconds) */
+            double                     *peer_rtt_timestamp; /* Last update time per peer */
+            uint32_t                   *peer_skip_count;    /* Times each peer was skipped */
         } onesided;
     };
     uint32_t        n_polls;
@@ -222,11 +246,33 @@ typedef struct ucc_tl_ucp_task {
 static inline void ucc_tl_ucp_task_reset(ucc_tl_ucp_task_t *task,
                                          ucc_status_t status)
 {
-    task->tagged.send_posted    = 0;
-    task->tagged.send_completed = 0;
-    task->tagged.recv_posted    = 0;
-    task->tagged.recv_completed = 0;
-    task->super.status          = status;
+    task->tagged.send_posted            = 0;
+    task->tagged.send_completed         = 0;
+    task->tagged.recv_posted            = 0;
+    task->tagged.recv_completed         = 0;
+    /* Initialize onesided counters */
+    task->onesided.put_posted           = 0;
+    task->onesided.put_completed        = 0;
+    task->onesided.get_posted           = 0;
+    task->onesided.get_completed        = 0;
+    /* Initialize congestion control fields */
+    task->onesided.rtt_segments         = NULL;
+    task->onesided.max_segments         = 0;
+    task->onesided.active_segments      = 0;
+    task->onesided.sample_count         = 0;
+    task->onesided.smoothed_rtt         = 0.0;
+    task->onesided.rtt_variance         = 0.0;
+    task->onesided.segment_size         = 0;
+    task->onesided.congestion_window    = 0.0;
+    task->onesided.ssthresh             = 0.0;
+    /* Initialize segmented operation state */
+    task->onesided.segments_posted      = 0;
+    task->onesided.bytes_posted         = 0;
+    /* Initialize per-peer RTT tracking */
+    task->onesided.peer_rtt             = NULL;
+    task->onesided.peer_rtt_timestamp   = NULL;
+    task->onesided.peer_skip_count      = NULL;
+    task->super.status                  = status;
 }
 
 static inline ucc_tl_ucp_task_t *ucc_tl_ucp_get_task(ucc_tl_ucp_team_t *team)

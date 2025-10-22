@@ -10,40 +10,168 @@
 #include "core/ucc_progress_queue.h"
 #include "utils/ucc_math.h"
 #include "tl_ucp_sendrecv.h"
+#include "tl_ucp_congestion.h"
 
 void ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask);
 
 ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
 {
-    ucc_tl_ucp_task_t *task     = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
-    ucc_tl_ucp_team_t *team     = TASK_TEAM(task);
-    ptrdiff_t          src      = (ptrdiff_t)TASK_ARGS(task).src.info.buffer;
-    ptrdiff_t          dest     = (ptrdiff_t)TASK_ARGS(task).dst.info.buffer;
-    size_t             nelems   = TASK_ARGS(task).src.info.count;
-    ucc_rank_t         grank    = UCC_TL_TEAM_RANK(team);
-    ucc_rank_t         gsize    = UCC_TL_TEAM_SIZE(team);
-    ucc_rank_t         start    = (grank + 1) % gsize;
-    long              *pSync    = TASK_ARGS(task).global_work_buffer;
-    ucc_mem_map_mem_h  src_memh = TASK_ARGS(task).src_memh.local_memh;
-    ucc_mem_map_mem_h *dst_memh = TASK_ARGS(task).dst_memh.global_memh;
-    ucc_rank_t         peer;
+    ucc_tl_ucp_task_t    *task     = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
+    ucc_tl_ucp_team_t    *team     = TASK_TEAM(task);
+    ucc_tl_ucp_context_t *ctx      = TASK_CTX(task);
+    ptrdiff_t             src      = (ptrdiff_t)TASK_ARGS(task).src.info.buffer;
+    ptrdiff_t             dest     = (ptrdiff_t)TASK_ARGS(task).dst.info.buffer;
+    size_t                nelems   = TASK_ARGS(task).src.info.count;
+    ucc_rank_t            grank    = UCC_TL_TEAM_RANK(team);
+    ucc_rank_t            gsize    = UCC_TL_TEAM_SIZE(team);
+    ucc_rank_t            start    = (grank + 1) % gsize;
+    long                 *pSync    = TASK_ARGS(task).global_work_buffer;
+    ucc_mem_map_mem_h     src_memh = TASK_ARGS(task).src_memh.local_memh;
+    ucc_mem_map_mem_h    *dst_memh = TASK_ARGS(task).dst_memh.global_memh;
+    ucc_rank_t            peer;
+    int                   use_rtt_congestion_control;
+    int                   use_rtt_threshold_mode;
+    ucc_status_t          seg_status;
+    ucc_status_t          status;
 
     if (TASK_ARGS(task).flags & UCC_COLL_ARGS_FLAG_SRC_MEMH_GLOBAL) {
         src_memh = TASK_ARGS(task).src_memh.global_memh[grank];
     }
 
     ucc_tl_ucp_task_reset(task, UCC_INPROGRESS);
+
     /* TODO: change when support for library-based work buffers is complete */
     nelems = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
     dest   = dest + grank * nelems;
-    for (peer = start; task->onesided.put_posted < gsize; peer = (peer + 1) % gsize) {
-        UCPCHECK_GOTO(ucc_tl_ucp_put_nb(
-                          (void *)(src + peer * nelems), (void *)dest, nelems,
-                          peer, src_memh, dst_memh, team, task),
-                          task, out);
-        UCPCHECK_GOTO(ucc_tl_ucp_atomic_inc(pSync, peer, dst_memh, team),
-                                            task, out);
+
+    /* Determine which RTT mode to use */
+    use_rtt_congestion_control = ctx->cfg.enable_rtt_congestion_control &&
+                                 !ctx->cfg.enable_rtt_threshold_mode &&
+                                 (nelems >= ctx->cfg.rtt_segment_size);
+    use_rtt_threshold_mode = ctx->cfg.enable_rtt_congestion_control &&
+                             ctx->cfg.enable_rtt_threshold_mode;
+
+    if (use_rtt_congestion_control) {
+        /* Window-based congestion control mode */
+        ucc_tl_ucp_init_congestion_control(task);
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "RTT congestion control enabled for alltoall: "
+                 "nelems=%zu, segment_size=%zu, initial_cwnd=%.2f",
+                 nelems, task->onesided.segment_size,
+                 task->onesided.congestion_window);
+    } else if (use_rtt_threshold_mode) {
+        /* Threshold-based peer selection mode */
+        status = ucc_tl_ucp_init_peer_rtt_tracking(task, gsize);
+        if (status != UCC_OK) {
+            task->super.status = status;
+            goto out;
+        }
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "RTT threshold mode enabled for alltoall: "
+                 "nelems=%zu, threshold=%.2f us, max_skip=%u",
+                 nelems, ctx->cfg.rtt_threshold_us,
+                 ctx->cfg.max_peer_skip_attempts);
     }
+
+    if (use_rtt_threshold_mode) {
+        /* Threshold mode: Skip high-RTT peers and retry them later */
+        uint32_t peers_completed = 0;
+        uint32_t max_passes = gsize * (ctx->cfg.max_peer_skip_attempts + 1);
+        uint32_t pass       = 0;
+
+        while (peers_completed < gsize && pass < max_passes) {
+            for (peer = 0; peer < gsize; peer++) {
+                ucc_rank_t dest_peer = (start + peer) % gsize;
+                double     start_time, end_time;
+
+                /* Skip if already completed */
+                if (task->onesided.put_completed > peers_completed &&
+                    dest_peer < peers_completed) {
+                    continue;
+                }
+
+                /* Check if we should skip this peer */
+                if (ucc_tl_ucp_should_skip_peer(task, dest_peer, ctx)) {
+                    continue;
+                }
+
+                /* Measure RTT for this PUT operation */
+                start_time = ucc_get_time();
+
+                UCPCHECK_GOTO(
+                    ucc_tl_ucp_put_nb((void *)(src + dest_peer * nelems),
+                                      (void *)dest, nelems, dest_peer, src_memh,
+                                      dst_memh, team, task),
+                    task, out);
+
+                /* Wait for completion to measure RTT */
+                while (task->onesided.put_completed <
+                       task->onesided.put_posted) {
+                    ucp_worker_progress(team->worker->ucp_worker);
+                }
+
+                end_time = ucc_get_time();
+                ucc_tl_ucp_update_peer_rtt(task, dest_peer,
+                                           end_time - start_time);
+
+                UCPCHECK_GOTO(
+                    ucc_tl_ucp_atomic_inc(pSync, dest_peer, dst_memh, team),
+                    task, out);
+
+                peers_completed++;
+
+                if (peers_completed >= gsize) {
+                    break;
+                }
+            }
+            pass++;
+        }
+        if (peers_completed < gsize) {
+            tl_warn(UCC_TL_TEAM_LIB(team),
+                    "Not all peers completed after %u passes (%u/%u)", pass,
+                    peers_completed, gsize);
+        }
+    } else {
+        /* Window-based or no congestion control */
+        peer = start;
+        while (peer < start + gsize) {
+            ucc_rank_t dest_peer = peer % gsize;
+
+            /* Use segmented PUT if congestion control is enabled and message is large */
+            if (use_rtt_congestion_control &&
+                nelems > ctx->cfg.rtt_segment_size) {
+                /* Keep posting segments until all are sent for this peer */
+                do {
+                    seg_status = ucc_tl_ucp_put_nb_segmented(
+                        (void *)(src + dest_peer * nelems), (void *)dest,
+                        nelems, dest_peer, src_memh, dst_memh, team, task);
+                    if (seg_status == UCC_INPROGRESS) {
+                        /* Congestion window full, progress the worker to complete some segments */
+                        ucp_worker_progress(team->worker->ucp_worker);
+                    } else if (seg_status != UCC_OK) {
+                        task->super.status = seg_status;
+                        goto out;
+                    }
+                } while (seg_status == UCC_INPROGRESS);
+
+                /* All segments posted for this peer, reset state for next peer */
+                task->onesided.segments_posted = 0;
+                task->onesided.bytes_posted    = 0;
+            } else {
+                /* Use regular PUT for small messages */
+                UCPCHECK_GOTO(
+                    ucc_tl_ucp_put_nb((void *)(src + dest_peer * nelems),
+                                      (void *)dest, nelems, dest_peer, src_memh,
+                                      dst_memh, team, task),
+                    task, out);
+            }
+            UCPCHECK_GOTO(
+                ucc_tl_ucp_atomic_inc(pSync, dest_peer, dst_memh, team), task,
+                out);
+            peer++;
+        }
+    }
+
     return ucc_progress_queue_enqueue(UCC_TL_CORE_CTX(team)->pq, &task->super);
 out:
     return task->super.status;
@@ -51,13 +179,23 @@ out:
 
 void ucc_tl_ucp_alltoall_onesided_progress(ucc_coll_task_t *ctask)
 {
-    ucc_tl_ucp_task_t *task  = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
-    ucc_tl_ucp_team_t *team  = TASK_TEAM(task);
-    ucc_rank_t         gsize = UCC_TL_TEAM_SIZE(team);
-    long *             pSync = TASK_ARGS(task).global_work_buffer;
+    ucc_tl_ucp_task_t    *task  = ucc_derived_of(ctask, ucc_tl_ucp_task_t);
+    ucc_tl_ucp_team_t    *team  = TASK_TEAM(task);
+    ucc_tl_ucp_context_t *ctx   = TASK_CTX(task);
+    ucc_rank_t            gsize = UCC_TL_TEAM_SIZE(team);
+    long                 *pSync = TASK_ARGS(task).global_work_buffer;
 
     if (ucc_tl_ucp_test_onesided(task, gsize) == UCC_INPROGRESS) {
         return;
+    }
+
+    /* Cleanup congestion control resources if enabled */
+    if (ctx->cfg.enable_rtt_congestion_control) {
+        if (ctx->cfg.enable_rtt_threshold_mode) {
+            ucc_tl_ucp_cleanup_peer_rtt_tracking(task);
+        } else {
+            ucc_tl_ucp_cleanup_congestion_control(task);
+        }
     }
 
     pSync[0]           = 0;
