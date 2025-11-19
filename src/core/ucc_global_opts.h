@@ -25,6 +25,10 @@ typedef struct ucc_global_config {
 
     /* Coll component libraries path */
     char *component_path;
+
+    /* Plugin component libraries path (for 3rd party plugins) */
+    char *plugin_component_path;
+
     char *install_path;
     int   initialized;
     /* Profiling mode */

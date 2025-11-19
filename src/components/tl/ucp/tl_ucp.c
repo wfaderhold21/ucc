@@ -380,6 +380,14 @@ ucs_memory_type_t ucc_memtype_to_ucs[UCC_MEMORY_TYPE_LAST + 1] = {
     [UCC_MEMORY_TYPE_UNKNOWN]      = UCS_MEMORY_TYPE_UNKNOWN
 };
 
+ucs_memory_type_t ucc_memtype_to_ucs(ucc_memory_type_t mem_type)
+{
+    if (mem_type >= UCC_MEMORY_TYPE_LAST) {
+        return UCS_MEMORY_TYPE_UNKNOWN;
+    }
+    return ucc_memtype_to_ucs[mem_type];
+}
+
 UCC_TL_UCP_PROFILE_FUNC_VOID(ucc_tl_ucp_pre_register_mem, (team, addr, length,
                              mem_type), ucc_tl_ucp_team_t *team, void *addr,
                              size_t length, ucc_memory_type_t mem_type)
@@ -405,7 +413,7 @@ UCC_TL_UCP_PROFILE_FUNC_VOID(ucc_tl_ucp_pre_register_mem, (team, addr, length,
     }
 
     status = ucc_tl_ucp_populate_rcache(base_address, alloc_length,
-                                        ucc_memtype_to_ucs[mem_type],
+                                        ucc_memtype_to_ucs(mem_type),
                                         UCC_TL_UCP_TEAM_CTX(team));
     if (ucc_unlikely(status != UCC_OK)) {
         tl_warn(UCC_TL_TEAM_LIB(team), "ucc_tl_ucp_mem_map failed");

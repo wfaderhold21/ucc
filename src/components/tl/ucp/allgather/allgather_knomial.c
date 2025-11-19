@@ -86,14 +86,14 @@ void ucc_tl_ucp_allgather_knomial_progress(ucc_coll_task_t *coll_task)
     send_param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK |
                               UCP_OP_ATTR_FIELD_MEMORY_TYPE |
                               UCP_OP_ATTR_FIELD_USER_DATA;
-    send_param.memory_type  = ucc_memtype_to_ucs[mem_type];
+    send_param.memory_type  = ucc_memtype_to_ucs(mem_type);
     send_param.cb.send      = TASK_CTX(task)->sendrecv_cbs.send_cb;
     send_param.user_data    = task;
 
     recv_param.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK |
                               UCP_OP_ATTR_FIELD_MEMORY_TYPE |
                               UCP_OP_ATTR_FIELD_USER_DATA;
-    recv_param.memory_type  = ucc_memtype_to_ucs[mem_type];
+    recv_param.memory_type  = ucc_memtype_to_ucs(mem_type);
     recv_param.cb.recv      = TASK_CTX(task)->sendrecv_cbs.recv_cb;
     recv_param.user_data    = task;
 

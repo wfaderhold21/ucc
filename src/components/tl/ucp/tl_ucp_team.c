@@ -238,7 +238,7 @@ ucc_status_t ucc_tl_ucp_team_get_scores(ucc_base_team_t   *tl_team,
     ucc_coll_score_team_info_t team_info;
 
     for (i = 0; i < UCC_MEMORY_TYPE_LAST; i++) {
-        if (tl_ctx->ucp_memory_types & UCC_BIT(ucc_memtype_to_ucs[i])) {
+        if (tl_ctx->ucp_memory_types & UCC_BIT(ucc_memtype_to_ucs(i))) {
             tl_debug(tl_team->context->lib,
                      "enable support for memory type %s",
                      ucc_memory_type_names[i]);

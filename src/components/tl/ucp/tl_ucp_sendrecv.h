@@ -100,7 +100,7 @@ ucc_tl_ucp_send_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
         UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
     req_param.datatype    = ucp_dt_make_contig(msglen);
     req_param.cb.send     = cb;
-    req_param.memory_type = ucc_memtype_to_ucs[mtype];
+    req_param.memory_type = ucc_memtype_to_ucs(mtype);
     req_param.user_data   = user_data;
     task->tagged.send_posted++;
     return ucp_tag_send_nbx(ep, buffer, 1, ucp_tag, &req_param);
@@ -202,7 +202,7 @@ ucc_tl_ucp_recv_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
         UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
     req_param.datatype    = ucp_dt_make_contig(msglen);
     req_param.cb.recv     = cb;
-    req_param.memory_type = ucc_memtype_to_ucs[mtype];
+    req_param.memory_type = ucc_memtype_to_ucs(mtype);
     req_param.user_data   = user_data;
     task->tagged.recv_posted++;
     return ucp_tag_recv_nbx(team->worker->ucp_worker, buffer, 1, ucp_tag,

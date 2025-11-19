@@ -12,15 +12,16 @@
 UCC_LIST_HEAD(ucc_config_global_list);
 
 ucc_global_config_t ucc_global_config = {
-    .log_component    = {UCC_LOG_LEVEL_WARN, "UCC"},
-    .coll_trace       = {UCC_LOG_LEVEL_WARN, "UCC_COLL"},
-    .component_path   = NULL,
-    .install_path     = NULL,
-    .initialized      = 0,
-    .profile_mode     = 0,
-    .profile_file     = "",
-    .profile_log_size = 0,
-    .file_cfg         = 0};
+    .log_component         = {UCC_LOG_LEVEL_WARN, "UCC"},
+    .coll_trace            = {UCC_LOG_LEVEL_WARN, "UCC_COLL"},
+    .component_path        = NULL,
+    .plugin_component_path = NULL,
+    .install_path          = NULL,
+    .initialized           = 0,
+    .profile_mode          = 0,
+    .profile_file          = "",
+    .profile_log_size      = 0,
+    .file_cfg              = 0};
 
 ucc_config_field_t ucc_global_config_table[] = {
     {"LOG_LEVEL", "warn",
@@ -64,5 +65,14 @@ ucc_config_field_t ucc_global_config_table[] = {
      "found, in <ucc_install_path>/share/ucc.conf.\n"
      "empty string \"\" - disable use of config file",
      ucc_offsetof(ucc_global_config_t, cfg_filename), UCC_CONFIG_TYPE_STRING},
+
+    {"PLUGIN_COMPONENT_PATH", "",
+     "Search path for 3rd-party plugin components.\n"
+     "UCC will automatically discover and load memory component (MC) and\n"
+     "execution component (EC) plugins from shared libraries in this directory.\n"
+     "Expected library names: libucc_mc_<name>.so, libucc_ec_<name>.so\n"
+     "Example: /opt/xpu/lib/ucc/plugins",
+     ucc_offsetof(ucc_global_config_t, plugin_component_path),
+     UCC_CONFIG_TYPE_STRING},
 
     {NULL}};

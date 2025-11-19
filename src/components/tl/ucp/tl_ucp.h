@@ -305,7 +305,12 @@ extern ucc_config_field_t ucc_tl_ucp_lib_config_table[];
     (PTR_OFFSET(buffer, UCC_TL_UCP_MEMH_TL_PACKED_HEADER_SIZE +                \
                             UCC_TL_UCP_MEMH_TL_KEY_SIZE(buffer)))
 
-extern ucs_memory_type_t ucc_memtype_to_ucs[UCC_MEMORY_TYPE_LAST+1];
+/**
+ * Map UCC memory type to UCS memory type.
+ * Handles both built-in and plugin memory types safely.
+ * For plugin types (>= UCC_MEMORY_TYPE_LAST), returns UCS_MEMORY_TYPE_UNKNOWN.
+ */
+ucs_memory_type_t ucc_memtype_to_ucs(ucc_memory_type_t mem_type);
 
 void ucc_tl_ucp_pre_register_mem(ucc_tl_ucp_team_t *team, void *addr,
                                  size_t length, ucc_memory_type_t mem_type);

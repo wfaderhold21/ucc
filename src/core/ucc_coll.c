@@ -259,18 +259,10 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_init,
     if (task->flags & UCC_COLL_TASK_FLAG_EXECUTOR) {
         task->flags |= UCC_COLL_TASK_FLAG_EXECUTOR_STOP;
         coll_mem_type = ucc_coll_args_mem_type(&op_args.args, team->rank);
-        switch(coll_mem_type) {
-        case UCC_MEMORY_TYPE_CUDA:
-        case UCC_MEMORY_TYPE_CUDA_MANAGED:
-            coll_ee_type = UCC_EE_CUDA_STREAM;
-            break;
-        case UCC_MEMORY_TYPE_ROCM:
-            coll_ee_type = UCC_EE_ROCM_STREAM;
-            break;
-        case UCC_MEMORY_TYPE_HOST:
-            coll_ee_type = UCC_EE_CPU_THREAD;
-            break;
-        default:
+
+        /* Get execution engine type for this memory type */
+        status = ucc_mc_get_execution_engine_type(coll_mem_type, &coll_ee_type);
+        if (status != UCC_OK) {
             ucc_error("no suitable executor available for memory type %s",
                       ucc_memory_type_names[coll_mem_type]);
             status = UCC_ERR_INVALID_PARAM;

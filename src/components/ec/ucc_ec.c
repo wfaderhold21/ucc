@@ -8,6 +8,7 @@
 #include "config.h"
 #include "base/ucc_ec_base.h"
 #include "ucc_ec.h"
+#include "ucc_ec_plugin.h"
 #include "core/ucc_global_opts.h"
 #include "utils/ucc_malloc.h"
 #include "utils/ucc_log.h"
@@ -16,9 +17,38 @@ static const ucc_ec_ops_t          *ec_ops[UCC_EE_LAST];
 static const ucc_ee_executor_ops_t *executor_ops[UCC_EE_LAST];
 static pthread_mutex_t ucc_ec_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* Helper functions to get ec_ops and executor_ops including plugins */
+static inline const ucc_ec_ops_t* ucc_ec_get_ops(ucc_ee_type_t ee_type)
+{
+    if (ee_type < UCC_EE_LAST) {
+        return ec_ops[ee_type];
+    } else {
+        /* Check plugin registry */
+        ucc_ec_plugin_entry_t *plugin = ucc_ec_plugin_get_entry(ee_type);
+        return plugin ? &plugin->desc.ops : NULL;
+    }
+}
+
+static inline const ucc_ee_executor_ops_t* ucc_ec_get_executor_ops(ucc_ee_type_t ee_type)
+{
+    if (ee_type < UCC_EE_LAST) {
+        return executor_ops[ee_type];
+    } else {
+        /* Check plugin registry */
+        ucc_ec_plugin_entry_t *plugin = ucc_ec_plugin_get_entry(ee_type);
+        return plugin ? &plugin->desc.executor_ops : NULL;
+    }
+}
+
 #define UCC_CHECK_EC_AVAILABLE(ee)                                             \
     do {                                                                       \
-        if (NULL == ec_ops[ee]) {                                              \
+        const ucc_ec_ops_t *ops = ucc_ec_get_ops(ee);                          \
+        if (NULL == ops) {                                                      \
+            if (ee < UCC_EE_LAST) {                                             \
+                ucc_error("execution engine type %d not initialized", ee);      \
+            } else {                                                            \
+                ucc_error("EC plugin with ee_type %d not registered", ee);      \
+            }                                                                   \
             return UCC_ERR_NOT_SUPPORTED;                                      \
         }                                                                      \
     } while (0)
@@ -86,7 +116,9 @@ ucc_status_t ucc_ec_init(const ucc_ec_params_t *ec_params)
 
 ucc_status_t ucc_ec_available(ucc_ee_type_t ee_type)
 {
-    if (NULL == ec_ops[ee_type]) {
+    const ucc_ec_ops_t *ops = ucc_ec_get_ops(ee_type);
+    
+    if (NULL == ops) {
         return UCC_ERR_NOT_FOUND;
     }
 
@@ -128,77 +160,101 @@ ucc_status_t ucc_ec_finalize()
 
 ucc_status_t ucc_ec_create_event(void **event, ucc_ee_type_t ee_type)
 {
+    const ucc_ec_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(ee_type);
-    return ec_ops[ee_type]->create_event(event);
+    ops = ucc_ec_get_ops(ee_type);
+    return ops->create_event(event);
 }
 
 ucc_status_t ucc_ec_destroy_event(void *event, ucc_ee_type_t ee_type)
 {
+    const ucc_ec_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(ee_type);
-    return ec_ops[ee_type]->destroy_event(event);
+    ops = ucc_ec_get_ops(ee_type);
+    return ops->destroy_event(event);
 }
 
 ucc_status_t ucc_ec_event_post(void *ee_context, void *event,
                                ucc_ee_type_t ee_type)
 {
+    const ucc_ec_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(ee_type);
-    return ec_ops[ee_type]->event_post(ee_context, event);
+    ops = ucc_ec_get_ops(ee_type);
+    return ops->event_post(ee_context, event);
 }
 
 ucc_status_t ucc_ec_event_test(void *event, ucc_ee_type_t ee_type)
 {
+    const ucc_ec_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(ee_type);
-    return ec_ops[ee_type]->event_test(event);
+    ops = ucc_ec_get_ops(ee_type);
+    return ops->event_test(event);
 }
 
 ucc_status_t ucc_ee_executor_init(const ucc_ee_executor_params_t *params,
                                   ucc_ee_executor_t **executor)
 {
+    const ucc_ee_executor_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(params->ee_type);
-    return executor_ops[params->ee_type]->init(params, executor);
+    ops = ucc_ec_get_executor_ops(params->ee_type);
+    return ops->init(params, executor);
 }
 
 ucc_status_t ucc_ee_executor_status(const ucc_ee_executor_t *executor)
 {
+    const ucc_ee_executor_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(executor->ee_type);
-    return executor_ops[executor->ee_type]->status(executor);
+    ops = ucc_ec_get_executor_ops(executor->ee_type);
+    return ops->status(executor);
 }
 
 ucc_status_t ucc_ee_executor_start(ucc_ee_executor_t *executor,
                                    void *ee_context)
 {
+    const ucc_ee_executor_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(executor->ee_type);
-    return executor_ops[executor->ee_type]->start(executor, ee_context);
+    ops = ucc_ec_get_executor_ops(executor->ee_type);
+    return ops->start(executor, ee_context);
 }
 
 ucc_status_t ucc_ee_executor_stop(ucc_ee_executor_t *executor)
 {
+    const ucc_ee_executor_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(executor->ee_type);
-    return executor_ops[executor->ee_type]->stop(executor);
+    ops = ucc_ec_get_executor_ops(executor->ee_type);
+    return ops->stop(executor);
 }
 
 ucc_status_t ucc_ee_executor_finalize(ucc_ee_executor_t *executor)
 {
+    const ucc_ee_executor_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(executor->ee_type);
-    return executor_ops[executor->ee_type]->finalize(executor);
+    ops = ucc_ec_get_executor_ops(executor->ee_type);
+    return ops->finalize(executor);
 }
 
 ucc_status_t ucc_ee_executor_task_post(ucc_ee_executor_t *executor,
                                        const ucc_ee_executor_task_args_t *task_args,
                                        ucc_ee_executor_task_t **task)
 {
+    const ucc_ee_executor_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(executor->ee_type);
-    return executor_ops[executor->ee_type]->task_post(executor, task_args, task);
+    ops = ucc_ec_get_executor_ops(executor->ee_type);
+    return ops->task_post(executor, task_args, task);
 }
 
 ucc_status_t ucc_ee_executor_task_test(const ucc_ee_executor_task_t *task)
 {
+    const ucc_ee_executor_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(task->eee->ee_type);
-    return executor_ops[task->eee->ee_type]->task_test(task);
+    ops = ucc_ec_get_executor_ops(task->eee->ee_type);
+    return ops->task_test(task);
 }
 
 ucc_status_t ucc_ee_executor_task_finalize(ucc_ee_executor_task_t *task)
 {
+    const ucc_ee_executor_ops_t *ops;
     UCC_CHECK_EC_AVAILABLE(task->eee->ee_type);
-    return executor_ops[task->eee->ee_type]->task_finalize(task);
+    ops = ucc_ec_get_executor_ops(task->eee->ee_type);
+    return ops->task_finalize(task);
 }

@@ -40,4 +40,17 @@ ucc_status_t ucc_mc_memcpy(void *dst, const void *src, size_t len,
 ucc_status_t ucc_mc_memset(void *ptr, int value, size_t size,
                            ucc_memory_type_t mem_type);
 
+/**
+ * Get the corresponding execution engine type for a memory type.
+ * For built-in types, returns the standard EE type.
+ * For plugin types, queries the plugin for its preferred EE type.
+ *
+ * @param [in]  mem_type  Memory type
+ * @param [out] ee_type   Corresponding execution engine type
+ *
+ * @return UCC_OK if found, UCC_ERR_NOT_FOUND if no EC available
+ */
+ucc_status_t ucc_mc_get_execution_engine_type(ucc_memory_type_t mem_type,
+                                              ucc_ee_type_t *ee_type);
+
 #endif

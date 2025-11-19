@@ -126,7 +126,7 @@ ucc_status_t ucc_tl_ucp_ucp_copy_post(void *dst, ucc_memory_type_t dst_mtype,
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_DATATYPE |
         UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
     req_param.datatype    = ucp_dt_make_contig(size);
-    req_param.memory_type = ucc_memtype_to_ucs[dst_mtype];
+    req_param.memory_type = ucc_memtype_to_ucs(dst_mtype);
     req_param.cb.recv     = ucc_tl_ucp_copy_recv_completion_cb;
     req_param.user_data   = task;
     if (dst_memh) {
@@ -149,7 +149,7 @@ ucc_status_t ucc_tl_ucp_ucp_copy_post(void *dst, ucc_memory_type_t dst_mtype,
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_DATATYPE |
         UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
     req_param.datatype    = ucp_dt_make_contig(size);
-    req_param.memory_type = ucc_memtype_to_ucs[src_mtype];
+    req_param.memory_type = ucc_memtype_to_ucs(src_mtype);
     req_param.cb.send     = ucc_tl_ucp_copy_send_completion_cb;
     req_param.user_data   = task;
     if (src_memh) {

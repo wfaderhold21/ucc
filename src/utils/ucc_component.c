@@ -110,15 +110,74 @@ ucc_component_check_ids_uniq(ucc_component_framework_t *framework)
     return UCC_OK;
 }
 
+static ucc_status_t ucc_components_load_from_path(const char *search_path,
+                                                   const char *framework_name,
+                                                   ucc_component_iface_t ***ifaces,
+                                                   int *n_loaded,
+                                                   int *total_capacity)
+{
+    glob_t       globbuf;
+    int          i;
+    char        *full_pattern;
+    ucc_status_t status;
+    size_t       pattern_size;
+    int          new_capacity;
+
+    if (!search_path || strlen(search_path) == 0) {
+        return UCC_OK;
+    }
+
+    pattern_size = strlen(search_path) + strlen(framework_name) + 16;
+    full_pattern = (char *)ucc_malloc(pattern_size, "full_pattern");
+    if (!full_pattern) {
+        ucc_error("failed to allocate %zd bytes for full_pattern",
+                  pattern_size);
+        return UCC_ERR_NO_MEMORY;
+    }
+    ucc_snprintf_safe(full_pattern, pattern_size, "%s/libucc_%s_*.so",
+                      search_path, framework_name);
+    glob(full_pattern, 0, NULL, &globbuf);
+    ucc_free(full_pattern);
+
+    if (globbuf.gl_pathc == 0) {
+        return UCC_OK;
+    }
+
+    /* Resize ifaces array if needed */
+    new_capacity = *n_loaded + globbuf.gl_pathc;
+    if (new_capacity > *total_capacity) {
+        *ifaces = ucc_realloc(*ifaces,
+                              new_capacity * sizeof(ucc_component_iface_t *),
+                              "ifaces");
+        if (!*ifaces) {
+            ucc_error("failed to reallocate ifaces array");
+            globfree(&globbuf);
+            return UCC_ERR_NO_MEMORY;
+        }
+        *total_capacity = new_capacity;
+    }
+
+    for (i = 0; i < globbuf.gl_pathc; i++) {
+        status = ucc_component_load_one(globbuf.gl_pathv[i], framework_name,
+                                        &(*ifaces)[*n_loaded]);
+        if (status != UCC_OK) {
+            continue;
+        }
+        (*n_loaded)++;
+    }
+
+    globfree(&globbuf);
+    return UCC_OK;
+}
+
 ucc_status_t ucc_components_load(const char *framework_name,
                                  ucc_component_framework_t *framework)
 {
-    glob_t globbuf;
-    int    i, n_loaded;
-    char  *full_pattern;
+    int                     n_loaded = 0;
+    int                     total_capacity = 0;
     ucc_status_t            status;
-    size_t                  pattern_size;
     ucc_component_iface_t **ifaces = NULL;
+    int                     load_plugins = 0;
 
     framework->n_components = 0;
     framework->components   = NULL;
@@ -130,42 +189,38 @@ ucc_status_t ucc_components_load(const char *framework_name,
         return UCC_ERR_INVALID_PARAM;
     }
 
-    pattern_size =
-        strlen(ucc_global_config.component_path) + strlen(framework_name) + 16;
-    full_pattern = (char *)ucc_malloc(pattern_size, "full_pattern");
-    if (!full_pattern) {
-        ucc_error("failed to allocate %zd bytes for full_pattern",
-                  pattern_size);
-        return UCC_ERR_NO_MEMORY;
-    }
-    ucc_snprintf_safe(full_pattern, pattern_size, "%s/libucc_%s_*.so",
-                      ucc_global_config.component_path, framework_name);
-    glob(full_pattern, 0, NULL, &globbuf);
-    ucc_free(full_pattern);
-    n_loaded          = 0;
+    /* Load plugins only for MC and EC frameworks */
+    load_plugins = (strcmp(framework_name, "mc") == 0 ||
+                    strcmp(framework_name, "ec") == 0);
 
     dlerror(); /* Clear any existing error */
-    ifaces = (ucc_component_iface_t **)ucc_malloc(
-        globbuf.gl_pathc * sizeof(ucc_component_iface_t *), "ifaces");
-    if (!ifaces) {
-        ucc_error("failed to allocate %zd bytes for ifaces",
-                  globbuf.gl_pathc * sizeof(ucc_component_iface_t *));
-        return UCC_ERR_NO_MEMORY;
-    }
 
-    for (i = 0; i < globbuf.gl_pathc; i++) {
-        status = ucc_component_load_one(globbuf.gl_pathv[i], framework_name,
-                                        &ifaces[n_loaded]);
-        if (status != UCC_OK) {
-            continue;
+    /* Load builtin components from standard path */
+    status = ucc_components_load_from_path(ucc_global_config.component_path,
+                                          framework_name, &ifaces, &n_loaded,
+                                          &total_capacity);
+    if (status != UCC_OK) {
+        if (ifaces) {
+            ucc_free(ifaces);
         }
-        n_loaded++;
+        return status;
     }
 
-    assert(n_loaded <= globbuf.gl_pathc);
-    if (globbuf.gl_pathc > 0) {
-        globfree(&globbuf);
+    /* Load plugin components from plugin path (MC and EC only) */
+    if (load_plugins && ucc_global_config.plugin_component_path) {
+        ucc_debug("searching for %s plugins in: %s", framework_name,
+                  ucc_global_config.plugin_component_path);
+        status = ucc_components_load_from_path(
+            ucc_global_config.plugin_component_path, framework_name, &ifaces,
+            &n_loaded, &total_capacity);
+        if (status != UCC_OK) {
+            if (ifaces) {
+                ucc_free(ifaces);
+            }
+            return status;
+        }
     }
+
     if (!n_loaded) {
         if (ifaces) {
             ucc_free(ifaces);
