@@ -18,7 +18,7 @@ static const ucc_ee_executor_ops_t *executor_ops[UCC_EE_LAST];
 static pthread_mutex_t ucc_ec_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Helper functions to get ec_ops and executor_ops including plugins */
-static inline const ucc_ec_ops_t* ucc_ec_get_ops(ucc_ee_type_t ee_type)
+static inline const ucc_ec_ops_t   *ucc_ec_get_ops(ucc_ee_type_t ee_type)
 {
     if (ee_type < UCC_EE_LAST) {
         return ec_ops[ee_type];
@@ -29,7 +29,8 @@ static inline const ucc_ec_ops_t* ucc_ec_get_ops(ucc_ee_type_t ee_type)
     }
 }
 
-static inline const ucc_ee_executor_ops_t* ucc_ec_get_executor_ops(ucc_ee_type_t ee_type)
+static inline const ucc_ee_executor_ops_t *ucc_ec_get_executor_ops(
+    ucc_ee_type_t ee_type)
 {
     if (ee_type < UCC_EE_LAST) {
         return executor_ops[ee_type];
@@ -43,12 +44,12 @@ static inline const ucc_ee_executor_ops_t* ucc_ec_get_executor_ops(ucc_ee_type_t
 #define UCC_CHECK_EC_AVAILABLE(ee)                                             \
     do {                                                                       \
         const ucc_ec_ops_t *ops = ucc_ec_get_ops(ee);                          \
-        if (NULL == ops) {                                                      \
-            if (ee < UCC_EE_LAST) {                                             \
-                ucc_error("execution engine type %d not initialized", ee);      \
-            } else {                                                            \
-                ucc_error("EC plugin with ee_type %d not registered", ee);      \
-            }                                                                   \
+        if (NULL == ops) {                                                     \
+            if (ee < UCC_EE_LAST) {                                            \
+                ucc_error("execution engine type %d not initialized", ee);     \
+            } else {                                                           \
+                ucc_error("EC plugin with ee_type %d not registered", ee);     \
+            }                                                                  \
             return UCC_ERR_NOT_SUPPORTED;                                      \
         }                                                                      \
     } while (0)

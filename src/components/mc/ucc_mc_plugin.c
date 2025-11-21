@@ -11,33 +11,33 @@
 
 /* Plugin registry - only modified during initialization (single-threaded),
  * read-only afterwards. No locking needed. */
-static ucc_mc_plugin_entry_t *mc_plugin_list = NULL;
-static ucc_memory_type_t next_memory_type = UCC_MEMORY_TYPE_LAST + 1;
+static ucc_mc_plugin_entry_t *mc_plugin_list   = NULL;
+static ucc_memory_type_t      next_memory_type = UCC_MEMORY_TYPE_LAST + 1;
 
 /* External ops array from ucc_mc.c - we'll need to extend this */
-extern const ucc_mc_ops_t *mc_ops[];
+extern const ucc_mc_ops_t    *mc_ops[];
 
 ucc_status_t ucc_mc_plugin_register(const ucc_mc_plugin_desc_t *plugin_desc,
-                                     ucc_memory_type_t *memory_type)
+                                    ucc_memory_type_t *memory_type)
 {
     ucc_mc_plugin_entry_t *entry;
-    ucc_memory_type_t mt;
-    
+    ucc_memory_type_t      mt;
+
     if (!plugin_desc || !memory_type) {
         ucc_error("invalid plugin descriptor or memory_type pointer");
         return UCC_ERR_INVALID_PARAM;
     }
-    
+
     if (!plugin_desc->name) {
         ucc_error("plugin must have a name");
         return UCC_ERR_INVALID_PARAM;
     }
-    
+
     if (!plugin_desc->ops.mem_alloc || !plugin_desc->ops.mem_free) {
         ucc_error("plugin must provide mem_alloc and mem_free operations");
         return UCC_ERR_INVALID_PARAM;
     }
-    
+
     /* Check if plugin with same name already exists */
     entry = mc_plugin_list;
     while (entry) {
@@ -47,42 +47,42 @@ ucc_status_t ucc_mc_plugin_register(const ucc_mc_plugin_desc_t *plugin_desc,
         }
         entry = entry->next;
     }
-    
+
     /* Allocate new entry */
-    entry = (ucc_mc_plugin_entry_t*)ucc_malloc(sizeof(ucc_mc_plugin_entry_t),
-                                                "mc_plugin_entry");
+    entry = (ucc_mc_plugin_entry_t *)ucc_malloc(
+        sizeof(ucc_mc_plugin_entry_t), "mc_plugin_entry");
     if (!entry) {
         ucc_error("failed to allocate memory for MC plugin entry");
         return UCC_ERR_NO_MEMORY;
     }
-    
+
     /* Assign new memory type */
     mt = next_memory_type++;
-    
+
     /* Deep copy descriptor */
     memcpy(&entry->desc, plugin_desc, sizeof(ucc_mc_plugin_desc_t));
-    
+
     /* Duplicate strings */
     if (plugin_desc->name) {
         entry->desc.name = ucc_strdup(plugin_desc->name, "mc_plugin_name");
     }
     if (plugin_desc->version) {
-        entry->desc.version = ucc_strdup(plugin_desc->version, "mc_plugin_version");
+        entry->desc.version = ucc_strdup(
+            plugin_desc->version, "mc_plugin_version");
     }
-    
-    entry->memory_type = mt;
-    entry->ref_cnt = 0;
-    entry->is_autodiscovered = 0;  /* Programmatic registration */
-    
+
+    entry->memory_type       = mt;
+    entry->ref_cnt           = 0;
+    entry->is_autodiscovered = 0; /* Programmatic registration */
+
     /* Add to list */
-    entry->next = mc_plugin_list;
-    mc_plugin_list = entry;
-    
-    *memory_type = mt;
-    
-    ucc_info("MC plugin '%s' registered with memory_type=%d",
-             plugin_desc->name, mt);
-    
+    entry->next              = mc_plugin_list;
+    mc_plugin_list           = entry;
+    *memory_type             = mt;
+
+    ucc_info(
+        "MC plugin '%s' registered with memory_type=%d", plugin_desc->name, mt);
+
     return UCC_OK;
 }
 
@@ -90,11 +90,11 @@ ucc_status_t ucc_mc_plugin_register(const ucc_mc_plugin_desc_t *plugin_desc,
  * Register an autodiscovered plugin component (loaded from .so)
  * This is called during ucc_mc_init() for components loaded from plugin path
  */
-ucc_status_t ucc_mc_plugin_register_autodiscovered(ucc_mc_base_t *mc,
-                                                    ucc_memory_type_t *memory_type)
+ucc_status_t ucc_mc_plugin_register_autodiscovered(
+    ucc_mc_base_t *mc, ucc_memory_type_t *memory_type)
 {
     ucc_mc_plugin_entry_t *entry;
-    ucc_memory_type_t mt;
+    ucc_memory_type_t      mt;
 
     if (!mc || !memory_type) {
         ucc_error("invalid parameters for autodiscovered plugin registration");
@@ -117,27 +117,26 @@ ucc_status_t ucc_mc_plugin_register_autodiscovered(ucc_mc_base_t *mc,
     }
 
     /* Allocate new entry */
-    entry = (ucc_mc_plugin_entry_t*)ucc_malloc(sizeof(ucc_mc_plugin_entry_t),
-                                                "mc_plugin_entry");
+    entry = (ucc_mc_plugin_entry_t *)ucc_malloc(
+        sizeof(ucc_mc_plugin_entry_t), "mc_plugin_entry");
     if (!entry) {
         ucc_error("failed to allocate memory for MC plugin entry");
         return UCC_ERR_NO_MEMORY;
     }
 
     /* Assign new memory type */
-    mt = next_memory_type++;
+    mt                       = next_memory_type++;
 
     /* Store reference to the loaded component */
-    entry->mc = mc;
-    entry->memory_type = mt;
-    entry->ref_cnt = 0;
-    entry->is_autodiscovered = 1;  /* Loaded from .so file */
+    entry->mc                = mc;
+    entry->memory_type       = mt;
+    entry->ref_cnt           = 0;
+    entry->is_autodiscovered = 1; /* Loaded from .so file */
 
     /* Add to list */
-    entry->next = mc_plugin_list;
-    mc_plugin_list = entry;
-
-    *memory_type = mt;
+    entry->next              = mc_plugin_list;
+    mc_plugin_list           = entry;
+    *memory_type             = mt;
 
     return UCC_OK;
 }
@@ -145,65 +144,67 @@ ucc_status_t ucc_mc_plugin_register_autodiscovered(ucc_mc_base_t *mc,
 ucc_status_t ucc_mc_plugin_unregister(ucc_memory_type_t memory_type)
 {
     ucc_mc_plugin_entry_t *entry, *prev;
-    
+
     if (memory_type < UCC_MEMORY_TYPE_LAST) {
         ucc_error("cannot unregister builtin memory type %d", memory_type);
         return UCC_ERR_INVALID_PARAM;
     }
-    
-    prev = NULL;
+
+    prev  = NULL;
     entry = mc_plugin_list;
-    
+
     while (entry) {
         if (entry->memory_type == memory_type) {
             if (entry->ref_cnt > 0) {
-                ucc_warn("MC plugin memory_type=%d still has %d references",
-                        memory_type, entry->ref_cnt);
+                ucc_warn(
+                    "MC plugin memory_type=%d still has %d references",
+                    memory_type,
+                    entry->ref_cnt);
                 return UCC_ERR_IN_PROGRESS;
             }
-            
+
             /* Remove from list */
             if (prev) {
                 prev->next = entry->next;
             } else {
                 mc_plugin_list = entry->next;
             }
-            
+
             /* Free strings */
             if (entry->desc.name) {
-                ucc_free((void*)entry->desc.name);
+                ucc_free((void *)entry->desc.name);
             }
             if (entry->desc.version) {
-                ucc_free((void*)entry->desc.version);
+                ucc_free((void *)entry->desc.version);
             }
-            
+
             ucc_free(entry);
-            
+
             ucc_info("MC plugin memory_type=%d unregistered", memory_type);
-            
+
             return UCC_OK;
         }
-        prev = entry;
+        prev  = entry;
         entry = entry->next;
     }
-    
+
     ucc_error("MC plugin memory_type=%d not found", memory_type);
     return UCC_ERR_NOT_FOUND;
 }
 
-ucc_status_t ucc_mc_plugin_query(ucc_memory_type_t memory_type,
-                                  const ucc_mc_plugin_desc_t **plugin_desc)
+ucc_status_t ucc_mc_plugin_query(
+    ucc_memory_type_t memory_type, const ucc_mc_plugin_desc_t **plugin_desc)
 {
     ucc_mc_plugin_entry_t *entry;
-    
+
     if (!plugin_desc) {
         return UCC_ERR_INVALID_PARAM;
     }
-    
+
     if (memory_type < UCC_MEMORY_TYPE_LAST) {
         return UCC_ERR_NOT_FOUND;
     }
-    
+
     entry = mc_plugin_list;
     while (entry) {
         if (entry->memory_type == memory_type) {
@@ -212,12 +213,12 @@ ucc_status_t ucc_mc_plugin_query(ucc_memory_type_t memory_type,
         }
         entry = entry->next;
     }
-    
+
     return UCC_ERR_NOT_FOUND;
 }
 
 /* Get operations table from plugin entry */
-const ucc_mc_ops_t* ucc_mc_plugin_get_ops(ucc_mc_plugin_entry_t *entry)
+const ucc_mc_ops_t *ucc_mc_plugin_get_ops(ucc_mc_plugin_entry_t *entry)
 {
     if (!entry) {
         return NULL;
@@ -232,15 +233,15 @@ const ucc_mc_ops_t* ucc_mc_plugin_get_ops(ucc_mc_plugin_entry_t *entry)
     }
 }
 
-const char* ucc_mc_plugin_get_name(ucc_memory_type_t memory_type)
+const char *ucc_mc_plugin_get_name(ucc_memory_type_t memory_type)
 {
     ucc_mc_plugin_entry_t *entry;
-    
+
     entry = ucc_mc_plugin_get_entry(memory_type);
     if (!entry) {
         return NULL;
     }
-    
+
     if (entry->is_autodiscovered) {
         return entry->mc->super.name;
     } else {
@@ -254,14 +255,14 @@ int ucc_mc_is_plugin(ucc_memory_type_t memory_type)
 }
 
 /* Internal helper to get plugin entry by memory type */
-ucc_mc_plugin_entry_t* ucc_mc_plugin_get_entry(ucc_memory_type_t memory_type)
+ucc_mc_plugin_entry_t *ucc_mc_plugin_get_entry(ucc_memory_type_t memory_type)
 {
     ucc_mc_plugin_entry_t *entry;
-    
+
     if (memory_type < UCC_MEMORY_TYPE_LAST) {
         return NULL;
     }
-    
+
     entry = mc_plugin_list;
     while (entry) {
         if (entry->memory_type == memory_type) {
@@ -269,19 +270,19 @@ ucc_mc_plugin_entry_t* ucc_mc_plugin_get_entry(ucc_memory_type_t memory_type)
         }
         entry = entry->next;
     }
-    
+
     return NULL;
 }
 
 ucc_status_t ucc_mc_plugin_iterate(ucc_mc_plugin_iter_cb_t callback, void *ctx)
 {
     ucc_mc_plugin_entry_t *entry;
-    ucc_status_t status;
-    
+    ucc_status_t           status;
+
     if (!callback) {
         return UCC_ERR_INVALID_PARAM;
     }
-    
+
     entry = mc_plugin_list;
     while (entry) {
         status = callback(entry, ctx);
@@ -290,8 +291,7 @@ ucc_status_t ucc_mc_plugin_iterate(ucc_mc_plugin_iter_cb_t callback, void *ctx)
         }
         entry = entry->next;
     }
-    
+
     return UCC_OK;
 }
-
 

@@ -21,7 +21,7 @@
 static const ucc_mc_ops_t *mc_ops[UCC_MEMORY_TYPE_LAST];
 
 /* Helper function to get mc_ops including plugins */
-static inline const ucc_mc_ops_t* ucc_mc_get_ops(ucc_memory_type_t mem_type)
+static inline const ucc_mc_ops_t *ucc_mc_get_ops(ucc_memory_type_t mem_type)
 {
     if (mem_type < UCC_MEMORY_TYPE_LAST) {
         /* Built-in component - direct array lookup */
@@ -36,31 +36,32 @@ static inline const ucc_mc_ops_t* ucc_mc_get_ops(ucc_memory_type_t mem_type)
 #define UCC_CHECK_MC_AVAILABLE(mc)                                             \
     do {                                                                       \
         const ucc_mc_ops_t *ops = ucc_mc_get_ops(mc);                          \
-        if (ucc_unlikely(NULL == ops)) {                                        \
-            if (mc < UCC_MEMORY_TYPE_LAST) {                                    \
-                ucc_error("memory type %s not initialized",                     \
-                          ucc_memory_type_names[mc]);                           \
-            } else {                                                            \
-                ucc_error("MC plugin with memory type %d not registered", mc);  \
-            }                                                                   \
+        if (ucc_unlikely(NULL == ops)) {                                       \
+            if (mc < UCC_MEMORY_TYPE_LAST) {                                   \
+                ucc_error(                                                     \
+                    "memory type %s not initialized",                          \
+                    ucc_memory_type_names[mc]);                                \
+            } else {                                                           \
+                ucc_error("MC plugin with memory type %d not registered", mc); \
+            }                                                                  \
             return UCC_ERR_NOT_SUPPORTED;                                      \
         }                                                                      \
     } while (0)
 
 ucc_status_t ucc_mc_init(const ucc_mc_params_t *mc_params)
 {
-    int            i, n_mcs;
-    ucc_mc_base_t *mc;
-    ucc_status_t   status;
-    ucc_mc_attr_t  attr;
-    int            is_plugin;
+    int               i, n_mcs;
+    ucc_mc_base_t    *mc;
+    ucc_status_t      status;
+    ucc_mc_attr_t     attr;
+    int               is_plugin;
     ucc_memory_type_t assigned_type;
 
     memset(mc_ops, 0, UCC_MEMORY_TYPE_LAST * sizeof(ucc_mc_ops_t *));
     n_mcs = ucc_global_config.mc_framework.n_components;
     for (i = 0; i < n_mcs; i++) {
-        mc = ucc_derived_of(ucc_global_config.mc_framework.components[i],
-                            ucc_mc_base_t);
+        mc = ucc_derived_of(
+            ucc_global_config.mc_framework.components[i], ucc_mc_base_t);
 
         /* Detect if this is a plugin component (loaded from plugin path) */
         is_plugin = (mc->type == UCC_MEMORY_TYPE_LAST);
@@ -68,39 +69,46 @@ ucc_status_t ucc_mc_init(const ucc_mc_params_t *mc_params)
         if (mc->ref_cnt == 0) {
             mc->config = ucc_malloc(mc->config_table.size);
             if (!mc->config) {
-                ucc_error("failed to allocate %zd bytes for mc config",
-                          mc->config_table.size);
+                ucc_error(
+                    "failed to allocate %zd bytes for mc config",
+                    mc->config_table.size);
                 continue;
             }
             status = ucc_config_parser_fill_opts(
                 mc->config, &mc->config_table, "UCC_", 1);
             if (UCC_OK != status) {
-                ucc_debug("failed to parse config for mc: %s (%d)",
-                          mc->super.name, status);
+                ucc_debug(
+                    "failed to parse config for mc: %s (%d)",
+                    mc->super.name,
+                    status);
                 ucc_free(mc->config);
                 continue;
             }
             status = mc->init(mc_params);
             if (UCC_OK != status) {
-                ucc_debug("mc_init failed for component: %s, skipping (%d)",
-                          mc->super.name, status);
-                ucc_config_parser_release_opts(mc->config,
-                                               mc->config_table.table);
+                ucc_debug(
+                    "mc_init failed for component: %s, skipping (%d)",
+                    mc->super.name,
+                    status);
+                ucc_config_parser_release_opts(
+                    mc->config, mc->config_table.table);
                 ucc_free(mc->config);
                 continue;
             }
             ucc_debug("mc %s initialized", mc->super.name);
         } else {
             attr.field_mask = UCC_MC_ATTR_FIELD_THREAD_MODE;
-            status = mc->get_attr(&attr);
+            status          = mc->get_attr(&attr);
             if (status != UCC_OK) {
                 return status;
             }
             if (attr.thread_mode < mc_params->thread_mode) {
-                ucc_info("mc %s was allready initilized with "
-                         "different thread mode: current tm %d, provided tm %d",
-                         mc->super.name, attr.thread_mode,
-                         mc_params->thread_mode);
+                ucc_info(
+                    "mc %s was allready initilized with "
+                    "different thread mode: current tm %d, provided tm %d",
+                    mc->super.name,
+                    attr.thread_mode,
+                    mc_params->thread_mode);
             }
         }
         mc->ref_cnt++;
@@ -110,18 +118,23 @@ ucc_status_t ucc_mc_init(const ucc_mc_params_t *mc_params)
             /* Register as plugin - assigns unique memory type >= UCC_MEMORY_TYPE_LAST */
             status = ucc_mc_plugin_register_autodiscovered(mc, &assigned_type);
             if (status != UCC_OK) {
-                ucc_error("failed to register autodiscovered plugin %s",
-                          mc->super.name);
+                ucc_error(
+                    "failed to register autodiscovered plugin %s",
+                    mc->super.name);
                 continue;
             }
             mc->type = assigned_type;
-            ucc_info("MC plugin '%s' registered with memory_type=%d",
-                     mc->super.name, assigned_type);
+            ucc_info(
+                "MC plugin '%s' registered with memory_type=%d",
+                mc->super.name,
+                assigned_type);
         } else {
             /* Built-in component - register in fixed ops table */
             if (mc->type >= UCC_MEMORY_TYPE_LAST) {
-                ucc_error("invalid memory type %d for built-in component %s",
-                          mc->type, mc->super.name);
+                ucc_error(
+                    "invalid memory type %d for built-in component %s",
+                    mc->type,
+                    mc->super.name);
                 continue;
             }
             mc_ops[mc->type] = &mc->ops;
@@ -156,10 +169,11 @@ typedef struct {
 static ucc_status_t ucc_mc_mem_query_cb(ucc_mc_plugin_entry_t *plugin, void *ctx)
 {
     ucc_mc_mem_query_ctx_t *query_ctx = (ucc_mc_mem_query_ctx_t *)ctx;
-    ucc_status_t status;
+    ucc_status_t            status;
 
     if (plugin->desc.ops.mem_query) {
-        status = plugin->desc.ops.mem_query(query_ctx->ptr, query_ctx->mem_attr);
+        status = plugin->desc.ops.mem_query(
+            query_ctx->ptr, query_ctx->mem_attr);
         if (UCC_OK == status) {
             query_ctx->result = UCC_OK;
             return UCC_ERR_LAST; /* Stop iteration */
@@ -193,28 +207,28 @@ ucc_status_t ucc_mc_get_mem_attr(const void *ptr, ucc_mem_attr_t *mem_attr)
             }
         }
     }
-    
+
     /* Check plugin memory types */
-    query_ctx.ptr = ptr;
+    query_ctx.ptr      = ptr;
     query_ctx.mem_attr = mem_attr;
-    query_ctx.result = UCC_ERR_NOT_FOUND;
+    query_ctx.result   = UCC_ERR_NOT_FOUND;
     ucc_mc_plugin_iterate(ucc_mc_mem_query_cb, &query_ctx);
     if (query_ctx.result == UCC_OK) {
         return UCC_OK;
     }
-    
+
     return UCC_OK;
 }
 
 /* Helper: Find EC plugin type for a given MC plugin memory type */
-static ucc_status_t ucc_mc_get_plugin_ee_type(ucc_memory_type_t mem_type,
-                                               ucc_ee_type_t *ee_type)
+static ucc_status_t ucc_mc_get_plugin_ee_type(
+    ucc_memory_type_t mem_type, ucc_ee_type_t *ee_type)
 {
     ucc_mc_plugin_entry_t *mc_plugin;
-    const char *mc_name;
-    char ec_name_buf[256];
-    size_t mc_name_len;
-    int i;
+    const char            *mc_name;
+    char                   ec_name_buf[256];
+    size_t                 mc_name_len;
+    int                    i;
 
     mc_plugin = ucc_mc_plugin_get_entry(mem_type);
     if (!mc_plugin) {
@@ -229,8 +243,7 @@ static ucc_status_t ucc_mc_get_plugin_ee_type(ucc_memory_type_t mem_type,
 
     /* Try to construct EC plugin name by replacing " mc" with " ec" */
     mc_name_len = strlen(mc_name);
-    if (mc_name_len >= 4 &&
-        strcmp(mc_name + mc_name_len - 3, " mc") == 0) {
+    if (mc_name_len >= 4 && strcmp(mc_name + mc_name_len - 3, " mc") == 0) {
         /* Found " mc" suffix - replace with " ec" */
         strncpy(ec_name_buf, mc_name, mc_name_len - 3);
         ec_name_buf[mc_name_len - 3] = '\0';
@@ -252,8 +265,8 @@ static ucc_status_t ucc_mc_get_plugin_ee_type(ucc_memory_type_t mem_type,
     return UCC_OK;
 }
 
-ucc_status_t ucc_mc_get_execution_engine_type(ucc_memory_type_t mem_type,
-                                              ucc_ee_type_t *ee_type)
+ucc_status_t ucc_mc_get_execution_engine_type(
+    ucc_memory_type_t mem_type, ucc_ee_type_t *ee_type)
 {
     switch (mem_type) {
     case UCC_MEMORY_TYPE_CUDA:
@@ -275,14 +288,15 @@ ucc_status_t ucc_mc_get_execution_engine_type(ucc_memory_type_t mem_type,
 
 ucc_status_t ucc_mc_get_attr(ucc_mc_attr_t *attr, ucc_memory_type_t mem_type)
 {
-    ucc_memory_type_t mt = (mem_type == UCC_MEMORY_TYPE_CUDA_MANAGED) ?
-                               UCC_MEMORY_TYPE_CUDA : mem_type;
-    const ucc_mc_ops_t *ops;
-    ucc_mc_base_t *mc;
+    ucc_memory_type_t      mt = (mem_type == UCC_MEMORY_TYPE_CUDA_MANAGED)
+                                    ? UCC_MEMORY_TYPE_CUDA
+                                    : mem_type;
+    const ucc_mc_ops_t    *ops;
+    ucc_mc_base_t         *mc;
     ucc_mc_plugin_entry_t *plugin;
 
     UCC_CHECK_MC_AVAILABLE(mt);
-    
+
     if (mt < UCC_MEMORY_TYPE_LAST) {
         mc = ucc_container_of(mc_ops[mt], ucc_mc_base_t, ops);
         return mc->get_attr(attr);
@@ -327,7 +341,7 @@ UCC_MC_PROFILE_FUNC(ucc_status_t, ucc_mc_memcpy,
                     ucc_memory_type_t src_mem)
 
 {
-    ucc_memory_type_t mt;
+    ucc_memory_type_t   mt;
     const ucc_mc_ops_t *ops;
     
     if (src_mem == UCC_MEMORY_TYPE_UNKNOWN ||
