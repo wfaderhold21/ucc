@@ -7,6 +7,7 @@
 #include "ucc_mc_plugin.h"
 #include "utils/ucc_malloc.h"
 #include "utils/ucc_log.h"
+#include <stdlib.h>
 #include <string.h>
 
 /* Plugin registry - only modified during initialization (single-threaded),
@@ -43,7 +44,7 @@ ucc_status_t ucc_mc_plugin_register(const ucc_mc_plugin_desc_t *plugin_desc,
     while (entry) {
         if (strcmp(entry->desc.name, plugin_desc->name) == 0) {
             ucc_warn("MC plugin '%s' already registered", plugin_desc->name);
-            return UCC_ERR_ALREADY_EXISTS;
+            return UCC_ERR_NO_RESOURCE;
         }
         entry = entry->next;
     }
@@ -64,11 +65,10 @@ ucc_status_t ucc_mc_plugin_register(const ucc_mc_plugin_desc_t *plugin_desc,
 
     /* Duplicate strings */
     if (plugin_desc->name) {
-        entry->desc.name = ucc_strdup(plugin_desc->name, "mc_plugin_name");
+        entry->desc.name = strdup(plugin_desc->name);
     }
     if (plugin_desc->version) {
-        entry->desc.version = ucc_strdup(
-            plugin_desc->version, "mc_plugin_version");
+        entry->desc.version = strdup(plugin_desc->version);
     }
 
     entry->memory_type       = mt;
@@ -111,7 +111,7 @@ ucc_status_t ucc_mc_plugin_register_autodiscovered(
     while (entry) {
         if (strcmp(entry->mc->super.name, mc->super.name) == 0) {
             ucc_warn("MC plugin '%s' already registered", mc->super.name);
-            return UCC_ERR_ALREADY_EXISTS;
+            return UCC_ERR_NO_RESOURCE;
         }
         entry = entry->next;
     }
@@ -160,7 +160,7 @@ ucc_status_t ucc_mc_plugin_unregister(ucc_memory_type_t memory_type)
                     "MC plugin memory_type=%d still has %d references",
                     memory_type,
                     entry->ref_cnt);
-                return UCC_ERR_IN_PROGRESS;
+                return UCC_ERR_NO_RESOURCE;
             }
 
             /* Remove from list */
@@ -170,12 +170,12 @@ ucc_status_t ucc_mc_plugin_unregister(ucc_memory_type_t memory_type)
                 mc_plugin_list = entry->next;
             }
 
-            /* Free strings */
+            /* Free strings (allocated with strdup) */
             if (entry->desc.name) {
-                ucc_free((void *)entry->desc.name);
+                free((void *)entry->desc.name);
             }
             if (entry->desc.version) {
-                ucc_free((void *)entry->desc.version);
+                free((void *)entry->desc.version);
             }
 
             ucc_free(entry);

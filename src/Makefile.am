@@ -136,8 +136,10 @@ libucc_la_SOURCES =                   \
 	components/cl/ucc_cl.c            \
 	components/tl/ucc_tl.c            \
 	components/mc/ucc_mc.c            \
+	components/mc/ucc_mc_plugin.c     \
 	components/mc/base/ucc_mc_base.c  \
 	components/ec/ucc_ec.c            \
+	components/ec/ucc_ec_plugin.c     \
 	components/ec/base/ucc_ec_base.c  \
 	components/topo/ucc_topo.c        \
 	components/topo/ucc_sbgp.c

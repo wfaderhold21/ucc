@@ -10,7 +10,15 @@
 #include "ucc/api/ucc.h"
 #include "base/ucc_ec_base.h"
 
-/* Note: ucc_ec_plugin_desc_t is defined in ucc/api/ucc.h for public API */
+/**
+ * EC Plugin descriptor for programmatic registration
+ */
+typedef struct ucc_ec_plugin_desc {
+    const char           *name;         /**< Plugin name */
+    const char           *version;      /**< Plugin version string */
+    ucc_ec_ops_t          ops;          /**< Execution context operations */
+    ucc_ee_executor_ops_t executor_ops; /**< Executor operations */
+} ucc_ec_plugin_desc_t;
 
 /**
  * Internal plugin registry entry

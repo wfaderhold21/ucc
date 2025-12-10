@@ -43,9 +43,9 @@ static inline const ucc_ee_executor_ops_t *ucc_ec_get_executor_ops(
 
 #define UCC_CHECK_EC_AVAILABLE(ee)                                             \
     do {                                                                       \
-        const ucc_ec_ops_t *ops = ucc_ec_get_ops(ee);                          \
-        if (NULL == ops) {                                                     \
-            if (ee < UCC_EE_LAST) {                                            \
+        const ucc_ec_ops_t *_ops = ucc_ec_get_ops(ee);                         \
+        if (NULL == _ops) {                                                    \
+            if ((ee) < UCC_EE_LAST) {                                          \
                 ucc_error("execution engine type %d not initialized", ee);     \
             } else {                                                           \
                 ucc_error("EC plugin with ee_type %d not registered", ee);     \

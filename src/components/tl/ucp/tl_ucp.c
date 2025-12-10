@@ -371,7 +371,7 @@ ucc_status_t ucc_tl_ucp_team_get_scores(ucc_base_team_t   *tl_team,
 
 UCC_TL_IFACE_DECLARE(ucp, UCP);
 
-ucs_memory_type_t ucc_memtype_to_ucs[UCC_MEMORY_TYPE_LAST + 1] = {
+static ucs_memory_type_t ucc_memtype_to_ucs_map[UCC_MEMORY_TYPE_LAST + 1] = {
     [UCC_MEMORY_TYPE_HOST]         = UCS_MEMORY_TYPE_HOST,
     [UCC_MEMORY_TYPE_CUDA]         = UCS_MEMORY_TYPE_CUDA,
     [UCC_MEMORY_TYPE_CUDA_MANAGED] = UCS_MEMORY_TYPE_CUDA_MANAGED,
@@ -385,7 +385,7 @@ ucs_memory_type_t ucc_memtype_to_ucs(ucc_memory_type_t mem_type)
     if (mem_type >= UCC_MEMORY_TYPE_LAST) {
         return UCS_MEMORY_TYPE_UNKNOWN;
     }
-    return ucc_memtype_to_ucs[mem_type];
+    return ucc_memtype_to_ucs_map[mem_type];
 }
 
 UCC_TL_UCP_PROFILE_FUNC_VOID(ucc_tl_ucp_pre_register_mem, (team, addr, length,

@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "components/mc/base/ucc_mc_base.h"
+#include "components/ec/ucc_ec_plugin.h"
 #include "ucc_mc.h"
 #include "ucc_mc_plugin.h"
 #include "utils/ucc_malloc.h"
@@ -35,9 +36,9 @@ static inline const ucc_mc_ops_t *ucc_mc_get_ops(ucc_memory_type_t mem_type)
 
 #define UCC_CHECK_MC_AVAILABLE(mc)                                             \
     do {                                                                       \
-        const ucc_mc_ops_t *ops = ucc_mc_get_ops(mc);                          \
-        if (ucc_unlikely(NULL == ops)) {                                       \
-            if (mc < UCC_MEMORY_TYPE_LAST) {                                   \
+        const ucc_mc_ops_t *_ops = ucc_mc_get_ops(mc);                         \
+        if (ucc_unlikely(NULL == _ops)) {                                      \
+            if ((mc) < UCC_MEMORY_TYPE_LAST) {                                 \
                 ucc_error(                                                     \
                     "memory type %s not initialized",                          \
                     ucc_memory_type_names[mc]);                                \
@@ -169,11 +170,12 @@ typedef struct {
 static ucc_status_t ucc_mc_mem_query_cb(ucc_mc_plugin_entry_t *plugin, void *ctx)
 {
     ucc_mc_mem_query_ctx_t *query_ctx = (ucc_mc_mem_query_ctx_t *)ctx;
+    const ucc_mc_ops_t     *plugin_ops;
     ucc_status_t            status;
 
-    if (plugin->desc.ops.mem_query) {
-        status = plugin->desc.ops.mem_query(
-            query_ctx->ptr, query_ctx->mem_attr);
+    plugin_ops = ucc_mc_plugin_get_ops(plugin);
+    if (plugin_ops && plugin_ops->mem_query) {
+        status = plugin_ops->mem_query(query_ctx->ptr, query_ctx->mem_attr);
         if (UCC_OK == status) {
             query_ctx->result = UCC_OK;
             return UCC_ERR_LAST; /* Stop iteration */
@@ -291,7 +293,6 @@ ucc_status_t ucc_mc_get_attr(ucc_mc_attr_t *attr, ucc_memory_type_t mem_type)
     ucc_memory_type_t      mt = (mem_type == UCC_MEMORY_TYPE_CUDA_MANAGED)
                                     ? UCC_MEMORY_TYPE_CUDA
                                     : mem_type;
-    const ucc_mc_ops_t    *ops;
     ucc_mc_base_t         *mc;
     ucc_mc_plugin_entry_t *plugin;
 
@@ -301,10 +302,14 @@ ucc_status_t ucc_mc_get_attr(ucc_mc_attr_t *attr, ucc_memory_type_t mem_type)
         mc = ucc_container_of(mc_ops[mt], ucc_mc_base_t, ops);
         return mc->get_attr(attr);
     } else {
-        /* Plugin */
+        /* Plugin - for autodiscovered plugins, use the mc->get_attr */
         plugin = ucc_mc_plugin_get_entry(mt);
-        if (plugin && plugin->desc.get_attr) {
-            return plugin->desc.get_attr(attr);
+        if (plugin) {
+            if (plugin->is_autodiscovered && plugin->mc->get_attr) {
+                return plugin->mc->get_attr(attr);
+            } else if (!plugin->is_autodiscovered && plugin->desc.get_attr) {
+                return plugin->desc.get_attr(attr);
+            }
         }
         return UCC_ERR_NOT_SUPPORTED;
     }

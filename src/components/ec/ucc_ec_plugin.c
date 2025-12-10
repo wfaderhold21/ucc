@@ -8,6 +8,7 @@
 #include "utils/ucc_malloc.h"
 #include "utils/ucc_log.h"
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Plugin registry */
@@ -49,7 +50,7 @@ ucc_status_t ucc_ec_plugin_register(const ucc_ec_plugin_desc_t *plugin_desc,
         if (strcmp(entry->desc.name, plugin_desc->name) == 0) {
             ucc_warn("EC plugin '%s' already registered", plugin_desc->name);
             pthread_mutex_unlock(&ec_plugin_mutex);
-            return UCC_ERR_ALREADY_EXISTS;
+            return UCC_ERR_NO_RESOURCE;
         }
         entry = entry->next;
     }
@@ -71,11 +72,10 @@ ucc_status_t ucc_ec_plugin_register(const ucc_ec_plugin_desc_t *plugin_desc,
 
     /* Duplicate strings */
     if (plugin_desc->name) {
-        entry->desc.name = ucc_strdup(plugin_desc->name, "ec_plugin_name");
+        entry->desc.name = strdup(plugin_desc->name);
     }
     if (plugin_desc->version) {
-        entry->desc.version = ucc_strdup(
-            plugin_desc->version, "ec_plugin_version");
+        entry->desc.version = strdup(plugin_desc->version);
     }
 
     entry->ee_type = et;
@@ -118,7 +118,7 @@ ucc_status_t ucc_ec_plugin_unregister(ucc_ee_type_t ee_type)
                     ee_type,
                     entry->ref_cnt);
                 pthread_mutex_unlock(&ec_plugin_mutex);
-                return UCC_ERR_IN_PROGRESS;
+                return UCC_ERR_NO_RESOURCE;
             }
 
             /* Remove from list */
@@ -128,12 +128,12 @@ ucc_status_t ucc_ec_plugin_unregister(ucc_ee_type_t ee_type)
                 ec_plugin_list = entry->next;
             }
 
-            /* Free strings */
+            /* Free strings (allocated with strdup) */
             if (entry->desc.name) {
-                ucc_free((void *)entry->desc.name);
+                free((void *)entry->desc.name);
             }
             if (entry->desc.version) {
-                ucc_free((void *)entry->desc.version);
+                free((void *)entry->desc.version);
             }
 
             ucc_free(entry);

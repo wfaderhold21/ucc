@@ -9,7 +9,15 @@
 
 #include "base/ucc_mc_base.h"
 
-/* Note: ucc_mc_plugin_desc_t is defined in ucc/api/ucc.h for public API */
+/**
+ * MC Plugin descriptor for programmatic registration
+ */
+typedef struct ucc_mc_plugin_desc {
+    const char   *name;    /**< Plugin name */
+    const char   *version; /**< Plugin version string */
+    ucc_mc_ops_t  ops;     /**< Memory operations */
+    ucc_status_t (*get_attr)(ucc_mc_attr_t *attr); /**< Get attributes callback */
+} ucc_mc_plugin_desc_t;
 
 /**
  * Internal plugin registry entry

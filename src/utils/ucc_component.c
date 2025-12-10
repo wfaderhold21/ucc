@@ -178,6 +178,7 @@ ucc_status_t ucc_components_load(const char *framework_name,
     ucc_component_iface_t **ifaces = NULL;
     int                     load_plugins = 0;
     ucc_status_t            status;
+    int                     i;
 
     framework->n_components = 0;
     framework->components   = NULL;
