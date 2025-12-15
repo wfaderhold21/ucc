@@ -25,11 +25,12 @@ allgatherv =                        \
 	allgatherv/allgatherv_ring.c    \
 	allgatherv/allgatherv_knomial.c
 
-alltoall =                       \
-	alltoall/alltoall.h          \
-	alltoall/alltoall.c          \
-	alltoall/alltoall_onesided.c \
-	alltoall/alltoall_pairwise.c \
+alltoall =                          \
+	alltoall/alltoall.h             \
+	alltoall/alltoall.c             \
+	alltoall/alltoall_onesided.c    \
+	alltoall/alltoall_onesided_ca.c \
+	alltoall/alltoall_pairwise.c    \
 	alltoall/alltoall_bruck.c
 
 alltoallv =                        \

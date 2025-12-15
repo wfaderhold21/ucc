@@ -9,6 +9,7 @@
 #include "alltoall.h"
 #include "core/ucc_progress_queue.h"
 #include "utils/ucc_math.h"
+#include "utils/ucc_malloc.h"
 #include "tl_ucp_sendrecv.h"
 #include "tl_ucp_congestion.h"
 
@@ -74,39 +75,56 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
     }
 
     if (use_rtt_threshold_mode) {
-        /* Threshold mode: Skip high-RTT peers and retry them later */
+        /* Threshold mode: Skip high-RTT peers and retry them later.
+         * Only one PUT in flight at a time to accurately measure RTT. */
         uint32_t peers_completed = 0;
-        uint32_t max_passes = gsize * (ctx->cfg.max_peer_skip_attempts + 1);
+        uint32_t max_passes = ctx->cfg.max_peer_skip_attempts + 1;
         uint32_t pass       = 0;
+        uint8_t *peer_done  = NULL;
+        
+        /* Allocate bitmap to track completed peers */
+        peer_done = ucc_calloc(gsize, sizeof(uint8_t), "peer_done");
+        if (!peer_done) {
+            task->super.status = UCC_ERR_NO_MEMORY;
+            goto out;
+        }
 
         while (peers_completed < gsize && pass < max_passes) {
             for (peer = 0; peer < gsize; peer++) {
                 ucc_rank_t dest_peer = (start + peer) % gsize;
                 double     start_time, end_time;
+                uint32_t   put_before;
 
                 /* Skip if already completed */
-                if (task->onesided.put_completed > peers_completed &&
-                    dest_peer < peers_completed) {
+                if (peer_done[dest_peer]) {
                     continue;
                 }
 
-                /* Check if we should skip this peer */
+                /* Check if we should skip this peer based on RTT */
                 if (ucc_tl_ucp_should_skip_peer(task, dest_peer, ctx)) {
                     continue;
                 }
 
-                /* Measure RTT for this PUT operation */
+                /* Ensure only one PUT in flight at a time */
+                while (task->onesided.put_posted > task->onesided.put_completed) {
+                    ucp_worker_progress(team->worker->ucp_worker);
+                }
+
+                /* Record state before posting */
+                put_before = task->onesided.put_posted;
                 start_time = ucc_get_time();
 
                 UCPCHECK_GOTO(
                     ucc_tl_ucp_put_nb((void *)(src + dest_peer * nelems),
                                       (void *)dest, nelems, dest_peer, src_memh,
                                       dst_memh, team, task),
-                    task, out);
+                    task, out_free);
 
-                /* Wait for completion to measure RTT */
-                while (task->onesided.put_completed <
-                       task->onesided.put_posted) {
+                /* Flush the endpoint to ensure data is sent */
+                UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(dest_peer, team), task, out_free);
+
+                /* Wait for this specific PUT to complete */
+                while (task->onesided.put_completed <= put_before) {
                     ucp_worker_progress(team->worker->ucp_worker);
                 }
 
@@ -116,21 +134,39 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
 
                 UCPCHECK_GOTO(
                     ucc_tl_ucp_atomic_inc(pSync, dest_peer, dst_memh, team),
-                    task, out);
+                    task, out_free);
 
+                /* Mark this peer as done */
+                peer_done[dest_peer] = 1;
                 peers_completed++;
 
-                if (peers_completed >= gsize) {
-                    break;
-                }
+                tl_trace(UCC_TL_TEAM_LIB(team),
+                         "Peer %u completed: RTT=%.2f us, %u/%u done",
+                         dest_peer, task->onesided.peer_rtt[dest_peer],
+                         peers_completed, gsize);
             }
             pass++;
+            
+            if (peers_completed < gsize) {
+                tl_debug(UCC_TL_TEAM_LIB(team),
+                         "Pass %u complete: %u/%u peers done, retrying skipped",
+                         pass, peers_completed, gsize);
+            }
         }
+        
         if (peers_completed < gsize) {
             tl_warn(UCC_TL_TEAM_LIB(team),
                     "Not all peers completed after %u passes (%u/%u)", pass,
                     peers_completed, gsize);
         }
+        
+        ucc_free(peer_done);
+        goto done;
+        
+out_free:
+        ucc_free(peer_done);
+        goto out;
+        
     } else {
         /* Window-based or no congestion control */
         peer = start;
@@ -172,6 +208,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_start(ucc_coll_task_t *ctask)
         }
     }
 
+done:
     return ucc_progress_queue_enqueue(UCC_TL_CORE_CTX(team)->pq, &task->super);
 out:
     return task->super.status;

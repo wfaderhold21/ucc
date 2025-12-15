@@ -41,6 +41,9 @@ ucc_status_t ucc_tl_ucp_memh_pack(const ucc_base_context_t *context, ucc_mem_map
 ucc_status_t ucc_tl_ucp_mem_unmap(const ucc_base_context_t *context, ucc_mem_map_mode_t mode,
                                   ucc_mem_map_tl_t *memh);
 
+/* Forward declarations for enum names used in config tables */
+extern const char* ucc_tl_ucp_alltoall_onesided_alg_names[];
+
 ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
     {"", "", NULL, ucc_offsetof(ucc_tl_ucp_lib_config_t, super),
      UCC_CONFIG_TYPE_TABLE(ucc_tl_lib_config_table)},
@@ -56,6 +59,18 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
      "pairwise algorithm",
      ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_pairwise_num_posts),
      UCC_CONFIG_TYPE_ULUNITS},
+
+    {"ALLTOALL_ONESIDED_ALG", "auto",
+     "One-sided alltoall algorithm variant: auto, put, or get. "
+     "auto selects based on node size (GET for large nodes, PUT otherwise)",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_alg),
+     UCC_CONFIG_TYPE_ENUM(ucc_tl_ucp_alltoall_onesided_alg_names)},
+
+    {"ALLTOALL_ONESIDED_PERCENT_BW", "100",
+     "Percentage of bandwidth to use for one-sided alltoall operations (1-100). "
+     "Controls the number of concurrent tokens for flow control.",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_percent_bw),
+     UCC_CONFIG_TYPE_MEMUNITS},
 
     {"ALLTOALLV_PAIRWISE_NUM_POSTS", "auto",
      "Maximum number of outstanding send and receive messages in alltoallv "
@@ -232,6 +247,13 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
      UCC_CONFIG_TYPE_BOOL},
 
     {NULL}};
+
+const char* ucc_tl_ucp_alltoall_onesided_alg_names[] = {
+    [UCC_TL_UCP_ALLTOALL_ONESIDED_AUTO] = "auto",
+    [UCC_TL_UCP_ALLTOALL_ONESIDED_PUT]  = "put",
+    [UCC_TL_UCP_ALLTOALL_ONESIDED_GET]  = "get",
+    NULL
+};
 
 const char* ucc_tl_ucp_local_copy_names[] = {
     [UCC_TL_UCP_LOCAL_COPY_TYPE_UCP]  = "ucp",

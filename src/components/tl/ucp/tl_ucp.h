@@ -42,6 +42,12 @@ typedef struct ucc_tl_ucp_iface {
 /* Extern iface should follow the pattern: ucc_tl_<tl_name> */
 extern ucc_tl_ucp_iface_t ucc_tl_ucp;
 
+typedef enum ucc_tl_ucp_alltoall_onesided_alg {
+    UCC_TL_UCP_ALLTOALL_ONESIDED_AUTO = 0,
+    UCC_TL_UCP_ALLTOALL_ONESIDED_PUT  = 1,
+    UCC_TL_UCP_ALLTOALL_ONESIDED_GET  = 2,
+} ucc_tl_ucp_alltoall_onesided_alg_t;
+
 typedef struct ucc_tl_ucp_lib_config {
     ucc_tl_lib_config_t      super;
     uint32_t                 kn_radix;
@@ -66,6 +72,8 @@ typedef struct ucc_tl_ucp_lib_config {
     ucc_on_off_auto_value_t  scatter_kn_enable_recv_zcopy;
     uint32_t                 scatterv_linear_num_posts;
     unsigned long            alltoall_pairwise_num_posts;
+    ucc_tl_ucp_alltoall_onesided_alg_t alltoall_onesided_alg;
+    size_t                   alltoall_onesided_percent_bw;
     unsigned long            alltoallv_pairwise_num_posts;
     unsigned long            allgather_batched_num_posts;
     ucc_pipeline_params_t    allreduce_sra_kn_pipeline;
