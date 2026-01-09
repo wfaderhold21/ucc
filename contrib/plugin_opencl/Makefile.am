@@ -12,4 +12,5 @@
 EXTRA_DIST = \
     Makefile \
     mc_opencl.c \
-    ec_opencl.c
+    ec_opencl.c \
+    test_opencl_plugin.c
