@@ -64,8 +64,10 @@ ucc_status_t ucc_mc_init(const ucc_mc_params_t *mc_params)
         mc = ucc_derived_of(
             ucc_global_config.mc_framework.components[i], ucc_mc_base_t);
 
-        /* Detect if this is a plugin component (loaded from plugin path) */
-        is_plugin = (mc->type == UCC_MEMORY_TYPE_LAST);
+        /* Detect if this is a plugin component (loaded from plugin path).
+         * Plugins have type >= UCC_MEMORY_TYPE_LAST (either the sentinel value
+         * UCC_MEMORY_TYPE_LAST before registration, or an assigned value > LAST). */
+        is_plugin = (mc->type >= UCC_MEMORY_TYPE_LAST);
 
         if (mc->ref_cnt == 0) {
             mc->config = ucc_malloc(mc->config_table.size);
@@ -97,6 +99,25 @@ ucc_status_t ucc_mc_init(const ucc_mc_params_t *mc_params)
                 continue;
             }
             ucc_debug("mc %s initialized", mc->super.name);
+
+            /* Register plugin components (only on first init to avoid duplicates) */
+            if (is_plugin) {
+                status = ucc_mc_plugin_register_autodiscovered(mc, &assigned_type);
+                if (status != UCC_OK) {
+                    ucc_error(
+                        "failed to register autodiscovered plugin %s",
+                        mc->super.name);
+                    ucc_config_parser_release_opts(
+                        mc->config, mc->config_table.table);
+                    ucc_free(mc->config);
+                    continue;
+                }
+                mc->type = assigned_type;
+                ucc_info(
+                    "MC plugin '%s' registered with memory_type=%d",
+                    mc->super.name,
+                    assigned_type);
+            }
         } else {
             attr.field_mask = UCC_MC_ATTR_FIELD_THREAD_MODE;
             status          = mc->get_attr(&attr);
@@ -114,30 +135,9 @@ ucc_status_t ucc_mc_init(const ucc_mc_params_t *mc_params)
         }
         mc->ref_cnt++;
 
-        /* Register component in appropriate table */
-        if (is_plugin) {
-            /* Register as plugin - assigns unique memory type >= UCC_MEMORY_TYPE_LAST */
-            status = ucc_mc_plugin_register_autodiscovered(mc, &assigned_type);
-            if (status != UCC_OK) {
-                ucc_error(
-                    "failed to register autodiscovered plugin %s",
-                    mc->super.name);
-                continue;
-            }
-            mc->type = assigned_type;
-            ucc_info(
-                "MC plugin '%s' registered with memory_type=%d",
-                mc->super.name,
-                assigned_type);
-        } else {
-            /* Built-in component - register in fixed ops table */
-            if (mc->type >= UCC_MEMORY_TYPE_LAST) {
-                ucc_error(
-                    "invalid memory type %d for built-in component %s",
-                    mc->type,
-                    mc->super.name);
-                continue;
-            }
+        /* Register built-in components in ops table (safe to do every time,
+         * needed because memset clears mc_ops on each ucc_mc_init call) */
+        if (!is_plugin) {
             mc_ops[mc->type] = &mc->ops;
         }
     }
