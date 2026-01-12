@@ -148,6 +148,18 @@ typedef struct ucc_tl_cuda_mem_info {
     cudaIpcMemHandle_t handle;
 } ucc_tl_cuda_mem_info_t;
 
+/**
+ * TL-specific data for CUDA memory mapping (used by mem_map API)
+ *
+ * This structure holds the CUDA IPC memory handle and related information
+ * for memory regions that are mapped/exported for remote access via ucc_mem_map().
+ */
+typedef struct ucc_tl_cuda_memh_data {
+    cudaIpcMemHandle_t ipc_handle;    /**< CUDA IPC memory handle */
+    void              *base_address;  /**< Base address of the mapped memory */
+    size_t             length;        /**< Length of the mapped memory region */
+} ucc_tl_cuda_memh_data_t;
+
 typedef struct ucc_tl_cuda_rank_id {
     ucc_tl_cuda_device_pci_id_t pci_id;
     ucc_tl_cuda_mem_info_t      scratch_info;

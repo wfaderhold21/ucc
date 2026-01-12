@@ -112,18 +112,6 @@ free_mpool:
 }
 
 /**
- * TL-specific data for CUDA memory mapping
- *
- * This structure holds the CUDA IPC memory handle and related information
- * for memory regions that are mapped/exported for remote access.
- */
-typedef struct ucc_tl_cuda_memh_data {
-    cudaIpcMemHandle_t ipc_handle;    /* CUDA IPC memory handle */
-    void              *base_address;  /* Base address of the mapped memory */
-    size_t             length;        /* Length of the mapped memory region */
-} ucc_tl_cuda_memh_data_t;
-
-/**
  * @brief Map a memory region for CUDA IPC access
  *
  * This function maps a memory region for inter-process communication using

@@ -9,6 +9,7 @@
 
 #include "tl_cuda.h"
 #include "components/mc/ucc_mc.h"
+#include "core/ucc_context.h"
 
 #define UCC_TL_CUDA_N_DEFAULT_ALG_SELECT_STR 6
 extern const char
@@ -213,6 +214,21 @@ static inline void ucc_tl_cuda_put_sync(ucc_tl_cuda_task_t *task)
 
 ucc_status_t ucc_tl_cuda_mem_info_get(void *ptr, size_t length,
                                       ucc_tl_cuda_mem_info_t *mi);
+
+/**
+ * @brief Extract CUDA IPC memory info from a pre-registered mem_map handle
+ *
+ * This function extracts the CUDA IPC handle from a memory region that was
+ * previously registered via ucc_mem_map(). This allows collectives to skip
+ * the expensive cudaIpcGetMemHandle() call on the critical path.
+ *
+ * @param [in]  memh    Pre-registered memory map handle (from ucc_mem_map)
+ * @param [out] mi      Output memory info structure with IPC handle
+ *
+ * @return UCC_OK if CUDA TL handle found and extracted, error otherwise
+ */
+ucc_status_t ucc_tl_cuda_mem_info_from_memh(ucc_mem_map_mem_h memh,
+                                            ucc_tl_cuda_mem_info_t *mi);
 
 ucc_status_t ucc_tl_cuda_coll_init(ucc_base_coll_args_t *coll_args,
                                     ucc_base_team_t *team,

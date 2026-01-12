@@ -700,6 +700,8 @@ ucc_status_t ucc_tl_cuda_alltoallv_ce_init(ucc_tl_cuda_task_t *task)
     ucc_coll_args_t    *args = &TASK_ARGS(task);
     ucc_status_t        status;
     size_t              data_len;
+    int                 use_memh_src = 0;
+    int                 use_memh_dst = 0;
 
     if (!UCC_COLL_ARGS_CONTIG_BUFFER(args)) {
         tl_debug(UCC_TL_TEAM_LIB(team), "Do not support non-contiguous buffer");
@@ -718,25 +720,56 @@ ucc_status_t ucc_tl_cuda_alltoallv_ce_init(ucc_tl_cuda_task_t *task)
     task->alltoallv_ce.rdispl     = args->dst.info_v.displacements;
     task->alltoallv_ce.stage      = ALLTOALL_CE_STAGE_SYNC;
 
-    data_len = ucc_dt_size(args->src.info_v.datatype) *
-               ucc_coll_args_get_total_count(args, args->src.info_v.counts,
-                                             UCC_TL_TEAM_SIZE(team));
-    status = ucc_tl_cuda_mem_info_get(args->src.info_v.buffer, data_len,
-                                      &task->alltoallv_ce.mem_info_src);
-    if (ucc_unlikely(status != UCC_OK)) {
-        return status;
+    /* Check if pre-registered mem_map handles are available for source buffer */
+    if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH) &&
+        args->src_memh.local_memh != NULL) {
+        status = ucc_tl_cuda_mem_info_from_memh(args->src_memh.local_memh,
+                                                &task->alltoallv_ce.mem_info_src);
+        if (status == UCC_OK) {
+            use_memh_src = 1;
+            tl_trace(UCC_TL_TEAM_LIB(team),
+                     "using pre-registered mem_map handle for src buffer");
+        }
+        /* If mem_map doesn't have CUDA handle, fall through to regular path */
+    }
+
+    if (!use_memh_src) {
+        /* Fallback: get IPC handle inline (original path) */
+        data_len = ucc_dt_size(args->src.info_v.datatype) *
+                   ucc_coll_args_get_total_count(args, args->src.info_v.counts,
+                                                 UCC_TL_TEAM_SIZE(team));
+        status = ucc_tl_cuda_mem_info_get(args->src.info_v.buffer, data_len,
+                                          &task->alltoallv_ce.mem_info_src);
+        if (ucc_unlikely(status != UCC_OK)) {
+            return status;
+        }
     }
 
     if (team->topo->proxy_needed) {
-        data_len = ucc_dt_size(args->dst.info_v.datatype) *
-                   ucc_coll_args_get_total_count(
-                       args, args->dst.info_v.counts, UCC_TL_TEAM_SIZE(team));
-        status = ucc_tl_cuda_mem_info_get(
-            args->dst.info_v.buffer,
-            data_len,
-            &task->alltoallv_ce.mem_info_dst);
-        if (ucc_unlikely(status != UCC_OK)) {
-            return status;
+        /* Check if pre-registered mem_map handles are available for dest buffer */
+        if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH) &&
+            args->dst_memh.local_memh != NULL) {
+            status = ucc_tl_cuda_mem_info_from_memh(args->dst_memh.local_memh,
+                                                    &task->alltoallv_ce.mem_info_dst);
+            if (status == UCC_OK) {
+                use_memh_dst = 1;
+                tl_trace(UCC_TL_TEAM_LIB(team),
+                         "using pre-registered mem_map handle for dst buffer");
+            }
+        }
+
+        if (!use_memh_dst) {
+            /* Fallback: get IPC handle inline (original path) */
+            data_len = ucc_dt_size(args->dst.info_v.datatype) *
+                       ucc_coll_args_get_total_count(
+                           args, args->dst.info_v.counts, UCC_TL_TEAM_SIZE(team));
+            status = ucc_tl_cuda_mem_info_get(
+                args->dst.info_v.buffer,
+                data_len,
+                &task->alltoallv_ce.mem_info_dst);
+            if (ucc_unlikely(status != UCC_OK)) {
+                return status;
+            }
         }
     }
 
