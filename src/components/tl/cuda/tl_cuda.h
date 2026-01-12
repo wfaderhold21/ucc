@@ -12,6 +12,7 @@
 #include "components/tl/ucc_tl_log.h"
 #include "components/mc/ucc_mc.h"
 #include "components/cl/ucc_cl_type.h" // for UCC_CL_HIER
+#include "core/ucc_context.h"
 #include "utils/ucc_mpool.h"
 #include "utils/ucc_datastruct.h"
 #include "tl_cuda_ep_hash.h"
@@ -248,6 +249,10 @@ struct ucc_tl_cuda_task {
                                       ucc_ee_executor_t       *executor,
                                       ucc_ee_executor_task_t **task,
                                       cudaStream_t             stream);
+            /* Global mem_map handles (pre-exchanged from all ranks) */
+            ucc_mem_map_mem_h     *global_memh_src;
+            ucc_mem_map_mem_h     *global_memh_dst;
+            int                    use_global_memh;
         } alltoallv_ce;
         struct {
             int                     stage;

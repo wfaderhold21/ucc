@@ -106,6 +106,45 @@ ucc_status_t ucc_tl_cuda_mem_info_from_memh(ucc_mem_map_mem_h memh,
     return UCC_ERR_NOT_FOUND;
 }
 
+ucc_status_t ucc_tl_cuda_mem_info_from_global_memh(ucc_mem_map_mem_h *global_memh,
+                                                   ucc_rank_t peer_rank,
+                                                   ucc_tl_cuda_mem_info_t *mi)
+{
+    ucc_mem_map_memh_t      *map_memh;
+    ucc_tl_cuda_memh_data_t *cuda_data;
+    int                      i;
+
+    if (!global_memh || !mi) {
+        return UCC_ERR_INVALID_PARAM;
+    }
+
+    map_memh = (ucc_mem_map_memh_t *)global_memh[peer_rank];
+    if (!map_memh || !map_memh->tl_h) {
+        return UCC_ERR_NOT_FOUND;
+    }
+
+    /* Search for CUDA TL handle in this peer's memh */
+    for (i = 0; i < map_memh->num_tls; i++) {
+        if (strncmp(map_memh->tl_h[i].tl_name, "cuda",
+                    UCC_MEM_MAP_TL_NAME_LEN) == 0 &&
+            map_memh->tl_h[i].tl_data != NULL) {
+            cuda_data = (ucc_tl_cuda_memh_data_t *)map_memh->tl_h[i].tl_data;
+
+            /* Copy the IPC handle and metadata */
+            mi->ptr    = cuda_data->base_address;
+            mi->length = cuda_data->length;
+            mi->offset = 0;
+            memcpy(&mi->handle, &cuda_data->ipc_handle,
+                   sizeof(cudaIpcMemHandle_t));
+
+            return UCC_OK;
+        }
+    }
+
+    /* No CUDA TL handle found for this peer */
+    return UCC_ERR_NOT_FOUND;
+}
+
 ucc_status_t ucc_tl_cuda_coll_init(ucc_base_coll_args_t *coll_args,
                                    ucc_base_team_t      *team,
                                    ucc_coll_task_t     **task_h)

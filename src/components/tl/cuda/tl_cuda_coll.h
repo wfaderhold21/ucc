@@ -230,6 +230,24 @@ ucc_status_t ucc_tl_cuda_mem_info_get(void *ptr, size_t length,
 ucc_status_t ucc_tl_cuda_mem_info_from_memh(ucc_mem_map_mem_h memh,
                                             ucc_tl_cuda_mem_info_t *mi);
 
+/**
+ * @brief Extract CUDA IPC memory info from a peer's global_memh handle
+ *
+ * This function extracts the CUDA IPC handle from a peer rank's memory handle
+ * in the global_memh array. This is used when all ranks have exchanged their
+ * mem_map handles upfront (global mode), allowing collectives to skip the
+ * shared memory exchange phase.
+ *
+ * @param [in]  global_memh  Array of memory handles from all ranks
+ * @param [in]  peer_rank    Rank index to get handle for
+ * @param [out] mi           Output memory info structure
+ *
+ * @return UCC_OK if handle found, UCC_ERR_NOT_FOUND if no CUDA handle for peer
+ */
+ucc_status_t ucc_tl_cuda_mem_info_from_global_memh(ucc_mem_map_mem_h *global_memh,
+                                                   ucc_rank_t peer_rank,
+                                                   ucc_tl_cuda_mem_info_t *mi);
+
 ucc_status_t ucc_tl_cuda_coll_init(ucc_base_coll_args_t *coll_args,
                                     ucc_base_team_t *team,
                                     ucc_coll_task_t **task_h);

@@ -192,10 +192,59 @@ ucc_status_t ucc_tl_cuda_mem_map(const ucc_base_context_t *context,
         tl_debug(ctx->super.super.lib,
                  "exported CUDA IPC handle for address %p, length %zu",
                  memh->address, memh->len);
-    } else if (mode == UCC_MEM_MAP_MODE_IMPORT) {
-        /* Import mode: nothing to do here, actual IPC open happens during collective */
-        m_data->base_address = memh->address;
-        m_data->length       = memh->len;
+    } else if (mode == UCC_MEM_MAP_MODE_IMPORT ||
+               mode == UCC_MEM_MAP_MODE_IMPORT_OFFLOAD) {
+        /* Import mode: unpack the IPC handle from the pack_buffer */
+        if (memh->num_tls > 0) {
+            size_t offset = 0;
+            int    found  = 0;
+            int    i;
+
+            /* Search through pack_buffer for our TL's data */
+            for (i = 0; i < memh->num_tls && !found; i++) {
+                char   *tl_name     = PTR_OFFSET(memh->pack_buffer, offset);
+                size_t *packed_size = PTR_OFFSET(memh->pack_buffer,
+                                                 offset + UCC_MEM_MAP_TL_NAME_LEN);
+                void   *packed_data = PTR_OFFSET(memh->pack_buffer,
+                                                 offset + UCC_MEM_MAP_TL_NAME_LEN +
+                                                 sizeof(size_t));
+
+                if (strncmp(tl_name, "cuda", UCC_MEM_MAP_TL_NAME_LEN) == 0 &&
+                    *packed_size > 0) {
+                    /* Found our data - unpack it */
+                    /* Format: [ipc_handle(64)] [base_address(8)] [length(8)] */
+                    memcpy(&m_data->ipc_handle, packed_data,
+                           sizeof(cudaIpcMemHandle_t));
+                    memcpy(&m_data->base_address,
+                           PTR_OFFSET(packed_data, sizeof(cudaIpcMemHandle_t)),
+                           sizeof(void *));
+                    memcpy(&m_data->length,
+                           PTR_OFFSET(packed_data, sizeof(cudaIpcMemHandle_t) +
+                                      sizeof(void *)),
+                           sizeof(size_t));
+                    found = 1;
+                    tl_debug(ctx->super.super.lib,
+                             "imported CUDA IPC handle for address %p, length %zu",
+                             m_data->base_address, m_data->length);
+                }
+                offset += UCC_MEM_MAP_TL_NAME_LEN + sizeof(size_t) + *packed_size;
+            }
+
+            if (!found) {
+                tl_debug(ctx->super.super.lib,
+                         "no CUDA TL data found in pack_buffer");
+                ucc_free(m_data);
+                tl_h->tl_data = NULL;
+                return UCC_OK;
+            }
+        } else {
+            /* No TL data to import */
+            tl_debug(ctx->super.super.lib,
+                     "import mode without TL data, skipping");
+            ucc_free(m_data);
+            tl_h->tl_data = NULL;
+            return UCC_OK;
+        }
     } else {
         /* Other modes (EXPORT_OFFLOAD, IMPORT_OFFLOAD) not supported for CUDA TL */
         tl_debug(ctx->super.super.lib,

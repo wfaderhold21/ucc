@@ -136,16 +136,31 @@ ucc_status_t ucc_tl_cuda_alltoallv_setup_test(ucc_tl_cuda_task_t *task)
                                              UCC_TL_TEAM_RANK(team), i)) {
             continue;
         }
-        peer_sync = TASK_SYNC(task, i);
-        cache     = ucc_tl_cuda_get_cache(team, i);
+
+        cache = ucc_tl_cuda_get_cache(team, i);
         if (ucc_unlikely(!cache)) {
             status = UCC_ERR_NO_MESSAGE;
             goto exit_err;
         }
-        status = ucc_tl_cuda_map_memhandle(
-            peer_sync->mem_info_src.ptr, peer_sync->mem_info_src.length,
-            peer_sync->mem_info_src.handle,
-            &task->alltoallv_ce.peer_map_addr_src[i], cache);
+
+        /* Use global_memh if available, otherwise read from shared memory */
+        if (task->alltoallv_ce.use_global_memh &&
+            task->alltoallv_ce.global_memh_src != NULL) {
+            ucc_tl_cuda_mem_info_t peer_mi;
+            status = ucc_tl_cuda_mem_info_from_global_memh(
+                task->alltoallv_ce.global_memh_src, i, &peer_mi);
+            if (status == UCC_OK) {
+                status = ucc_tl_cuda_map_memhandle(
+                    peer_mi.ptr, peer_mi.length, peer_mi.handle,
+                    &task->alltoallv_ce.peer_map_addr_src[i], cache);
+            }
+        } else {
+            peer_sync = TASK_SYNC(task, i);
+            status = ucc_tl_cuda_map_memhandle(
+                peer_sync->mem_info_src.ptr, peer_sync->mem_info_src.length,
+                peer_sync->mem_info_src.handle,
+                &task->alltoallv_ce.peer_map_addr_src[i], cache);
+        }
         if (UCC_OK != status) {
             ucc_error("ucc_cuda_ipc_map_memhandle failed");
             return UCC_ERR_INVALID_PARAM;
@@ -157,17 +172,31 @@ ucc_status_t ucc_tl_cuda_alltoallv_setup_test(ucc_tl_cuda_task_t *task)
     }
 
     for (i = 0; i < team->topo->num_proxies; i++) {
-        dst       = team->topo->proxies[i].dst;
-        peer_sync = TASK_SYNC(task, dst);
-        cache     = ucc_tl_cuda_get_cache(team, dst);
+        dst   = team->topo->proxies[i].dst;
+        cache = ucc_tl_cuda_get_cache(team, dst);
         if (ucc_unlikely(!cache)) {
             status = UCC_ERR_NO_MESSAGE;
             goto exit_err;
         }
-        status = ucc_tl_cuda_map_memhandle(
-            peer_sync->mem_info_dst.ptr, peer_sync->mem_info_dst.length,
-            peer_sync->mem_info_dst.handle,
-            &task->alltoallv_ce.peer_map_addr_dst[dst], cache);
+
+        /* Use global_memh if available, otherwise read from shared memory */
+        if (task->alltoallv_ce.use_global_memh &&
+            task->alltoallv_ce.global_memh_dst != NULL) {
+            ucc_tl_cuda_mem_info_t peer_mi;
+            status = ucc_tl_cuda_mem_info_from_global_memh(
+                task->alltoallv_ce.global_memh_dst, dst, &peer_mi);
+            if (status == UCC_OK) {
+                status = ucc_tl_cuda_map_memhandle(
+                    peer_mi.ptr, peer_mi.length, peer_mi.handle,
+                    &task->alltoallv_ce.peer_map_addr_dst[dst], cache);
+            }
+        } else {
+            peer_sync = TASK_SYNC(task, dst);
+            status = ucc_tl_cuda_map_memhandle(
+                peer_sync->mem_info_dst.ptr, peer_sync->mem_info_dst.length,
+                peer_sync->mem_info_dst.handle,
+                &task->alltoallv_ce.peer_map_addr_dst[dst], cache);
+        }
         if (UCC_OK != status) {
             ucc_error("ucc_cuda_ipc_map_memhandle failed");
             return UCC_ERR_INVALID_PARAM;
@@ -719,10 +748,34 @@ ucc_status_t ucc_tl_cuda_alltoallv_ce_init(ucc_tl_cuda_task_t *task)
     task->alltoallv_ce.sdispl     = args->src.info_v.displacements;
     task->alltoallv_ce.rdispl     = args->dst.info_v.displacements;
     task->alltoallv_ce.stage      = ALLTOALL_CE_STAGE_SYNC;
+    task->alltoallv_ce.global_memh_src = NULL;
+    task->alltoallv_ce.global_memh_dst = NULL;
+    task->alltoallv_ce.use_global_memh = 0;
 
-    /* Check if pre-registered mem_map handles are available for source buffer */
+    /* Check if global_memh is available (pre-exchanged handles from all ranks) */
     if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH) &&
-        args->src_memh.local_memh != NULL) {
+        (args->flags & UCC_COLL_ARGS_FLAG_SRC_MEMH_GLOBAL) &&
+        args->src_memh.global_memh != NULL) {
+        task->alltoallv_ce.global_memh_src = args->src_memh.global_memh;
+        task->alltoallv_ce.use_global_memh = 1;
+        use_memh_src = 1;
+        tl_trace(UCC_TL_TEAM_LIB(team),
+                 "using global mem_map handles for src buffer");
+        /* For local mem_info, we still need our own rank's handle */
+        status = ucc_tl_cuda_mem_info_from_global_memh(
+            args->src_memh.global_memh, UCC_TL_TEAM_RANK(team),
+            &task->alltoallv_ce.mem_info_src);
+        if (status != UCC_OK) {
+            tl_debug(UCC_TL_TEAM_LIB(team),
+                     "failed to get local src handle from global_memh, "
+                     "falling back to regular path");
+            task->alltoallv_ce.use_global_memh = 0;
+            use_memh_src = 0;
+        }
+    }
+    /* Check if pre-registered local mem_map handle is available for source buffer */
+    else if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH) &&
+             args->src_memh.local_memh != NULL) {
         status = ucc_tl_cuda_mem_info_from_memh(args->src_memh.local_memh,
                                                 &task->alltoallv_ce.mem_info_src);
         if (status == UCC_OK) {
@@ -746,9 +799,29 @@ ucc_status_t ucc_tl_cuda_alltoallv_ce_init(ucc_tl_cuda_task_t *task)
     }
 
     if (team->topo->proxy_needed) {
-        /* Check if pre-registered mem_map handles are available for dest buffer */
+        /* Check if global_memh is available for dest buffer */
         if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH) &&
-            args->dst_memh.local_memh != NULL) {
+            (args->flags & UCC_COLL_ARGS_FLAG_DST_MEMH_GLOBAL) &&
+            args->dst_memh.global_memh != NULL) {
+            task->alltoallv_ce.global_memh_dst = args->dst_memh.global_memh;
+            /* Note: use_global_memh might already be set from src check */
+            task->alltoallv_ce.use_global_memh = 1;
+            use_memh_dst = 1;
+            tl_trace(UCC_TL_TEAM_LIB(team),
+                     "using global mem_map handles for dst buffer");
+            /* For local mem_info, get our own rank's handle */
+            status = ucc_tl_cuda_mem_info_from_global_memh(
+                args->dst_memh.global_memh, UCC_TL_TEAM_RANK(team),
+                &task->alltoallv_ce.mem_info_dst);
+            if (status != UCC_OK) {
+                tl_debug(UCC_TL_TEAM_LIB(team),
+                         "failed to get local dst handle from global_memh");
+                use_memh_dst = 0;
+            }
+        }
+        /* Check if pre-registered local mem_map handle is available for dest buffer */
+        else if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH) &&
+                 args->dst_memh.local_memh != NULL) {
             status = ucc_tl_cuda_mem_info_from_memh(args->dst_memh.local_memh,
                                                     &task->alltoallv_ce.mem_info_dst);
             if (status == UCC_OK) {
