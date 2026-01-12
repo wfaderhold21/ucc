@@ -5,6 +5,7 @@
  */
 
 #include "tl_cuda.h"
+#include "core/ucc_context.h"
 #include "utils/arch/cpu.h"
 #include "utils/arch/cuda_def.h"
 #include <tl_cuda_topo.h>
@@ -110,22 +111,234 @@ free_mpool:
     return status;
 }
 
-ucc_status_t ucc_tl_cuda_mem_map(const ucc_base_context_t *context, /* NOLINT */
-                                 int type, void *memh, void *tl_h) /* NOLINT */
+/**
+ * TL-specific data for CUDA memory mapping
+ *
+ * This structure holds the CUDA IPC memory handle and related information
+ * for memory regions that are mapped/exported for remote access.
+ */
+typedef struct ucc_tl_cuda_memh_data {
+    cudaIpcMemHandle_t ipc_handle;    /* CUDA IPC memory handle */
+    void              *base_address;  /* Base address of the mapped memory */
+    size_t             length;        /* Length of the mapped memory region */
+} ucc_tl_cuda_memh_data_t;
+
+/**
+ * @brief Map a memory region for CUDA IPC access
+ *
+ * This function maps a memory region for inter-process communication using
+ * CUDA IPC. For export mode, it creates an IPC memory handle that can be
+ * shared with other processes. For import mode, it would open a remote IPC
+ * handle (not yet implemented).
+ *
+ * @param [in]  context  CUDA TL context
+ * @param [in]  mode     Memory mapping mode (export/import)
+ * @param [in]  memh     Memory handle containing address and length info
+ * @param [out] tl_h     TL-specific handle to store mapping information
+ *
+ * @return UCC_OK on success, error code on failure
+ */
+ucc_status_t ucc_tl_cuda_mem_map(const ucc_base_context_t *context,
+                                 ucc_mem_map_mode_t mode,
+                                 ucc_mem_map_memh_t *memh,
+                                 ucc_mem_map_tl_t *tl_h)
 {
-    return UCC_ERR_NOT_IMPLEMENTED;
+    ucc_tl_cuda_context_t        *ctx = ucc_derived_of(context, ucc_tl_cuda_context_t);
+    ucc_tl_cuda_memh_data_t      *m_data;
+    cudaError_t                   cuda_st;
+    struct cudaPointerAttributes  ptr_attrs;
+    int                           is_device_mem = 0;
+
+    /* Initialize tl_h fields */
+    tl_h->tl_data = NULL;
+    strncpy(tl_h->tl_name, "cuda", UCC_MEM_MAP_TL_NAME_LEN - 1);
+
+    if (mode == UCC_MEM_MAP_MODE_EXPORT) {
+        /* Check if memory is CUDA device memory - cudaIpcGetMemHandle only works
+         * on device memory allocated with cudaMalloc */
+        cuda_st = cudaPointerGetAttributes(&ptr_attrs, memh->address);
+        if (cuda_st != cudaSuccess) {
+            /* Not a CUDA pointer or error querying - nothing to do for this TL */
+            tl_debug(ctx->super.super.lib,
+                     "cudaPointerGetAttributes failed for %p: %s - skipping CUDA IPC",
+                     memh->address, cudaGetErrorString(cuda_st));
+            cudaGetLastError(); /* Clear error state */
+            return UCC_OK; /* Return OK - other TLs may handle this memory */
+        }
+
+        /* cudaMemoryTypeDevice = 2, check if it's device memory */
+        if (ptr_attrs.type != cudaMemoryTypeDevice) {
+            tl_debug(ctx->super.super.lib,
+                     "memory at %p is not device memory (type=%d), skipping CUDA IPC",
+                     memh->address, ptr_attrs.type);
+            return UCC_OK; /* Return OK - other TLs may handle this memory */
+        }
+        is_device_mem = 1;
+    }
+
+    /* Only allocate TL data if we have device memory to work with */
+    if (mode == UCC_MEM_MAP_MODE_EXPORT && !is_device_mem) {
+        return UCC_OK;
+    }
+
+    m_data = ucc_calloc(1, sizeof(ucc_tl_cuda_memh_data_t), "tl cuda memh data");
+    if (!m_data) {
+        tl_error(ctx->super.super.lib, "failed to allocate tl cuda memh data");
+        return UCC_ERR_NO_MEMORY;
+    }
+
+    tl_h->tl_data = m_data;
+
+    if (mode == UCC_MEM_MAP_MODE_EXPORT) {
+        /* Export mode: create an IPC handle for the memory region */
+        cuda_st = cudaIpcGetMemHandle(&m_data->ipc_handle, memh->address);
+        if (cuda_st != cudaSuccess) {
+            tl_error(ctx->super.super.lib,
+                     "cudaIpcGetMemHandle failed: %s", cudaGetErrorString(cuda_st));
+            ucc_free(m_data);
+            tl_h->tl_data = NULL;
+            return UCC_ERR_NO_RESOURCE;
+        }
+        m_data->base_address = memh->address;
+        m_data->length       = memh->len;
+        tl_debug(ctx->super.super.lib,
+                 "exported CUDA IPC handle for address %p, length %zu",
+                 memh->address, memh->len);
+    } else if (mode == UCC_MEM_MAP_MODE_IMPORT) {
+        /* Import mode: nothing to do here, actual IPC open happens during collective */
+        m_data->base_address = memh->address;
+        m_data->length       = memh->len;
+    } else {
+        /* Other modes (EXPORT_OFFLOAD, IMPORT_OFFLOAD) not supported for CUDA TL */
+        tl_debug(ctx->super.super.lib,
+                 "mem_map mode %d not supported for CUDA TL, skipping", mode);
+        ucc_free(m_data);
+        tl_h->tl_data = NULL;
+        return UCC_OK; /* Return OK - other TLs may handle this */
+    }
+
+    return UCC_OK;
 }
 
-ucc_status_t ucc_tl_cuda_mem_unmap(const ucc_base_context_t *context, /* NOLINT */
-                                   int type, void *tl_h) /* NOLINT */
+/**
+ * @brief Unmap a previously mapped CUDA memory region
+ *
+ * This function releases resources associated with a mapped memory region.
+ * For export mode, it simply frees the TL data. For import mode, it would
+ * close any opened IPC handles.
+ *
+ * @param [in] context  CUDA TL context
+ * @param [in] mode     Memory mapping mode used during mapping
+ * @param [in] tl_h     TL-specific handle to unmap
+ *
+ * @return UCC_OK on success, error code on failure
+ */
+ucc_status_t ucc_tl_cuda_mem_unmap(const ucc_base_context_t *context,
+                                   ucc_mem_map_mode_t mode,
+                                   ucc_mem_map_tl_t *tl_h)
 {
-    return UCC_ERR_NOT_IMPLEMENTED;
+    ucc_tl_cuda_context_t   *ctx = ucc_derived_of(context, ucc_tl_cuda_context_t);
+    ucc_tl_cuda_memh_data_t *data;
+
+    if (!tl_h || !tl_h->tl_data) {
+        return UCC_OK;
+    }
+
+    data = (ucc_tl_cuda_memh_data_t *)tl_h->tl_data;
+
+    if (mode == UCC_MEM_MAP_MODE_EXPORT) {
+        /* For export mode, just free the data structure.
+         * The IPC handle doesn't need explicit cleanup. */
+        tl_debug(ctx->super.super.lib,
+                 "unmapping exported CUDA memory at %p", data->base_address);
+    } else if (mode == UCC_MEM_MAP_MODE_IMPORT) {
+        /* For import mode, nothing special to do as we don't open handles here */
+        tl_debug(ctx->super.super.lib,
+                 "unmapping imported CUDA memory at %p", data->base_address);
+    } else {
+        tl_debug(ctx->super.super.lib,
+                 "mem_unmap mode %d not supported for CUDA TL", mode);
+    }
+
+    ucc_free(data);
+    tl_h->tl_data = NULL;
+
+    return UCC_OK;
 }
 
-ucc_status_t ucc_tl_cuda_memh_pack(const ucc_base_context_t *context, /* NOLINT */
-                                   int type, void *memh, void **pack_buffer) /* NOLINT */
+/**
+ * @brief Pack CUDA memory handle for transfer to remote processes
+ *
+ * This function packs the CUDA IPC memory handle into a buffer that can be
+ * sent to remote processes. The remote process can then use this packed
+ * data to open the IPC handle and access the memory.
+ *
+ * @param [in]  context      CUDA TL context
+ * @param [in]  mode         Memory mapping mode
+ * @param [in]  tl_h         TL-specific handle containing the IPC handle
+ * @param [out] pack_buffer  Allocated buffer containing packed handle data
+ *
+ * @return UCC_OK on success, error code on failure
+ */
+ucc_status_t ucc_tl_cuda_memh_pack(const ucc_base_context_t *context,
+                                   ucc_mem_map_mode_t mode,
+                                   ucc_mem_map_tl_t *tl_h,
+                                   void **pack_buffer)
 {
-    return UCC_ERR_NOT_IMPLEMENTED;
+    ucc_tl_cuda_context_t   *ctx  = ucc_derived_of(context, ucc_tl_cuda_context_t);
+    ucc_tl_cuda_memh_data_t *data;
+    void                    *buffer;
+    size_t                   offset;
+
+    /* If no TL data (e.g., non-device memory), nothing to pack - return success */
+    if (!tl_h->tl_data) {
+        tl_debug(ctx->super.super.lib,
+                 "no CUDA TL data to pack (non-device memory?)");
+        tl_h->packed_size = 0;
+        *pack_buffer = NULL;
+        return UCC_OK;
+    }
+
+    data = (ucc_tl_cuda_memh_data_t *)tl_h->tl_data;
+
+    if (mode != UCC_MEM_MAP_MODE_EXPORT) {
+        tl_debug(ctx->super.super.lib,
+                 "memh_pack only supported for export mode, skipping");
+        tl_h->packed_size = 0;
+        *pack_buffer = NULL;
+        return UCC_OK;
+    }
+
+    /*
+     * Pack format:
+     *   - cudaIpcMemHandle_t (64 bytes)
+     *   - base_address (sizeof(void *))
+     *   - length (sizeof(size_t))
+     */
+    tl_h->packed_size = sizeof(cudaIpcMemHandle_t) + sizeof(void *) + sizeof(size_t);
+
+    buffer = ucc_malloc(tl_h->packed_size, "cuda packed memh");
+    if (!buffer) {
+        tl_error(ctx->super.super.lib,
+                 "failed to allocate packed buffer of size %zu", tl_h->packed_size);
+        return UCC_ERR_NO_MEMORY;
+    }
+
+    offset = 0;
+    memcpy(buffer, &data->ipc_handle, sizeof(cudaIpcMemHandle_t));
+    offset += sizeof(cudaIpcMemHandle_t);
+
+    memcpy(PTR_OFFSET(buffer, offset), &data->base_address, sizeof(void *));
+    offset += sizeof(void *);
+
+    memcpy(PTR_OFFSET(buffer, offset), &data->length, sizeof(size_t));
+
+    *pack_buffer = buffer;
+
+    tl_debug(ctx->super.super.lib,
+             "packed CUDA IPC handle, size %zu bytes", tl_h->packed_size);
+
+    return UCC_OK;
 }
 
 /**
