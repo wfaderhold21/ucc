@@ -282,6 +282,9 @@ ucc_status_t ucc_tl_cuda_alg_id_to_init(int alg_id, const char *alg_id_str,
         case UCC_TL_CUDA_ALLGATHERV_ALG_LINEAR:
             *init = ucc_tl_cuda_allgatherv_linear_init;
             break;
+        case UCC_TL_CUDA_ALLGATHERV_ALG_DIRECT:
+            *init = ucc_tl_cuda_allgatherv_direct_init;
+            break;
 #ifdef HAVE_NVLS
         case UCC_TL_CUDA_ALLGATHERV_ALG_NVLS:
             *init = ucc_tl_cuda_allgatherv_nvls_init;
