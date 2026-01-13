@@ -17,7 +17,8 @@ allgatherv =                       \
 	allgatherv/allgatherv.h        \
 	allgatherv/allgatherv.c        \
 	allgatherv/allgatherv_ring.c   \
-	allgatherv/allgatherv_linear.c
+	allgatherv/allgatherv_linear.c \
+	allgatherv/allgatherv_direct.c
 
 alltoall =                 \
 	alltoall/alltoall.h    \

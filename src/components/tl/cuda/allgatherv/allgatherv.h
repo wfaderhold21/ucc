@@ -15,6 +15,7 @@ enum
     UCC_TL_CUDA_ALLGATHERV_ALG_AUTO,
     UCC_TL_CUDA_ALLGATHERV_ALG_RING,
     UCC_TL_CUDA_ALLGATHERV_ALG_LINEAR,
+    UCC_TL_CUDA_ALLGATHERV_ALG_DIRECT,
 #ifdef HAVE_NVLS
     UCC_TL_CUDA_ALLGATHERV_ALG_NVLS,
 #endif /* HAVE_NVLS */
@@ -57,6 +58,17 @@ ucc_status_t ucc_tl_cuda_allgatherv_linear_start(ucc_coll_task_t *task);
 void ucc_tl_cuda_allgatherv_linear_progress(ucc_coll_task_t *task);
 
 ucc_status_t ucc_tl_cuda_allgatherv_linear_finalize(ucc_coll_task_t *task);
+
+/* Allgatherv direct */
+ucc_status_t ucc_tl_cuda_allgatherv_direct_init(ucc_base_coll_args_t *coll_args,
+                                                ucc_base_team_t      *tl_team,
+                                                ucc_coll_task_t     **task_p);
+
+ucc_status_t ucc_tl_cuda_allgatherv_direct_start(ucc_coll_task_t *task);
+
+void ucc_tl_cuda_allgatherv_direct_progress(ucc_coll_task_t *task);
+
+ucc_status_t ucc_tl_cuda_allgatherv_direct_finalize(ucc_coll_task_t *task);
 
 #ifdef HAVE_NVLS
 /* Allgatherv NVLS */

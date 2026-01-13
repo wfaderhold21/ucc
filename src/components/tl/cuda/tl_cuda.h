@@ -282,6 +282,21 @@ struct ucc_tl_cuda_task {
         } allgatherv_linear;
         struct {
             int                     stage;
+            ucc_datatype_t          dt;
+            void                   *sbuf;
+            void                   *rbuf;
+            ucc_tl_cuda_mem_info_t  mem_info_dst;
+            void                   *peer_dst_addr[UCC_TL_CUDA_MAX_PEERS];
+            ucc_ee_executor_task_t *exec_task;
+            ucc_mem_map_mem_h      *global_memh_dst;
+            int                     use_global_memh;
+            size_t (*get_count)(const ucc_tl_cuda_task_t *task,
+                                ucc_rank_t                block);
+            size_t (*get_offset)(const ucc_tl_cuda_task_t *task,
+                                 ucc_rank_t                block);
+        } allgatherv_direct;
+        struct {
+            int                     stage;
             int                     step;
             void                   *sbuf;
             ucc_datatype_t          dt;

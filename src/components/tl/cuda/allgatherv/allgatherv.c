@@ -21,6 +21,10 @@ ucc_base_coll_alg_info_t
             {.id   = UCC_TL_CUDA_ALLGATHERV_ALG_LINEAR,
              .name = "linear",
              .desc = "linear allgatherv algorithm"},
+        [UCC_TL_CUDA_ALLGATHERV_ALG_DIRECT] =
+            {.id   = UCC_TL_CUDA_ALLGATHERV_ALG_DIRECT,
+             .name = "direct",
+             .desc = "direct IPC allgatherv algorithm (benefits from mem_map)"},
 #ifdef HAVE_NVLS
         [UCC_TL_CUDA_ALLGATHERV_ALG_NVLS] =
             {.id   = UCC_TL_CUDA_ALLGATHERV_ALG_NVLS,
