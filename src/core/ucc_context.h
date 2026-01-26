@@ -12,6 +12,7 @@
 #include "utils/ucc_list.h"
 #include "utils/ucc_proc_info.h"
 #include "components/topo/ucc_topo.h"
+#include "ucc_magic.h"
 
 #define UCC_MEM_MAP_TL_NAME_LEN 8
 
@@ -52,6 +53,7 @@ typedef struct ucc_addr_storage {
 } ucc_addr_storage_t;
 
 typedef struct ucc_context {
+    uint64_t                 magic;
     ucc_lib_info_t          *lib;
     ucc_context_params_t     params;
     ucc_context_attr_t       attr;

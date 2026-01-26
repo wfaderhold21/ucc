@@ -7,6 +7,7 @@
 #include "config.h"
 #include "ucc_team.h"
 #include "ucc_context.h"
+#include "ucc_magic.h"
 #include "components/mc/ucc_mc.h"
 #include "components/ec/ucc_ec.h"
 #include "components/cl/ucc_cl.h"
@@ -178,10 +179,26 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_init,
     ucc_ee_type_t             coll_ee_type;
     size_t                    coll_size;
 
+    /* Check if team is in active state */
     if (ucc_unlikely(team->state != UCC_TEAM_ACTIVE)) {
         ucc_error("team %p is used before team create is completed", team);
         return UCC_ERR_INVALID_PARAM;
     }
+
+    /* Validate team's context and library to prevent use-after-free.
+     * This catches two scenarios:
+     * 1. Context destroyed via ucc_context_destroy()
+     * 2. Library finalized via ucc_finalize()
+     * See UCC issue #1174 for details. */
+    status = UCC_TEAM_CTX_CHECK_STATUS(team);
+    if (status != UCC_OK) {
+        return status;
+    }
+    status = UCC_CTX_LIB_CHECK_STATUS(team->contexts[0]);
+    if (status != UCC_OK) {
+        return status;
+    }
+
     /* Global check to reduce the amount of checks throughout
        all TLs */
 

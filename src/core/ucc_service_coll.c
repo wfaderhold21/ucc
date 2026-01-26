@@ -6,6 +6,8 @@
 
 #include "ucc_service_coll.h"
 #include "ucc_team.h"
+#include "ucc_context.h"
+#include "ucc_magic.h"
 
 uint64_t ucc_service_coll_map_cb(uint64_t ep, void *cb_ctx)
 {
@@ -22,8 +24,15 @@ ucc_service_coll_req_init(ucc_team_t *team, ucc_subset_t *subset,
                           ucc_tl_team_t          **service_team,
                           ucc_service_coll_req_t **_req)
 {
-    ucc_context_t          *ctx = team->contexts[0];
+    ucc_context_t          *ctx;
     ucc_service_coll_req_t *req;
+    ucc_status_t            status;
+
+    status = UCC_TEAM_CTX_CHECK_STATUS(team);
+    if (status != UCC_OK) {
+        return status;
+    }
+    ctx = team->contexts[0];
 
     *service_team = NULL;
     req = ucc_malloc(sizeof(*req), "service_req");

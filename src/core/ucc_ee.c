@@ -8,6 +8,8 @@
 #include "ucc_team.h"
 #include "ucc_ee.h"
 #include "ucc_lib.h"
+#include "ucc_context.h"
+#include "ucc_magic.h"
 #include "components/cl/ucc_cl.h"
 #include "components/tl/ucc_tl.h"
 
@@ -121,6 +123,13 @@ ucc_status_t ucc_ee_set_event(ucc_ee_h ee, ucc_ev_t *ev)
 
 ucc_status_t ucc_ee_wait(ucc_ee_h ee, ucc_ev_t *ev)
 {
+    ucc_status_t status;
+
+    status = UCC_TEAM_CTX_CHECK_STATUS(ee->team);
+    if (status != UCC_OK) {
+        return status;
+    }
+
     while(UCC_OK != ucc_ee_get_event(ee, &ev)) {
         ucc_progress_queue(ee->team->contexts[0]->pq);
     }

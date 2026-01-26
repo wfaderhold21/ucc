@@ -12,6 +12,7 @@
 #include "components/cl/ucc_cl_type.h"
 #include "utils/ucc_parser.h"
 #include "utils/ucc_mpool.h"
+#include "ucc_magic.h"
 
 typedef struct ucc_cl_lib      ucc_cl_lib_t;
 typedef struct ucc_tl_lib      ucc_tl_lib_t;
@@ -27,6 +28,7 @@ typedef struct ucc_lib_config {
 } ucc_lib_config_t;
 
 typedef struct ucc_lib_info {
+    uint64_t            magic;
     char               *full_prefix;
     int                 n_cl_libs_opened;
     int                 n_tl_libs_opened;

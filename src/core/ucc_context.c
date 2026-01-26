@@ -635,6 +635,7 @@ ucc_status_t ucc_context_create_proc_info(ucc_lib_h                   lib,
     ctx->net_devices.count = 0;
     ucc_config_names_array_dup(&ctx->net_devices, &config->net_devices);
 
+    ctx->magic             = UCC_CONTEXT_MAGIC_VALID;
     ctx->throttle_progress = config->throttle_progress;
     ctx->rank              = UCC_RANK_MAX;
     ctx->lib               = lib;
@@ -913,6 +914,11 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     ucc_tl_lib_t     *tl_lib;
     int               i;
     ucc_status_t      status;
+
+    /* Mark context as destroyed before freeing to help detect use-after-free.
+     * This allows ucc_collective_init to detect when a team's context
+     * has been destroyed and return a meaningful error instead of segfaulting. */
+    context->magic = UCC_CONTEXT_MAGIC_DESTROYED;
 
     if (UCC_OK != ucc_context_free_attr(&context->attr)) {
         ucc_error("failed to free context attributes");

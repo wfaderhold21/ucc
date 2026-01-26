@@ -11,6 +11,7 @@
 #include "utils/ucc_datastruct.h"
 #include "utils/ucc_coll_utils.h"
 #include "ucc_context.h"
+#include "ucc_magic.h"
 #include "utils/ucc_math.h"
 #include "components/base/ucc_base_iface.h"
 #include "components/cl/ucc_cl.h"
@@ -113,10 +114,17 @@ static inline ucc_host_id_t ucc_team_rank_host_id(ucc_rank_t rank, ucc_team_t *t
 static inline int ucc_team_ranks_on_same_node(ucc_rank_t rank1, ucc_rank_t rank2,
                                               ucc_team_t *team)
 {
-    ucc_context_addr_header_t *h1 = ucc_get_team_ep_header(team->contexts[0],
-                                                           team, rank1);
-    ucc_context_addr_header_t *h2 = ucc_get_team_ep_header(team->contexts[0],
-                                                           team, rank2);
+    ucc_context_addr_header_t *h1, *h2;
+    ucc_status_t               status;
+
+    /* Validate context before dereferencing */
+    status = UCC_TEAM_CTX_CHECK_STATUS(team);
+    if (status != UCC_OK) {
+        return 0;
+    }
+
+    h1 = ucc_get_team_ep_header(team->contexts[0], team, rank1);
+    h2 = ucc_get_team_ep_header(team->contexts[0], team, rank2);
 
     return h1->ctx_id.pi.host_hash == h2->ctx_id.pi.host_hash;
 }

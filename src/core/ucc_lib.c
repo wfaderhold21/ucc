@@ -364,7 +364,8 @@ ucc_status_t ucc_init_version(unsigned api_major_version,
         goto error;
     }
 
-    *lib_p = lib;
+    lib->magic = UCC_LIB_MAGIC_VALID;
+    *lib_p     = lib;
     return UCC_OK;
 error:
     ucc_free(lib);
@@ -477,6 +478,11 @@ ucc_status_t ucc_finalize(ucc_lib_info_t *lib)
 {
     int          i;
     ucc_status_t status, gl_status;
+
+    /* Mark library as destroyed before freeing to help detect use-after-free.
+     * This allows ucc_collective_init to detect when a context's library
+     * has been finalized and return a meaningful error instead of segfaulting. */
+    lib->magic = UCC_LIB_MAGIC_DESTROYED;
 
     gl_status = UCC_OK;
     ucc_assert(lib->n_cl_libs_opened > 0);
