@@ -236,6 +236,7 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_cuda_team_t)
     ucc_tl_cuda_nvls_destroy(self);
 #endif
 
+
     if (self->ids) {
         if (self->sync != (void*)-1) {
             for (i = 0; i < resource_num; i++) {
@@ -445,6 +446,7 @@ barrier:
                            exit_err, status);
         }
     }
+
     team->oob_req = NULL;
     tl_debug(lib, "initialized tl team: %p", team);
 

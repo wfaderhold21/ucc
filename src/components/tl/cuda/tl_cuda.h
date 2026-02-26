@@ -12,6 +12,7 @@
 #include "components/tl/ucc_tl_log.h"
 #include "components/mc/ucc_mc.h"
 #include "components/cl/ucc_cl_type.h" // for UCC_CL_HIER
+#include "core/ucc_context.h"
 #include "utils/ucc_mpool.h"
 #include "utils/ucc_datastruct.h"
 #include "tl_cuda_ep_hash.h"
@@ -148,6 +149,13 @@ typedef struct ucc_tl_cuda_mem_info {
     cudaIpcMemHandle_t handle;
 } ucc_tl_cuda_mem_info_t;
 
+typedef struct ucc_tl_cuda_memh_data {
+    cudaIpcMemHandle_t ipc_handle;
+    void              *base_address; /* allocation base (arg to cudaIpcGetMemHandle) */
+    size_t             length;       /* full allocation length */
+    ptrdiff_t          offset;       /* user pointer - base_address */
+} ucc_tl_cuda_memh_data_t;
+
 typedef struct ucc_tl_cuda_rank_id {
     ucc_tl_cuda_device_pci_id_t pci_id;
     ucc_tl_cuda_mem_info_t      scratch_info;
@@ -186,9 +194,9 @@ typedef struct ucc_tl_cuda_team {
     ucc_tl_cuda_sync_t        *sync;               // Pointer to shared memory segment for synchronization
     ucc_tl_cuda_sync_state_t  *sync_state;         // Tracks the task currently using the sync segment of shared memory, if free - 0
     ucc_tl_cuda_shm_barrier_t *bar;                // Pointer to the first barrier in an array of size [0; 2 * max_concurrent]. First max_concurrent barriers are for normal mode, the second one for active set mode
-    ucc_tl_cuda_scratch_t      scratch;
-    cudaStream_t               stream;             // CUDA stream for the team
-    ucc_tl_cuda_rank_id_t     *ids;
+    ucc_tl_cuda_scratch_t              scratch;
+    cudaStream_t                       stream;             // CUDA stream for the team
+    ucc_tl_cuda_rank_id_t             *ids;
     ucc_team_oob_coll_t        oob;
     void                      *oob_req;
 #ifdef HAVE_NVLS
@@ -238,6 +246,9 @@ struct ucc_tl_cuda_task {
                                       ucc_ee_executor_t       *executor,
                                       ucc_ee_executor_task_t **task,
                                       cudaStream_t             stream);
+            /* Global mem_map handles (pre-exchanged from all ranks) */
+            ucc_mem_map_mem_h     *global_memh_src;
+            ucc_mem_map_mem_h     *global_memh_dst;
         } alltoallv_ce;
         struct {
             int                     stage;

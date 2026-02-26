@@ -146,20 +146,52 @@ ucc_status_t ucc_tl_cuda_alltoallv_setup_test(ucc_tl_cuda_task_t *task)
                 &team->super, team->topo, UCC_TL_TEAM_RANK(team), i)) {
             continue;
         }
-        peer_sync = TASK_SYNC(task, i);
-        cache     = ucc_tl_cuda_get_cache(team, i);
+
+        cache = ucc_tl_cuda_get_cache(team, i);
         if (ucc_unlikely(!cache)) {
             status = UCC_ERR_NO_MESSAGE;
             goto exit_err;
         }
-        task->alltoallv_ce.peer_src_d_ptr[i] = (uintptr_t)
+
+        /* Use global_memh if available, otherwise read from shared memory.
+         * In both cases fold the buffer offset into peer_map_addr_src so that
+         * post_copies never needs to re-read the sync slot for the offset.
+         * This removes the data race that would otherwise exist when the
+         * final barrier is skipped (global_memh fast path): a fast rank could
+         * overwrite its sync slot with the next collective's mem_info before a
+         * slow rank has finished reading it in post_copies. */
+        if (task->alltoallv_ce.global_memh_src != NULL) {
+            ucc_tl_cuda_mem_info_t peer_mi;
+            status = ucc_tl_cuda_mem_info_from_global_memh(
+                task->alltoallv_ce.global_memh_src, i, &peer_mi);
+            if (status == UCC_OK) {
+                status = ucc_tl_cuda_map_memhandle(
+                    peer_mi.ptr, peer_mi.length, peer_mi.handle,
+                    &task->alltoallv_ce.peer_map_addr_src[i], cache);
+            }
+            if (status == UCC_OK) {
+                task->alltoallv_ce.peer_map_addr_src[i] =
+                    PTR_OFFSET(task->alltoallv_ce.peer_map_addr_src[i],
+                               peer_mi.offset);
+            }
+        } else {
+            peer_sync = TASK_SYNC(task, i);
+            task->alltoallv_ce.peer_src_d_ptr[i] = (uintptr_t)
                                                    peer_sync->mem_info_src.ptr;
-        status = ucc_tl_cuda_map_memhandle(
-            (void *)task->alltoallv_ce.peer_src_d_ptr[i],
-            peer_sync->mem_info_src.length,
-            peer_sync->mem_info_src.handle,
-            &task->alltoallv_ce.peer_map_addr_src[i],
-            cache);
+
+            status = ucc_tl_cuda_map_memhandle(
+                (void *)task->alltoallv_ce.peer_src_d_ptr[i],
+                peer_sync->mem_info_src.length,
+                peer_sync->mem_info_src.handle,
+                &task->alltoallv_ce.peer_map_addr_src[i],
+                cache);
+            if (status == UCC_OK) {
+                task->alltoallv_ce.peer_map_addr_src[i] =
+                    PTR_OFFSET(task->alltoallv_ce.peer_map_addr_src[i],
+                               peer_sync->mem_info_src.offset);
+            }
+        }
+
         if (UCC_OK != status) {
             ucc_error("ucc_cuda_ipc_map_memhandle failed");
             return UCC_ERR_INVALID_PARAM;
@@ -172,21 +204,47 @@ ucc_status_t ucc_tl_cuda_alltoallv_setup_test(ucc_tl_cuda_task_t *task)
     }
 
     for (i = 0; i < team->topo->num_proxies; i++) {
-        dst       = team->topo->proxies[i].dst;
-        peer_sync = TASK_SYNC(task, dst);
-        cache     = ucc_tl_cuda_get_cache(team, dst);
+        dst   = team->topo->proxies[i].dst;
+        cache = ucc_tl_cuda_get_cache(team, dst);
         if (ucc_unlikely(!cache)) {
             status = UCC_ERR_NO_MESSAGE;
             goto exit_err;
         }
-        task->alltoallv_ce.peer_dst_d_ptr[dst] = (uintptr_t)peer_sync
+
+        /* Use global_memh if available, otherwise read from shared memory.
+         * Fold the buffer offset into peer_map_addr_dst (same rationale as
+         * for peer_map_addr_src above). */
+        if (task->alltoallv_ce.global_memh_dst != NULL) {
+            ucc_tl_cuda_mem_info_t peer_mi;
+            status = ucc_tl_cuda_mem_info_from_global_memh(
+                task->alltoallv_ce.global_memh_dst, dst, &peer_mi);
+            if (status == UCC_OK) {
+                status = ucc_tl_cuda_map_memhandle(
+                    peer_mi.ptr, peer_mi.length, peer_mi.handle,
+                    &task->alltoallv_ce.peer_map_addr_dst[dst], cache);
+            }
+            if (status == UCC_OK) {
+                task->alltoallv_ce.peer_map_addr_dst[dst] =
+                    PTR_OFFSET(task->alltoallv_ce.peer_map_addr_dst[dst],
+                               peer_mi.offset);
+            }
+        } else {
+            peer_sync = TASK_SYNC(task, dst);
+            task->alltoallv_ce.peer_dst_d_ptr[dst] = (uintptr_t)peer_sync
                                                      ->mem_info_dst.ptr;
-        status = ucc_tl_cuda_map_memhandle(
-            (void *)task->alltoallv_ce.peer_dst_d_ptr[dst],
-            peer_sync->mem_info_dst.length,
-            peer_sync->mem_info_dst.handle,
-            &task->alltoallv_ce.peer_map_addr_dst[dst],
-            cache);
+            status = ucc_tl_cuda_map_memhandle(
+                (void *)task->alltoallv_ce.peer_dst_d_ptr[dst],
+                peer_sync->mem_info_dst.length,
+                peer_sync->mem_info_dst.handle,
+                &task->alltoallv_ce.peer_map_addr_dst[dst],
+                cache);
+            if (status == UCC_OK) {
+                task->alltoallv_ce.peer_map_addr_dst[dst] =
+                    PTR_OFFSET(task->alltoallv_ce.peer_map_addr_dst[dst],
+                               peer_sync->mem_info_dst.offset);
+            }
+        }
+
         if (UCC_OK != status) {
             ucc_error("ucc_cuda_ipc_map_memhandle failed");
             return UCC_ERR_INVALID_PARAM;
@@ -246,9 +304,9 @@ ucc_status_t ucc_tl_cuda_alltoallv_ce_post_copies(ucc_tl_cuda_task_t *task)
         if (peer == rank) {
             src = task->alltoallv_ce.sbuf;
         } else {
-            src = PTR_OFFSET(
-                task->alltoallv_ce.peer_map_addr_src[peer],
-                peer_sync->mem_info_src.offset);
+            /* peer_map_addr_src already has the buffer offset folded in from
+             * setup_test; no need to re-read the sync slot here. */
+            src = task->alltoallv_ce.peer_map_addr_src[peer];
         }
         data_size = task->alltoallv_ce.get_size(
             task, peer_sync->alltoallv_ce.sbytes, rank);
@@ -287,17 +345,14 @@ ucc_status_t ucc_tl_cuda_alltoallv_ce_post_copies(ucc_tl_cuda_task_t *task)
         }
         data_displ = task->alltoallv_ce.get_offset(
             task, peer_sync->alltoallv_ce.sdispl_bytes, pdst);
-        src = PTR_OFFSET(
-            task->alltoallv_ce.peer_map_addr_src[psrc],
-            peer_sync->mem_info_src.offset);
-        src       = PTR_OFFSET(src, data_displ);
-        peer_sync = TASK_SYNC(task, pdst);
-        dst       = PTR_OFFSET(
-            task->alltoallv_ce.peer_map_addr_dst[pdst],
-            peer_sync->mem_info_dst.offset);
+        /* peer_map_addr_src/dst already have the buffer offset folded in. */
+        src        = PTR_OFFSET(task->alltoallv_ce.peer_map_addr_src[psrc],
+                                data_displ);
+        peer_sync  = TASK_SYNC(task, pdst);
         data_displ = task->alltoallv_ce.get_offset(
             task, peer_sync->alltoallv_ce.rdispl_bytes, psrc);
-        dst    = PTR_OFFSET(dst, data_displ);
+        dst        = PTR_OFFSET(task->alltoallv_ce.peer_map_addr_dst[pdst],
+                                data_displ);
 
         status = task->alltoallv_ce.copy_post(
             dst,
@@ -390,9 +445,8 @@ static ucc_status_t ucc_tl_cuda_alltoallv_ce_post_batch_copies(
         if (peer == rank) {
             src = task->alltoallv_ce.sbuf;
         } else {
-            src = PTR_OFFSET(
-                task->alltoallv_ce.peer_map_addr_src[peer],
-                peer_sync->mem_info_src.offset);
+            /* peer_map_addr_src already has the buffer offset folded in. */
+            src = task->alltoallv_ce.peer_map_addr_src[peer];
         }
 
         data_displ = task->alltoallv_ce.get_offset(
@@ -443,7 +497,9 @@ ucc_status_t ucc_tl_cuda_alltoallv_unmap(ucc_tl_cuda_task_t *task)
     ucc_tl_cuda_team_t  *team = TASK_TEAM(task);
     ucc_rank_t           i, dst;
     ucc_tl_cuda_cache_t *cache;
+    ucc_tl_cuda_mem_info_t       peer_mi;
     ucc_status_t         status;
+    uintptr_t                    map_key;
 
     for (i = 0; i < UCC_TL_TEAM_SIZE(team); i++) {
         if (i == UCC_TL_TEAM_RANK(team) ||
@@ -451,27 +507,43 @@ ucc_status_t ucc_tl_cuda_alltoallv_unmap(ucc_tl_cuda_task_t *task)
                 &team->super, team->topo, UCC_TL_TEAM_RANK(team), i)) {
             continue;
         }
-        cache  = ucc_tl_cuda_get_cache(team, i);
+        cache = ucc_tl_cuda_get_cache(team, i);
+
+        if (task->alltoallv_ce.global_memh_src != NULL) {
+            status = ucc_tl_cuda_mem_info_from_global_memh(
+                task->alltoallv_ce.global_memh_src, i, &peer_mi);
+            if (ucc_unlikely(status != UCC_OK)) {
+                return status;
+            }
+            map_key = (uintptr_t)peer_mi.ptr;
+        } else {
+            map_key = (uintptr_t)task->alltoallv_ce.peer_src_d_ptr[i];
+        }
 
         status = ucc_tl_cuda_unmap_memhandle(
-            task->alltoallv_ce.peer_src_d_ptr[i],
-            task->alltoallv_ce.peer_map_addr_src[i],
-            cache,
-            0);
+            map_key, task->alltoallv_ce.peer_map_addr_src[i], cache, 0);
         if (ucc_unlikely(status != UCC_OK)) {
             return status;
         }
     }
 
     for (i = 0; i < team->topo->num_proxies; i++) {
-        dst    = team->topo->proxies[i].dst;
-        cache  = ucc_tl_cuda_get_cache(team, dst);
+        dst   = team->topo->proxies[i].dst;
+        cache = ucc_tl_cuda_get_cache(team, dst);
+
+        if (task->alltoallv_ce.global_memh_dst != NULL) {
+            status = ucc_tl_cuda_mem_info_from_global_memh(
+                task->alltoallv_ce.global_memh_dst, dst, &peer_mi);
+            if (ucc_unlikely(status != UCC_OK)) {
+                return status;
+            }
+            map_key = (uintptr_t)peer_mi.ptr;
+        } else {
+            map_key = task->alltoallv_ce.peer_dst_d_ptr[dst];
+        }
 
         status = ucc_tl_cuda_unmap_memhandle(
-            task->alltoallv_ce.peer_dst_d_ptr[dst],
-            task->alltoallv_ce.peer_map_addr_dst[dst],
-            cache,
-            0);
+            map_key, task->alltoallv_ce.peer_map_addr_dst[dst], cache, 0);
         if (ucc_unlikely(status != UCC_OK)) {
             return status;
         }
@@ -568,8 +640,24 @@ void ucc_tl_cuda_alltoallv_ce_progress(ucc_coll_task_t *coll_task)
             }
         }
 
-        status = ucc_tl_cuda_shm_barrier_start(
-            UCC_TL_TEAM_RANK(team), task->bar);
+        /* Fast path: skip the FINAL barrier when global_memh is available
+         * and there are no proxy hops.  The FINAL barrier normally exists to
+         * prevent slot reuse while peers still read our sbuf.  With alltoall,
+         * sbuf is never written during the collective, so peers can read it
+         * freely even after we call put_sync.  The next collective's get_sync
+         * (SETUP barrier) prevents actual slot reuse until all peers are done.
+         * This saves one SHM barrier round-trip (~14 µs on H100) per call.  */
+        if (task->alltoallv_ce.global_memh_src != NULL &&
+            TASK_ARGS(task).coll_type == UCC_COLL_TYPE_ALLTOALL &&
+            team->topo->num_proxies == 0) {
+            status = ucc_tl_cuda_alltoallv_unmap(task);
+            ucc_tl_cuda_put_sync(task);
+            task->super.status = status;
+            return;
+        }
+
+        status =
+            ucc_tl_cuda_shm_barrier_start(UCC_TL_TEAM_RANK(team), task->bar);
         if (ucc_unlikely(status != UCC_OK)) {
             task->super.status = status;
             return;
@@ -731,6 +819,8 @@ ucc_status_t ucc_tl_cuda_alltoallv_ce_init(ucc_tl_cuda_task_t *task)
     ucc_coll_args_t    *args = &TASK_ARGS(task);
     ucc_status_t        status;
     size_t              data_len;
+    int                 use_memh_src = 0;
+    int                 use_memh_dst = 0;
 
     if (!UCC_COLL_ARGS_CONTIG_BUFFER(args)) {
         tl_debug(UCC_TL_TEAM_LIB(team), "Do not support non-contiguous buffer");
@@ -748,26 +838,98 @@ ucc_status_t ucc_tl_cuda_alltoallv_ce_init(ucc_tl_cuda_task_t *task)
     task->alltoallv_ce.sdispl     = args->src.info_v.displacements;
     task->alltoallv_ce.rdispl     = args->dst.info_v.displacements;
     task->alltoallv_ce.stage      = ALLTOALL_CE_STAGE_SYNC;
+    task->alltoallv_ce.global_memh_src = NULL;
+    task->alltoallv_ce.global_memh_dst = NULL;
 
-    data_len                      = ucc_dt_size(args->src.info_v.datatype) *
-               ucc_coll_args_get_total_count(
-                   args, args->src.info_v.counts, UCC_TL_TEAM_SIZE(team));
-    status = ucc_tl_cuda_mem_info_get(
-        args->src.info_v.buffer, data_len, &task->alltoallv_ce.mem_info_src);
-    if (ucc_unlikely(status != UCC_OK)) {
-        return status;
+    /* Check if global_memh is available (pre-exchanged handles from all ranks) */
+    if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH) &&
+        (args->flags & UCC_COLL_ARGS_FLAG_SRC_MEMH_GLOBAL) &&
+        args->src_memh.global_memh != NULL) {
+        task->alltoallv_ce.global_memh_src = args->src_memh.global_memh;
+        use_memh_src = 1;
+        tl_trace(UCC_TL_TEAM_LIB(team),
+                 "using global mem_map handles for src buffer");
+        /* For local mem_info, we still need our own rank's handle */
+        status = ucc_tl_cuda_mem_info_from_global_memh(
+            args->src_memh.global_memh, UCC_TL_TEAM_RANK(team),
+            &task->alltoallv_ce.mem_info_src);
+        if (status != UCC_OK) {
+            tl_debug(UCC_TL_TEAM_LIB(team),
+                     "failed to get local src handle from global_memh, "
+                     "falling back to regular path");
+            task->alltoallv_ce.global_memh_src = NULL;
+            use_memh_src = 0;
+        }
+    }
+    /* Check if pre-registered local mem_map handle is available for source buffer */
+    else if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH) &&
+             args->src_memh.local_memh != NULL) {
+        status = ucc_tl_cuda_mem_info_from_memh(args->src_memh.local_memh,
+                                                &task->alltoallv_ce.mem_info_src);
+        if (status == UCC_OK) {
+            use_memh_src = 1;
+            tl_trace(UCC_TL_TEAM_LIB(team),
+                     "using pre-registered mem_map handle for src buffer");
+        }
+        /* If mem_map doesn't have CUDA handle, fall through to regular path */
+    }
+
+    if (!use_memh_src) {
+        /* Fallback: get IPC handle inline (original path) */
+        data_len = ucc_dt_size(args->src.info_v.datatype) *
+                   ucc_coll_args_get_total_count(args, args->src.info_v.counts,
+                                                 UCC_TL_TEAM_SIZE(team));
+        status = ucc_tl_cuda_mem_info_get(args->src.info_v.buffer, data_len,
+                                          &task->alltoallv_ce.mem_info_src);
+        if (ucc_unlikely(status != UCC_OK)) {
+            return status;
+        }
     }
 
     if (team->topo->proxy_needed) {
-        data_len = ucc_dt_size(args->dst.info_v.datatype) *
-                   ucc_coll_args_get_total_count(
-                       args, args->dst.info_v.counts, UCC_TL_TEAM_SIZE(team));
-        status = ucc_tl_cuda_mem_info_get(
-            args->dst.info_v.buffer,
-            data_len,
-            &task->alltoallv_ce.mem_info_dst);
-        if (ucc_unlikely(status != UCC_OK)) {
-            return status;
+        /* Check if global_memh is available for dest buffer */
+        if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH) &&
+            (args->flags & UCC_COLL_ARGS_FLAG_DST_MEMH_GLOBAL) &&
+            args->dst_memh.global_memh != NULL) {
+            task->alltoallv_ce.global_memh_dst = args->dst_memh.global_memh;
+            use_memh_dst = 1;
+            tl_trace(UCC_TL_TEAM_LIB(team),
+                     "using global mem_map handles for dst buffer");
+            /* For local mem_info, get our own rank's handle */
+            status = ucc_tl_cuda_mem_info_from_global_memh(
+                args->dst_memh.global_memh, UCC_TL_TEAM_RANK(team),
+                &task->alltoallv_ce.mem_info_dst);
+            if (status != UCC_OK) {
+                tl_debug(UCC_TL_TEAM_LIB(team),
+                         "failed to get local dst handle from global_memh");
+                task->alltoallv_ce.global_memh_dst = NULL;
+                use_memh_dst = 0;
+            }
+        }
+        /* Check if pre-registered local mem_map handle is available for dest buffer */
+        else if ((args->mask & UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH) &&
+                 args->dst_memh.local_memh != NULL) {
+            status = ucc_tl_cuda_mem_info_from_memh(args->dst_memh.local_memh,
+                                                    &task->alltoallv_ce.mem_info_dst);
+            if (status == UCC_OK) {
+                use_memh_dst = 1;
+                tl_trace(UCC_TL_TEAM_LIB(team),
+                         "using pre-registered mem_map handle for dst buffer");
+            }
+        }
+
+        if (!use_memh_dst) {
+            /* Fallback: get IPC handle inline (original path) */
+            data_len = ucc_dt_size(args->dst.info_v.datatype) *
+                       ucc_coll_args_get_total_count(
+                           args, args->dst.info_v.counts, UCC_TL_TEAM_SIZE(team));
+            status = ucc_tl_cuda_mem_info_get(
+                args->dst.info_v.buffer,
+                data_len,
+                &task->alltoallv_ce.mem_info_dst);
+            if (ucc_unlikely(status != UCC_OK)) {
+                return status;
+            }
         }
     }
 

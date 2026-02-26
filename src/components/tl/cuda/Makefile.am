@@ -19,9 +19,9 @@ allgatherv =                       \
 	allgatherv/allgatherv_ring.c   \
 	allgatherv/allgatherv_linear.c
 
-alltoall =                 \
-	alltoall/alltoall.h    \
-	alltoall/alltoall.c    \
+alltoall =                          \
+	alltoall/alltoall.h             \
+	alltoall/alltoall.c             \
 	alltoall/alltoall_ce.c
 
 alltoallv =                  \
