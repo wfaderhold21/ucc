@@ -7,7 +7,7 @@
 # $HEADER$
 #
 
-bin_PROGRAMS = ucc_test_mpi
+bin_PROGRAMS = ucc_test_mpi ucc_test_mpi_resilience
 
 ucc_test_mpi_SOURCES = \
 	test_mpi.cc             \
@@ -31,12 +31,20 @@ ucc_test_mpi_SOURCES = \
 	test_scatterv.cc        \
 	test_mem_map.cc
 
+ucc_test_mpi_resilience_SOURCES = \
+	test_resilience_mpi.cc
+
 CXX=$(MPICXX)
 LD=$(MPICXX)
 ucc_test_mpi_CPPFLAGS = $(BASE_CPPFLAGS)
 ucc_test_mpi_CXXFLAGS = $(BASE_CXXFLAGS) -std=gnu++11
 ucc_test_mpi_LDFLAGS = -Wl,--rpath-link=${UCS_LIBDIR}
 ucc_test_mpi_LDADD = $(UCC_TOP_BUILDDIR)/src/libucc.la
+
+ucc_test_mpi_resilience_CPPFLAGS = $(BASE_CPPFLAGS) -I$(UCC_TOP_SRCDIR)/src
+ucc_test_mpi_resilience_CXXFLAGS = $(BASE_CXXFLAGS) -std=gnu++11
+ucc_test_mpi_resilience_LDFLAGS  = -Wl,--rpath-link=${UCS_LIBDIR}
+ucc_test_mpi_resilience_LDADD    = $(UCC_TOP_BUILDDIR)/src/libucc.la
 
 if HAVE_CUDA
 ucc_test_mpi_CPPFLAGS += $(CUDA_CPPFLAGS)
