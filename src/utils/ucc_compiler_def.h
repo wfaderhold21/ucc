@@ -108,6 +108,11 @@ static inline ucc_status_t ucs_status_to_ucc_status(ucs_status_t status)
         return UCC_ERR_INVALID_PARAM;
     case UCS_ERR_NO_RESOURCE:
         return UCC_ERR_NO_RESOURCE;
+    case UCS_ERR_ENDPOINT_TIMEOUT:
+    case UCS_ERR_UNREACHABLE:
+    case UCS_ERR_CONNECTION_RESET:
+    case UCS_ERR_CANCELED:
+        return UCC_ERR_COMM_FAILURE;
     default:
         break;
     }

@@ -207,6 +207,12 @@ static inline ucc_status_t ucc_task_complete(ucc_coll_task_t *task)
                          UCC_LOG_LEVEL_DEBUG);
             ucc_warn("timeout %g sec. has expired on %s",
                      task->bargs.args.timeout, coll_str);
+        } else if (UCC_ERR_COMM_FAILURE == status ||
+                   UCC_ERR_ABORTED     == status) {
+            /* Application-visible resilience statuses: not a hard error,
+               the collective request handle will carry the status. */
+            ucc_debug("task %p completed with status %s", task,
+                      ucc_status_string(task->status));
         } else {
             ucc_error("failure in task %p, %s", task,
                       ucc_status_string(task->status));
