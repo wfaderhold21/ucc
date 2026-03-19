@@ -144,6 +144,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     ucc_tl_ucp_team_t *team      = TASK_TEAM(task);
     ptrdiff_t          src       = (ptrdiff_t)TASK_ARGS(task).src.info.buffer;
     ptrdiff_t          dest      = (ptrdiff_t)TASK_ARGS(task).dst.info.buffer;
+    ucc_memory_type_t  mtype     = TASK_ARGS(task).src.info.mem_type;
     ucc_rank_t         grank     = UCC_TL_TEAM_RANK(team);
     ucc_rank_t         gsize     = UCC_TL_TEAM_SIZE(team);
     int64_t            npolls    = task->alltoall_onesided.npolls;
@@ -189,7 +190,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
                 UCPCHECK_GOTO(
                     ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
                                       PTR_OFFSET(dest, grank * nelems + offset), chunk,
-                                      peer, src_memh, dst_memh, team, task),
+                                      mtype, peer, src_memh, dst_memh, team, task),
                     task, out);
                 UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task, out);
 
@@ -213,7 +214,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
             UCPCHECK_GOTO(
                 ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems),
                                   PTR_OFFSET(dest, grank * nelems), nelems,
-                                  peer, src_memh, dst_memh, team, task),
+                                  mtype, peer, src_memh, dst_memh, team, task),
                 task, out);
             UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task, out);
             *peer_cmp = *peer_cmp + 1;
