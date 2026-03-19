@@ -6,6 +6,8 @@
 
 
 #include "tl_ucp_sendrecv.h"
+#include "core/ucc_context.h"
+#include "tl_ucp_tag.h"
 
 void ucc_tl_ucp_send_recv_counter_inc_st(uint32_t *counter)
 {
@@ -22,9 +24,17 @@ void ucc_tl_ucp_send_completion_cb_st(void *request, ucs_status_t status,
 {
     ucc_tl_ucp_task_t *task = (ucc_tl_ucp_task_t *)user_data;
     if (ucc_unlikely(UCS_OK != status)) {
+        ucc_status_t ucc_st = ucs_status_to_ucc_status(status);
         tl_error(UCC_TASK_LIB(task), "failure in send completion %s",
                  ucs_status_string(status));
-        task->super.status = ucs_status_to_ucc_status(status);
+        task->super.status = ucc_st;
+        if (ucc_st == UCC_ERR_COMM_FAILURE) {
+            /* Peer rank is not available in this callback; the task status
+               signals the failure to the collective and the application is
+               expected to drive ucc_context_abort. */
+            ucc_context_mark_rank_failed(
+                UCC_TL_CORE_CTX(TASK_TEAM(task)), UCC_RANK_MAX);
+        }
     }
     ++task->tagged.send_completed;
     ucp_request_free(request);
@@ -35,9 +45,14 @@ void ucc_tl_ucp_send_completion_cb_mt(void *request, ucs_status_t status,
 {
     ucc_tl_ucp_task_t *task = (ucc_tl_ucp_task_t *)user_data;
     if (ucc_unlikely(UCS_OK != status)) {
+        ucc_status_t ucc_st = ucs_status_to_ucc_status(status);
         tl_error(UCC_TASK_LIB(task), "failure in send completion %s",
                  ucs_status_string(status));
-        task->super.status = ucs_status_to_ucc_status(status);
+        task->super.status = ucc_st;
+        if (ucc_st == UCC_ERR_COMM_FAILURE) {
+            ucc_context_mark_rank_failed(
+                UCC_TL_CORE_CTX(TASK_TEAM(task)), UCC_RANK_MAX);
+        }
     }
     ucc_atomic_add32(&task->tagged.send_completed, 1);
     ucp_request_free(request);
@@ -83,28 +98,46 @@ void ucc_tl_ucp_flush_completion_cb(void *request, ucs_status_t status,
 }
 
 void ucc_tl_ucp_recv_completion_cb_mt(void *request, ucs_status_t status,
-                                      const ucp_tag_recv_info_t *info, /* NOLINT */
+                                      const ucp_tag_recv_info_t *info,
                                       void *user_data)
 {
     ucc_tl_ucp_task_t *task = (ucc_tl_ucp_task_t *)user_data;
     if (ucc_unlikely(UCS_OK != status)) {
+        ucc_status_t ucc_st = ucs_status_to_ucc_status(status);
         tl_error(UCC_TASK_LIB(task), "failure in recv completion %s",
                  ucs_status_string(status));
-        task->super.status = ucs_status_to_ucc_status(status);
+        task->super.status = ucc_st;
+        if (ucc_st == UCC_ERR_COMM_FAILURE && info != NULL) {
+            /* Extract sender rank from tag: sender bits sit at
+               UCC_TL_UCP_SENDER_BITS_OFFSET with width UCC_TL_UCP_SENDER_BITS */
+            ucc_rank_t peer_rank =
+                (ucc_rank_t)((info->sender_tag >> UCC_TL_UCP_SENDER_BITS_OFFSET) &
+                             UCC_MASK(UCC_TL_UCP_SENDER_BITS));
+            ucc_context_mark_rank_failed(
+                UCC_TL_CORE_CTX(TASK_TEAM(task)), peer_rank);
+        }
     }
     ucc_atomic_add32(&task->tagged.recv_completed, 1);
     ucp_request_free(request);
 }
 
 void ucc_tl_ucp_recv_completion_cb_st(void *request, ucs_status_t status,
-                                      const ucp_tag_recv_info_t *info, /* NOLINT */
+                                      const ucp_tag_recv_info_t *info,
                                       void *user_data)
 {
     ucc_tl_ucp_task_t *task = (ucc_tl_ucp_task_t *)user_data;
     if (ucc_unlikely(UCS_OK != status)) {
+        ucc_status_t ucc_st = ucs_status_to_ucc_status(status);
         tl_error(UCC_TASK_LIB(task), "failure in recv completion %s",
                  ucs_status_string(status));
-        task->super.status = ucs_status_to_ucc_status(status);
+        task->super.status = ucc_st;
+        if (ucc_st == UCC_ERR_COMM_FAILURE && info != NULL) {
+            ucc_rank_t peer_rank =
+                (ucc_rank_t)((info->sender_tag >> UCC_TL_UCP_SENDER_BITS_OFFSET) &
+                             UCC_MASK(UCC_TL_UCP_SENDER_BITS));
+            ucc_context_mark_rank_failed(
+                UCC_TL_CORE_CTX(TASK_TEAM(task)), peer_rank);
+        }
     }
     ++task->tagged.recv_completed;
     ucp_request_free(request);
