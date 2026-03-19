@@ -48,7 +48,9 @@ static int ucc_pq_st_progress(ucc_progress_queue_t *pq)
         }
         ucc_list_del(&task->list_elem);
         n_progressed++;
-        if (0 > (status = ucc_task_complete(task))) {
+        status = ucc_task_complete(task);
+        if (ucc_unlikely(status < 0 && status != UCC_ERR_COMM_FAILURE &&
+                         status != UCC_ERR_ABORTED)) {
             return status;
         }
     }
@@ -60,6 +62,24 @@ static void ucc_pq_st_enqueue(ucc_progress_queue_t *pq, ucc_coll_task_t *task)
     ucc_pq_st_t *pq_st = ucc_derived_of(pq, ucc_pq_st_t);
 
     ucc_list_add_tail(&pq_st->list, &task->list_elem);
+}
+
+static void ucc_pq_st_drain(ucc_progress_queue_t *pq, ucc_team_t *team_filter,
+                            ucc_status_t err_status)
+{
+    ucc_pq_st_t     *pq_st = ucc_derived_of(pq, ucc_pq_st_t);
+    ucc_coll_task_t *task, *tmp;
+
+    ucc_list_for_each_safe(task, tmp, &pq_st->list, list_elem) {
+        if (team_filter != NULL &&
+            task->team->params.team != team_filter) {
+            continue;
+        }
+        ucc_list_del(&task->list_elem);
+        task->status       = err_status;
+        task->super.status = err_status;
+        ucc_task_complete(task);
+    }
 }
 
 static void ucc_pq_st_finalize(ucc_progress_queue_t *pq)
@@ -88,6 +108,7 @@ ucc_status_t ucc_pq_st_init(ucc_progress_queue_t **pq)
     pq_st->super.progress = ucc_pq_st_progress;
     pq_st->super.finalize = ucc_pq_st_finalize;
     pq_st->super.is_empty = ucc_pq_st_is_empty;
+    pq_st->super.drain    = ucc_pq_st_drain;
 
     *pq                   = &pq_st->super;
     return UCC_OK;

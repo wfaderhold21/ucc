@@ -18,6 +18,11 @@
 #include "coll_score/ucc_coll_score.h"
 
 typedef struct ucc_service_coll_req ucc_service_coll_req_t;
+
+/**
+ * Team creation state machine states (existing).
+ * Used to track progress through team_create_post / team_create_test.
+ */
 typedef enum {
     UCC_TEAM_ADDR_EXCHANGE,
     UCC_TEAM_SERVICE_TEAM,
@@ -25,6 +30,17 @@ typedef enum {
     UCC_TEAM_CL_CREATE,
     UCC_TEAM_ACTIVE,
 } ucc_team_state_t;
+
+/**
+ * Team fault-recovery state (parallel to ucc_context_state_t).
+ * Starts at ACTIVE after team_create completes.
+ */
+typedef enum {
+    UCC_TEAM_FAULT_STATE_ACTIVE    = 0, /*!< Normal operation                  */
+    UCC_TEAM_FAULT_STATE_ABORTING  = 1, /*!< Abort allreduce in-flight         */
+    UCC_TEAM_FAULT_STATE_ABORTED   = 2, /*!< Allreduce done; failure map ready */
+    UCC_TEAM_FAULT_STATE_RECOVERED = 3, /*!< Failed ranks exposed via attr     */
+} ucc_team_fault_state_t;
 
 typedef struct ucc_team {
     ucc_team_state_t        state;
@@ -48,6 +64,15 @@ typedef struct ucc_team {
     ucc_topo_t             *topo;
     ucc_score_map_t        *score_map; /*< score map of CLs */
     uint32_t                seq_num;
+    /* --- Resilience fields --- */
+    ucc_team_fault_state_t  fault_state;       /*!< Fault-recovery state         */
+    ucc_rank_t             *failed_ranks;      /*!< Array of failed team ranks   */
+    ucc_rank_t              n_failed_ranks;    /*!< Length of failed_ranks array */
+    uint64_t               *failure_map;       /*!< Bitset of failed team ranks  */
+    uint64_t               *abort_sbuf;        /*!< Send buffer for abort BOR    */
+    uint64_t               *abort_rbuf;        /*!< Recv buffer for abort BOR    */
+    ucc_service_coll_req_t *abort_req;         /*!< In-flight abort allreduce    */
+    int                     abort_new_failure; /*!< New failure during allreduce */
 } ucc_team_t;
 
 /* If the bit is set then team_id is provided by the user */

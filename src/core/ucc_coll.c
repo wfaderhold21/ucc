@@ -345,6 +345,15 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_post, (request),
     ucc_coll_task_t *task = ucc_derived_of(request, ucc_coll_task_t);
     ucc_status_t status;
 
+    if (ucc_unlikely(task->bargs.team->contexts[0]->state !=
+                     UCC_CTX_STATE_ACTIVE)) {
+        return UCC_ERR_ABORTED;
+    }
+    if (ucc_unlikely(task->bargs.team->fault_state !=
+                     UCC_TEAM_FAULT_STATE_ACTIVE)) {
+        return UCC_ERR_ABORTED;
+    }
+
     if (ucc_global_config.coll_trace.log_level >= UCC_LOG_LEVEL_DEBUG) {
         ucc_rank_t rank = task->bargs.team->rank;
         if (ucc_global_config.coll_trace.log_level == UCC_LOG_LEVEL_DEBUG) {

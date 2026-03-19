@@ -10,8 +10,29 @@
 #include "ucc/api/ucc.h"
 #include "ucc_progress_queue.h"
 #include "utils/ucc_list.h"
+
+/* Forward declaration to avoid circular include with ucc_service_coll.h
+   (which pulls in ucc_tl.h before ucc_context_config_t is defined).
+   The full definition is included in ucc_context.c. */
+typedef struct ucc_service_coll_req ucc_service_coll_req_t;
 #include "utils/ucc_proc_info.h"
 #include "components/topo/ucc_topo.h"
+
+/**
+ * Resilience state of a ucc_context.  After creation, a context starts in
+ * ACTIVE.  On rank failure the application drives it through:
+ *   ACTIVE -> ABORTING (ucc_context_abort)
+ *          -> ABORTED  (ucc_context_abort_test returns UCC_OK)
+ *          -> RECOVERED (ucc_context_recover)
+ * After recovery the application may call ucc_context_shrink to build a
+ * new, smaller context from the surviving ranks.
+ */
+typedef enum {
+    UCC_CTX_STATE_ACTIVE    = 0,  /*!< Normal operation                       */
+    UCC_CTX_STATE_ABORTING  = 1,  /*!< Abort allreduce in-flight              */
+    UCC_CTX_STATE_ABORTED   = 2,  /*!< Allreduce done, failure map collected  */
+    UCC_CTX_STATE_RECOVERED = 3,  /*!< Failed ranks exposed via attr          */
+} ucc_context_state_t;
 
 #define UCC_MEM_MAP_TL_NAME_LEN 8
 
@@ -81,6 +102,18 @@ typedef struct ucc_context {
     uint64_t                 cl_flags;
     ucc_tl_team_t           *service_team;
     int32_t                  throttle_progress;
+    /* --- Resilience fields --- */
+    ucc_context_state_t      state;           /*!< Current resilience state     */
+    uint32_t                 n_teams;         /*!< Number of active teams       */
+    ucc_rank_t              *failed_ranks;    /*!< Array of failed rank indices */
+    ucc_rank_t               n_failed_ranks;  /*!< Length of failed_ranks array */
+    uint64_t                *failure_map;     /*!< Bitset of failed ctx ranks   */
+    /* abort-in-progress scratch buffers */
+    uint64_t                *abort_sbuf;      /*!< Send buffer for abort BOR    */
+    uint64_t                *abort_rbuf;      /*!< Recv buffer for abort BOR    */
+    ucc_service_coll_req_t  *abort_req;       /*!< In-flight abort allreduce    */
+    int                      abort_new_failure; /*!< New failure arrived while
+                                                     abort allreduce running    */
 } ucc_context_t;
 
 typedef struct ucc_context_config {
@@ -114,6 +147,10 @@ typedef struct ucc_mem_map_memh_t {
     int                num_tls;
     char               pack_buffer[0];
 } ucc_mem_map_memh_t;
+
+/* Mark a context-level rank as failed. Thread-safe via atomic OR.
+   Called from TL send/recv completion handlers when a comm error is detected. */
+void ucc_context_mark_rank_failed(ucc_context_t *ctx, ucc_rank_t rank);
 
 /* Internal function for context creation that takes explicit
    pointer for proc_info */

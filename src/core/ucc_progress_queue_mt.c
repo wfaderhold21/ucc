@@ -94,7 +94,9 @@ static int ucc_pq_mt_progress(ucc_progress_queue_t *pq)
             return n_progressed;
         }
         n_progressed++;
-        if (ucc_unlikely(0 > (status = ucc_task_complete(task)))) {
+        status = ucc_task_complete(task);
+        if (ucc_unlikely(status < 0 && status != UCC_ERR_COMM_FAILURE &&
+                         status != UCC_ERR_ABORTED)) {
             return status;
         }
     }
@@ -113,6 +115,66 @@ static int ucc_pq_mt_is_empty(ucc_progress_queue_t *pq) //NOLINT: pq is unused
 {
     /* lock free progress queue never use throttling */
     return 0;
+}
+
+static void ucc_pq_locked_mt_drain(ucc_progress_queue_t *pq,
+                                   ucc_team_t *team_filter,
+                                   ucc_status_t err_status)
+{
+    ucc_pq_mt_locked_t *pq_mt = ucc_derived_of(pq, ucc_pq_mt_locked_t);
+    ucc_coll_task_t    *task, *tmp;
+
+    ucc_spin_lock(&pq_mt->queue_lock);
+    ucc_list_for_each_safe(task, tmp, &pq_mt->queue, list_elem) {
+        if (team_filter != NULL &&
+            task->team->params.team != team_filter) {
+            continue;
+        }
+        ucc_list_del(&task->list_elem);
+        task->status       = err_status;
+        task->super.status = err_status;
+        ucc_spin_unlock(&pq_mt->queue_lock);
+        ucc_task_complete(task);
+        ucc_spin_lock(&pq_mt->queue_lock);
+    }
+    ucc_spin_unlock(&pq_mt->queue_lock);
+}
+
+static void ucc_pq_mt_drain(ucc_progress_queue_t *pq, ucc_team_t *team_filter,
+                            ucc_status_t err_status)
+{
+    ucc_coll_task_t *task;
+    ucc_list_link_t  skip_list;
+    ucc_coll_task_t *tmp;
+
+    if (team_filter == NULL) {
+        pq->dequeue(pq, &task);
+        while (task) {
+            task->status       = err_status;
+            task->super.status = err_status;
+            ucc_task_complete(task);
+            pq->dequeue(pq, &task);
+        }
+        return;
+    }
+
+    /* Filtered drain: dequeue all, complete matching, re-enqueue the rest */
+    ucc_list_head_init(&skip_list);
+    pq->dequeue(pq, &task);
+    while (task) {
+        if (task->team->params.team == team_filter) {
+            task->status       = err_status;
+            task->super.status = err_status;
+            ucc_task_complete(task);
+        } else {
+            ucc_list_add_tail(&skip_list, &task->list_elem);
+        }
+        pq->dequeue(pq, &task);
+    }
+    ucc_list_for_each_safe(task, tmp, &skip_list, list_elem) {
+        ucc_list_del(&task->list_elem);
+        pq->enqueue(pq, task);
+    }
 }
 
 static void ucc_pq_locked_mt_finalize(ucc_progress_queue_t *pq)
@@ -144,6 +206,7 @@ ucc_status_t ucc_pq_mt_init(ucc_progress_queue_t **pq,
         pq_mt->super.progress   = ucc_pq_mt_progress;
         pq_mt->super.finalize   = ucc_pq_mt_finalize;
         pq_mt->super.is_empty   = ucc_pq_mt_is_empty;
+        pq_mt->super.drain      = ucc_pq_mt_drain;
         *pq                     = &pq_mt->super;
     } else {
         ucc_pq_mt_locked_t *pq_mt = ucc_malloc(sizeof(*pq_mt), "pq_mt");
@@ -158,6 +221,7 @@ ucc_status_t ucc_pq_mt_init(ucc_progress_queue_t **pq,
         pq_mt->super.progress = ucc_pq_mt_progress;
         pq_mt->super.finalize = ucc_pq_locked_mt_finalize;
         pq_mt->super.is_empty = ucc_pq_locked_mt_is_empty;
+        pq_mt->super.drain    = ucc_pq_locked_mt_drain;
         *pq                   = &pq_mt->super;
     }
     return UCC_OK;

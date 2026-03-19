@@ -17,6 +17,15 @@ struct ucc_progress_queue {
     int  (*progress)(ucc_progress_queue_t *pq);
     int  (*is_empty)(ucc_progress_queue_t *pq);
     void (*finalize)(ucc_progress_queue_t *pq);
+    /**
+     * Drain queued tasks: set each task's status to @a err_status,
+     * remove it from the queue, and fire ucc_task_complete.
+     * If @a team_filter is non-NULL only tasks belonging to that team
+     * are drained; tasks from other teams are left in place.
+     * Used by ucc_context_abort (filter=NULL) / ucc_team_abort (filter=team).
+     */
+    void (*drain)(ucc_progress_queue_t *pq, ucc_team_t *team_filter,
+                  ucc_status_t err_status);
 };
 
 ucc_status_t ucc_progress_queue_init(ucc_progress_queue_t **pq,
@@ -51,6 +60,13 @@ static inline int ucc_progress_queue(ucc_progress_queue_t *pq)
 static inline int ucc_progress_queue_is_empty(ucc_progress_queue_t *pq)
 {
     return pq->is_empty(pq);
+}
+
+static inline void ucc_progress_queue_drain(ucc_progress_queue_t *pq,
+                                            ucc_team_t *team_filter,
+                                            ucc_status_t err_status)
+{
+    pq->drain(pq, team_filter, err_status);
 }
 
 void ucc_progress_queue_finalize(ucc_progress_queue_t *pq);

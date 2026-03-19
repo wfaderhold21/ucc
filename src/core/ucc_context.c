@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "ucc_context.h"
+#include "ucc_service_coll.h"
 #include "utils/ucc_proc_info.h"
 #include "components/cl/ucc_cl.h"
 #include "components/tl/ucc_tl.h"
@@ -16,6 +17,7 @@
 #include "utils/ucc_string.h"
 #include "utils/ucc_debug.h"
 #include "ucc_progress_queue.h"
+#include <string.h>
 
 static uint32_t ucc_context_seq_num = 0;
 static ucc_config_field_t ucc_context_config_table[] = {
@@ -875,6 +877,31 @@ ucc_status_t ucc_context_create_proc_info(
         goto error_ctx_create_epilog;
     }
 
+    /* Initialize resilience state */
+    ctx->state            = UCC_CTX_STATE_ACTIVE;
+    ctx->n_teams          = 0;
+    ctx->failed_ranks     = NULL;
+    ctx->n_failed_ranks   = 0;
+    ctx->abort_sbuf       = NULL;
+    ctx->abort_rbuf       = NULL;
+    ctx->abort_req        = NULL;
+    ctx->abort_new_failure = 0;
+    if (params->mask & UCC_CONTEXT_PARAM_FIELD_OOB &&
+        params->oob.n_oob_eps > 0) {
+        /* Allocate failure_map: one bit per context rank, rounded up to 64-bit words */
+        ucc_rank_t n_ranks      = (ucc_rank_t)params->oob.n_oob_eps;
+        size_t     map_words    = (n_ranks + 63) / 64;
+        ctx->failure_map = ucc_calloc(map_words, sizeof(uint64_t), "failure_map");
+        if (!ctx->failure_map) {
+            ucc_error("failed to allocate %zd bytes for failure_map",
+                      map_words * sizeof(uint64_t));
+            status = UCC_ERR_NO_MEMORY;
+            goto error_ctx_create_epilog;
+        }
+    } else {
+        ctx->failure_map = NULL;
+    }
+
     ucc_debug("created ucc context %p for lib %s: type %s, thread mode %s, oob %s, num eps %d, num ppn %d",
               ctx, lib->full_prefix,
               params->mask & UCC_CONTEXT_PARAM_FIELD_TYPE ? ucc_context_type_str(params->type) : "n/a",
@@ -979,6 +1006,13 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     ucc_free(context->all_tls.names);
     ucc_free(context->tl_ctx);
     ucc_free(context->ids.pool);
+    ucc_free(context->failure_map);
+    ucc_free(context->failed_ranks);
+    ucc_free(context->abort_sbuf);
+    ucc_free(context->abort_rbuf);
+    if (context->abort_req) {
+        ucc_service_coll_finalize(context->abort_req);
+    }
     ucc_free(context);
     return UCC_OK;
 }
@@ -1206,7 +1240,341 @@ ucc_status_t ucc_context_get_attr(
         context_attr->global_work_buffer_size = max_buffer_size;
     }
 
+    if (context_attr->mask & UCC_CONTEXT_ATTR_FIELD_FAILED_RANKS) {
+        context_attr->failed_ranks   = context->failed_ranks;
+        context_attr->n_failed_ranks = context->n_failed_ranks;
+    }
+
     return status;
+}
+
+/* =========================================================================
+ * Resilience API: abort / abort_test / recover / shrink
+ * ========================================================================= */
+
+/**
+ * Mark a context-level rank as failed.  Thread-safe via atomic OR on the
+ * failure_map word that covers the rank.
+ */
+void ucc_context_mark_rank_failed(ucc_context_t *ctx, ucc_rank_t rank)
+{
+    ucc_rank_t n_ranks;
+    size_t     word;
+    uint64_t   bitmask;
+
+    if (ucc_unlikely(!ctx->failure_map)) {
+        return;
+    }
+    /* Guard against sentinel/invalid rank values passed when peer rank is
+       unknown (e.g. from send completion callbacks) */
+    if (!(ctx->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB)) {
+        return;
+    }
+    n_ranks = (ucc_rank_t)ctx->params.oob.n_oob_eps;
+    if (ucc_unlikely(rank >= n_ranks)) {
+        /* Unknown or out-of-range rank; just signal that some failure occurred
+           so the abort allreduce will be retriggered on restart. */
+        if (ctx->state == UCC_CTX_STATE_ABORTING) {
+            ctx->abort_new_failure = 1;
+        }
+        return;
+    }
+
+    word    = rank / 64;
+    bitmask = (uint64_t)1 << (rank % 64);
+    __atomic_fetch_or(&ctx->failure_map[word], bitmask, __ATOMIC_RELAXED);
+    if (ctx->state == UCC_CTX_STATE_ABORTING) {
+        ctx->abort_new_failure = 1;
+    }
+}
+
+/**
+ * Begin abort sequence:
+ *  1. Guard: must be ACTIVE.
+ *  2. Drain all in-flight collectives with UCC_ERR_ABORTED.
+ *  3. Snapshot failure_map into abort_sbuf.
+ *  4. Post service-level allreduce BOR to gather global failure map.
+ *
+ * Requires an internal service team (ctx->service_team != NULL).
+ */
+ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
+{
+    ucc_context_t          *ctx = (ucc_context_t *)ctx_h;
+    ucc_rank_t              n_ranks;
+    size_t                  map_words;
+    ucc_subset_t            subset;
+    ucc_tl_iface_t         *tl_iface;
+    ucc_status_t            status;
+
+    if (ucc_unlikely(ctx->state != UCC_CTX_STATE_ACTIVE)) {
+        ucc_error("ucc_context_abort: context not in ACTIVE state (state=%d)",
+                  ctx->state);
+        return UCC_ERR_INVALID_STATE;
+    }
+
+    if (ucc_unlikely(!ctx->service_team)) {
+        ucc_error("ucc_context_abort: no service team available");
+        return UCC_ERR_INVALID_STATE;
+    }
+
+    ctx->state             = UCC_CTX_STATE_ABORTING;
+    ctx->abort_new_failure = 0;
+
+    /* Step 1: Drain all queued collectives */
+    ucc_progress_queue_drain(ctx->pq, NULL, UCC_ERR_ABORTED);
+
+    /* Step 2: Allocate and snapshot failure_map into abort_sbuf */
+    n_ranks   = (ucc_rank_t)ctx->params.oob.n_oob_eps;
+    map_words = (n_ranks + 63) / 64;
+
+    ctx->abort_sbuf = ucc_malloc(map_words * sizeof(uint64_t), "abort_sbuf");
+    if (!ctx->abort_sbuf) {
+        ucc_error("failed to allocate abort_sbuf");
+        return UCC_ERR_NO_MEMORY;
+    }
+    ctx->abort_rbuf = ucc_malloc(map_words * sizeof(uint64_t), "abort_rbuf");
+    if (!ctx->abort_rbuf) {
+        ucc_error("failed to allocate abort_rbuf");
+        ucc_free(ctx->abort_sbuf);
+        ctx->abort_sbuf = NULL;
+        return UCC_ERR_NO_MEMORY;
+    }
+    memcpy(ctx->abort_sbuf, ctx->failure_map, map_words * sizeof(uint64_t));
+
+    /* Step 3: Post BOR allreduce over the full context service set */
+    subset.map.type   = UCC_EP_MAP_FULL;
+    subset.map.ep_num = n_ranks;
+    subset.myrank     = ctx->rank;
+
+    tl_iface = UCC_TL_CTX_IFACE(ctx->service_ctx);
+    ctx->abort_req = ucc_malloc(sizeof(*ctx->abort_req), "abort_service_req");
+    if (!ctx->abort_req) {
+        ucc_error("failed to allocate abort service req");
+        ucc_free(ctx->abort_sbuf);
+        ucc_free(ctx->abort_rbuf);
+        ctx->abort_sbuf = NULL;
+        ctx->abort_rbuf = NULL;
+        return UCC_ERR_NO_MEMORY;
+    }
+    ctx->abort_req->team   = NULL;
+    ctx->abort_req->subset = subset;
+    ctx->abort_req->data   = NULL;
+
+    status = tl_iface->scoll.allreduce(&ctx->service_team->super,
+                                       ctx->abort_sbuf, ctx->abort_rbuf,
+                                       UCC_DT_UINT64, map_words,
+                                       UCC_OP_BOR, subset,
+                                       &ctx->abort_req->task);
+    if (status < 0) {
+        ucc_error("failed to post abort allreduce: %s",
+                  ucc_status_string(status));
+        ucc_free(ctx->abort_req);
+        ucc_free(ctx->abort_sbuf);
+        ucc_free(ctx->abort_rbuf);
+        ctx->abort_req  = NULL;
+        ctx->abort_sbuf = NULL;
+        ctx->abort_rbuf = NULL;
+        return status;
+    }
+
+    return UCC_OK;
+}
+
+/**
+ * Poll for abort allreduce completion.  If a new failure arrived during the
+ * allreduce, restart it with the updated failure_map.
+ */
+ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
+{
+    ucc_context_t  *ctx = (ucc_context_t *)ctx_h;
+    ucc_rank_t      n_ranks;
+    size_t          map_words;
+    ucc_tl_iface_t *tl_iface;
+    ucc_status_t    status;
+    ucc_rank_t      i;
+    ucc_rank_t      n_failed;
+
+    if (ucc_unlikely(ctx->state != UCC_CTX_STATE_ABORTING)) {
+        ucc_error("ucc_context_abort_test: context not in ABORTING state");
+        return UCC_ERR_INVALID_STATE;
+    }
+
+    /* If a new failure arrived, restart the allreduce */
+    if (ctx->abort_new_failure) {
+        ctx->abort_new_failure = 0;
+        n_ranks   = (ucc_rank_t)ctx->params.oob.n_oob_eps;
+        map_words = (n_ranks + 63) / 64;
+
+        /* finalize old request */
+        ucc_collective_finalize_internal(ctx->abort_req->task);
+        ucc_free(ctx->abort_req);
+        ctx->abort_req = NULL;
+
+        /* re-snapshot */
+        memcpy(ctx->abort_sbuf, ctx->failure_map,
+               map_words * sizeof(uint64_t));
+
+        /* re-post */
+        ucc_subset_t subset;
+        subset.map.type   = UCC_EP_MAP_FULL;
+        subset.map.ep_num = n_ranks;
+        subset.myrank     = ctx->rank;
+
+        tl_iface = UCC_TL_CTX_IFACE(ctx->service_ctx);
+        ctx->abort_req = ucc_malloc(sizeof(*ctx->abort_req),
+                                    "abort_service_req");
+        if (!ctx->abort_req) {
+            ucc_error("failed to re-allocate abort service req");
+            return UCC_ERR_NO_MEMORY;
+        }
+        ctx->abort_req->team   = NULL;
+        ctx->abort_req->subset = subset;
+        ctx->abort_req->data   = NULL;
+
+        status = tl_iface->scoll.allreduce(&ctx->service_team->super,
+                                           ctx->abort_sbuf, ctx->abort_rbuf,
+                                           UCC_DT_UINT64, map_words,
+                                           UCC_OP_BOR, subset,
+                                           &ctx->abort_req->task);
+        if (status < 0) {
+            ucc_error("failed to re-post abort allreduce: %s",
+                      ucc_status_string(status));
+            ucc_free(ctx->abort_req);
+            ctx->abort_req = NULL;
+            return status;
+        }
+        return UCC_INPROGRESS;
+    }
+
+    /* Test the in-flight allreduce */
+    status = ucc_collective_test(&ctx->abort_req->task->super);
+    if (status == UCC_INPROGRESS) {
+        ucc_context_progress(ctx_h);
+        return UCC_INPROGRESS;
+    }
+    if (status == UCC_ERR_COMM_FAILURE) {
+        /* A comm failure on the service allreduce itself means another rank
+           failed.  abort_new_failure should have been set by
+           ucc_context_mark_rank_failed.  Return INPROGRESS so the caller
+           retries; on the next call we'll restart with the updated map. */
+        return UCC_INPROGRESS;
+    }
+    if (status < 0) {
+        ucc_error("abort allreduce failed: %s", ucc_status_string(status));
+        return status;
+    }
+
+    /* Step 4: OR results into failure_map; build failed_ranks[] */
+    n_ranks   = (ucc_rank_t)ctx->params.oob.n_oob_eps;
+    map_words = (n_ranks + 63) / 64;
+
+    for (size_t w = 0; w < map_words; w++) {
+        ctx->failure_map[w] |= ctx->abort_rbuf[w];
+    }
+
+    /* Count failed ranks */
+    n_failed = 0;
+    for (i = 0; i < n_ranks; i++) {
+        if (ctx->failure_map[i / 64] & ((uint64_t)1 << (i % 64))) {
+            n_failed++;
+        }
+    }
+
+    /* Build failed_ranks array */
+    ucc_free(ctx->failed_ranks);
+    ctx->failed_ranks   = NULL;
+    ctx->n_failed_ranks = 0;
+    if (n_failed > 0) {
+        ctx->failed_ranks = ucc_malloc(n_failed * sizeof(ucc_rank_t),
+                                       "failed_ranks");
+        if (!ctx->failed_ranks) {
+            ucc_error("failed to allocate failed_ranks");
+            return UCC_ERR_NO_MEMORY;
+        }
+        ucc_rank_t idx = 0;
+        for (i = 0; i < n_ranks; i++) {
+            if (ctx->failure_map[i / 64] & ((uint64_t)1 << (i % 64))) {
+                ctx->failed_ranks[idx++] = i;
+            }
+        }
+        ctx->n_failed_ranks = n_failed;
+    }
+
+    /* Finalize and free abort request/buffers */
+    ucc_collective_finalize_internal(ctx->abort_req->task);
+    ucc_free(ctx->abort_req);
+    ctx->abort_req = NULL;
+    ucc_free(ctx->abort_sbuf);
+    ctx->abort_sbuf = NULL;
+    ucc_free(ctx->abort_rbuf);
+    ctx->abort_rbuf = NULL;
+
+    ctx->state = UCC_CTX_STATE_ABORTED;
+    ucc_debug("context %p abort complete: %u failed ranks", ctx, n_failed);
+    return UCC_OK;
+}
+
+/**
+ * Transition context from ABORTED to RECOVERED and expose failed_ranks
+ * via context attributes.
+ */
+ucc_status_t ucc_context_recover(ucc_context_h ctx_h)
+{
+    ucc_context_t *ctx = (ucc_context_t *)ctx_h;
+
+    if (ucc_unlikely(ctx->state != UCC_CTX_STATE_ABORTED)) {
+        ucc_error("ucc_context_recover: context not in ABORTED state");
+        return UCC_ERR_INVALID_STATE;
+    }
+
+    ctx->state = UCC_CTX_STATE_RECOVERED;
+
+    /* Expose failed_ranks via attr */
+    ctx->attr.failed_ranks   = ctx->failed_ranks;
+    ctx->attr.n_failed_ranks = ctx->n_failed_ranks;
+    ctx->attr.mask          |= UCC_CONTEXT_ATTR_FIELD_FAILED_RANKS;
+
+    ucc_debug("context %p recovered: %u failed ranks available via attr",
+              ctx, ctx->n_failed_ranks);
+    return UCC_OK;
+}
+
+/**
+ * Create a new context over the surviving ranks (shrink operation).
+ * Context must be in RECOVERED state with no active teams.
+ * Creates new context, then destroys old one.
+ */
+ucc_status_t ucc_context_shrink(ucc_context_h              ctx_h,
+                                const ucc_context_params_t *params,
+                                const ucc_context_config_h  config,
+                                ucc_context_h              *new_ctx)
+{
+    ucc_context_t *ctx = (ucc_context_t *)ctx_h;
+    ucc_status_t   status;
+
+    if (ucc_unlikely(ctx->state != UCC_CTX_STATE_RECOVERED)) {
+        ucc_error("ucc_context_shrink: context not in RECOVERED state");
+        return UCC_ERR_INVALID_STATE;
+    }
+
+    if (ucc_unlikely(ctx->n_teams != 0)) {
+        ucc_error("ucc_context_shrink: context still has %u active teams",
+                  ctx->n_teams);
+        return UCC_ERR_INVALID_STATE;
+    }
+
+    /* Create the new (smaller) context */
+    status = ucc_context_create(ctx->lib, params, config, new_ctx);
+    if (UCC_OK != status) {
+        ucc_error("ucc_context_shrink: failed to create new context: %s",
+                  ucc_status_string(status));
+        return status;
+    }
+
+    /* Destroy the old context */
+    ucc_context_destroy(ctx_h);
+
+    return UCC_OK;
 }
 
 ucc_status_t ucc_mem_map_import(ucc_context_h        context,
