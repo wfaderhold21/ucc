@@ -794,6 +794,11 @@ ucc_status_t ucc_team_abort_test(ucc_team_h team)
     }
 
     if (team->abort_new_failure) {
+        /* Only finalize and restart once the running BOR has completed. */
+        if (team->abort_req->task->super.status == UCC_INPROGRESS) {
+            ucc_context_progress(ctx);
+            return UCC_INPROGRESS;
+        }
         team->abort_new_failure = 0;
         n_ranks   = team->size;
         map_words = (n_ranks + 63) / 64;

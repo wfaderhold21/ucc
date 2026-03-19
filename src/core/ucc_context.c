@@ -1272,11 +1272,11 @@ void ucc_context_mark_rank_failed(ucc_context_t *ctx, ucc_rank_t rank)
     }
     n_ranks = (ucc_rank_t)ctx->params.oob.n_oob_eps;
     if (ucc_unlikely(rank >= n_ranks)) {
-        /* Unknown or out-of-range rank; just signal that some failure occurred
-           so the abort allreduce will be retriggered on restart. */
-        if (ctx->state == UCC_CTX_STATE_ABORTING) {
-            ctx->abort_new_failure = 1;
-        }
+        /* Unknown or out-of-range rank: record that some failure occurred
+           regardless of current state.  If an abort allreduce is in flight
+           the restart logic will pick this up; if abort has not started yet
+           the flag survives until abort_test sees it. */
+        ctx->abort_new_failure = 1;
         return;
     }
 
@@ -1317,8 +1317,9 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
         return UCC_ERR_INVALID_STATE;
     }
 
-    ctx->state             = UCC_CTX_STATE_ABORTING;
-    ctx->abort_new_failure = 0;
+    ctx->state = UCC_CTX_STATE_ABORTING;
+    /* Do not clear abort_new_failure: a pre-abort unknown-rank failure may
+       have already set it and we want abort_test to re-snapshot on restart. */
 
     /* Step 1: Drain all queued collectives */
     ucc_progress_queue_drain(ctx->pq, NULL, UCC_ERR_ABORTED);
@@ -1330,6 +1331,7 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
     ctx->abort_sbuf = ucc_malloc(map_words * sizeof(uint64_t), "abort_sbuf");
     if (!ctx->abort_sbuf) {
         ucc_error("failed to allocate abort_sbuf");
+        ctx->state = UCC_CTX_STATE_ACTIVE;
         return UCC_ERR_NO_MEMORY;
     }
     ctx->abort_rbuf = ucc_malloc(map_words * sizeof(uint64_t), "abort_rbuf");
@@ -1337,6 +1339,7 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
         ucc_error("failed to allocate abort_rbuf");
         ucc_free(ctx->abort_sbuf);
         ctx->abort_sbuf = NULL;
+        ctx->state = UCC_CTX_STATE_ACTIVE;
         return UCC_ERR_NO_MEMORY;
     }
     memcpy(ctx->abort_sbuf, ctx->failure_map, map_words * sizeof(uint64_t));
@@ -1354,6 +1357,7 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
         ucc_free(ctx->abort_rbuf);
         ctx->abort_sbuf = NULL;
         ctx->abort_rbuf = NULL;
+        ctx->state      = UCC_CTX_STATE_ACTIVE;
         return UCC_ERR_NO_MEMORY;
     }
     ctx->abort_req->team   = NULL;
@@ -1374,6 +1378,7 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
         ctx->abort_req  = NULL;
         ctx->abort_sbuf = NULL;
         ctx->abort_rbuf = NULL;
+        ctx->state      = UCC_CTX_STATE_ACTIVE;
         return status;
     }
 
@@ -1401,6 +1406,14 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
 
     /* If a new failure arrived, restart the allreduce */
     if (ctx->abort_new_failure) {
+        /* Only finalize and restart once the running BOR has actually
+           completed. abort_new_failure can be set by mark_rank_failed during
+           a progress call before the task's own status is updated, so the
+           task may still be UCC_INPROGRESS here. */
+        if (ctx->abort_req->task->super.status == UCC_INPROGRESS) {
+            ucc_context_progress(ctx_h);
+            return UCC_INPROGRESS;
+        }
         ctx->abort_new_failure = 0;
         n_ranks   = (ucc_rank_t)ctx->params.oob.n_oob_eps;
         map_words = (n_ranks + 63) / 64;
@@ -1453,10 +1466,11 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
         return UCC_INPROGRESS;
     }
     if (status == UCC_ERR_COMM_FAILURE) {
-        /* A comm failure on the service allreduce itself means another rank
-           failed.  abort_new_failure should have been set by
-           ucc_context_mark_rank_failed.  Return INPROGRESS so the caller
-           retries; on the next call we'll restart with the updated map. */
+        /* A rank failed during the abort allreduce.  Guarantee a restart
+           even if mark_rank_failed was never called with a valid rank (e.g.
+           unknown-peer errors set abort_new_failure but left failure_map
+           empty).  The restart logic will re-snapshot and repost. */
+        ctx->abort_new_failure = 1;
         return UCC_INPROGRESS;
     }
     if (status < 0) {
