@@ -973,10 +973,10 @@ typedef struct ucc_context_attr {
     ucc_context_addr_h      ctx_addr;
     ucc_context_addr_len_t  ctx_addr_len;
     uint64_t                global_work_buffer_size;
-    ucc_rank_t             *failed_ranks;    /*!< Array of ranks that have failed (valid
+    uint32_t               *failed_ranks;    /*!< Array of ranks that have failed (valid
                                                   when UCC_CONTEXT_ATTR_FIELD_FAILED_RANKS
                                                   is set) */
-    ucc_rank_t              n_failed_ranks;  /*!< Number of failed ranks in failed_ranks */
+    uint32_t                n_failed_ranks;  /*!< Number of failed ranks in failed_ranks */
 } ucc_context_attr_t;
 
 /**
