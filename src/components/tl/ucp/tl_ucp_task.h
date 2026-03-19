@@ -223,6 +223,7 @@ typedef struct ucc_tl_ucp_task {
             uint8_t                *peer_done;
             double                 *peer_rtt;
             uint8_t                *peer_skip;
+            size_t                 *peer_offset;
         } alltoall_onesided;
         char                        plugin_data[UCC_TL_UCP_TASK_PLUGIN_MAX_DATA];
     };
