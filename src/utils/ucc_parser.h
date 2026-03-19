@@ -207,7 +207,7 @@ ucc_print_flags_to_ucs_print_flags(ucc_config_print_flags_t flags)
         ucs_flags |= UCS_CONFIG_PRINT_HIDDEN;
     }
 
-    return (ucs_config_print_flags_t)ucs_flags;
+    return (ucs_config_print_flags_t)ucs_flags; // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
 }
 
 static inline void ucc_config_parser_print_opts(FILE *stream, const char *title,

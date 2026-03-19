@@ -145,7 +145,6 @@ static void ucc_pq_mt_drain(ucc_progress_queue_t *pq, ucc_team_t *team_filter,
 {
     ucc_coll_task_t *task;
     ucc_list_link_t  skip_list;
-    ucc_coll_task_t *tmp;
 
     if (team_filter == NULL) {
         pq->dequeue(pq, &task);
@@ -158,8 +157,11 @@ static void ucc_pq_mt_drain(ucc_progress_queue_t *pq, ucc_team_t *team_filter,
         return;
     }
 
-    /* Filtered drain: dequeue all, complete matching, re-enqueue the rest */
-    ucc_list_head_init(&skip_list);
+    /* Filtered drain: dequeue all, complete matching, re-enqueue the rest.
+     * Explicit field assignment (vs ucc_list_head_init) so the static
+     * analyzer can track the pointer values. */
+    skip_list.next = &skip_list;
+    skip_list.prev = &skip_list;
     pq->dequeue(pq, &task);
     while (task) {
         if (task->team->params.team == team_filter) {
@@ -171,7 +173,8 @@ static void ucc_pq_mt_drain(ucc_progress_queue_t *pq, ucc_team_t *team_filter,
         }
         pq->dequeue(pq, &task);
     }
-    ucc_list_for_each_safe(task, tmp, &skip_list, list_elem) {
+    while (!ucc_list_is_empty(&skip_list)) {
+        task = ucc_list_head(&skip_list, ucc_coll_task_t, list_elem);
         ucc_list_del(&task->list_elem);
         pq->enqueue(pq, task);
     }

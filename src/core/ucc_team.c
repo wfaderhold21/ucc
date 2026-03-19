@@ -743,16 +743,31 @@ ucc_status_t ucc_team_abort(ucc_team_h team)
     team->abort_sbuf = ucc_malloc(map_words * sizeof(uint64_t), "team_abort_sbuf");
     if (!team->abort_sbuf) {
         ucc_error("failed to allocate team abort_sbuf");
+        team->fault_state = UCC_TEAM_FAULT_STATE_ACTIVE;
         return UCC_ERR_NO_MEMORY;
     }
     team->abort_rbuf = ucc_malloc(map_words * sizeof(uint64_t), "team_abort_rbuf");
     if (!team->abort_rbuf) {
         ucc_error("failed to allocate team abort_rbuf");
         ucc_free(team->abort_sbuf);
-        team->abort_sbuf = NULL;
+        team->abort_sbuf  = NULL;
+        team->fault_state = UCC_TEAM_FAULT_STATE_ACTIVE;
         return UCC_ERR_NO_MEMORY;
     }
+
+    /* Seed from the context failure_map so that ranks already known to have
+       failed before ucc_team_abort() was called are included in the first BOR
+       rather than discovered only on a COMM_FAILURE retry.
+       ctx->failure_map may be NULL for exclusive contexts (no context OOB). */
     memcpy(team->abort_sbuf, team->failure_map, map_words * sizeof(uint64_t));
+    if (ctx->failure_map) {
+        for (ucc_rank_t tr = 0; tr < n_ranks; tr++) {
+            ucc_rank_t cr = ucc_get_ctx_rank(team, tr);
+            if (ctx->failure_map[cr / 64] & ((uint64_t)1 << (cr % 64))) {
+                team->abort_sbuf[tr / 64] |= ((uint64_t)1 << (tr % 64));
+            }
+        }
+    }
 
     subset.map.type   = UCC_EP_MAP_FULL;
     subset.map.ep_num = n_ranks;
@@ -766,8 +781,9 @@ ucc_status_t ucc_team_abort(ucc_team_h team)
                   ucc_status_string(status));
         ucc_free(team->abort_sbuf);
         ucc_free(team->abort_rbuf);
-        team->abort_sbuf = NULL;
-        team->abort_rbuf = NULL;
+        team->abort_sbuf  = NULL;
+        team->abort_rbuf  = NULL;
+        team->fault_state = UCC_TEAM_FAULT_STATE_ACTIVE;
         return status;
     }
 

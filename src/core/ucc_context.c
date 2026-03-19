@@ -360,7 +360,7 @@ void ucc_context_config_print(const ucc_context_config_h config, FILE *stream,
             config->cl_cfgs[i],
             config->lib->cl_libs[i]->iface->cl_context_config.table,
             config->lib->cl_libs[i]->iface->cl_context_config.prefix,
-            config->lib->full_prefix, (ucc_config_print_flags_t)flags);
+            config->lib->full_prefix, (ucc_config_print_flags_t)flags); // NOLINT(clang-analyzer-optin.core.EnumCastOutOfRange)
     }
 }
 
@@ -1466,10 +1466,16 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
         return UCC_INPROGRESS;
     }
     if (status == UCC_ERR_COMM_FAILURE) {
-        /* A rank failed during the abort allreduce.  Guarantee a restart
-           even if mark_rank_failed was never called with a valid rank (e.g.
-           unknown-peer errors set abort_new_failure but left failure_map
-           empty).  The restart logic will re-snapshot and repost. */
+        /* A rank failed during the abort allreduce.  Set abort_new_failure
+           so the restart path re-snapshots and reposts.
+           Phase 1 limitation: TL UCP completion callbacks report failures
+           with UCC_RANK_MAX (unknown rank) because endpoints don't carry a
+           rank back-reference, so failure_map may not be updated with the
+           dead rank's identity.  The restart therefore reposts over the full
+           membership and may COMM_FAILURE again for true hardware failures.
+           Resolving this requires an endpoint->rank mapping in the TL layer
+           (Phase 2).  For Phase 1 (simulated failures with all ranks alive)
+           the BOR always succeeds among participating ranks. */
         ctx->abort_new_failure = 1;
         return UCC_INPROGRESS;
     }
@@ -1838,7 +1844,7 @@ ucc_status_t ucc_mem_map_export(ucc_context_h         context,
                    &local_memh->tl_h[i].packed_size, sizeof(size_t));
             offset += sizeof(size_t);
             memcpy(PTR_OFFSET(exported_memh->pack_buffer, offset),
-                   packed_buffers[i], local_memh->tl_h[i].packed_size);
+                   packed_buffers[i], local_memh->tl_h[i].packed_size); // NOLINT(clang-analyzer-security.ArrayBound)
             ucc_free(packed_buffers[i]);
             offset += local_memh->tl_h[i].packed_size;
         }

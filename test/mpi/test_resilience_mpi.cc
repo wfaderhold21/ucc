@@ -59,7 +59,7 @@ static ucc_status_t oob_allgather(void *sbuf, void *rbuf, size_t msglen,
     MPI_Request mpi_req;
     MPI_Iallgather(sbuf, msglen, MPI_BYTE, rbuf, msglen, MPI_BYTE, comm,
                    &mpi_req);
-    *req = (void *)(uintptr_t)mpi_req;
+    *req = (void *)(uintptr_t)mpi_req; // NOLINT(clang-analyzer-optin.mpi.MPI-Checker)
     return UCC_OK;
 }
 
@@ -137,8 +137,7 @@ static ucc_team_h create_team(ucc_context_h ctx, MPI_Comm comm)
 /* Destroy a UCC team (polls until done). */
 static void destroy_team(ucc_team_h team, ucc_context_h ctx)
 {
-    ucc_status_t st;
-    while (UCC_INPROGRESS == (st = ucc_team_destroy(team))) {
+    while (UCC_INPROGRESS == ucc_team_destroy(team)) {
         ucc_context_progress(ctx);
     }
 }
