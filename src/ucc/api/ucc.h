@@ -868,7 +868,8 @@ enum ucc_context_attr_field {
     UCC_CONTEXT_ATTR_FIELD_SYNC_TYPE          = UCC_BIT(1),
     UCC_CONTEXT_ATTR_FIELD_CTX_ADDR           = UCC_BIT(2),
     UCC_CONTEXT_ATTR_FIELD_CTX_ADDR_LEN       = UCC_BIT(3),
-    UCC_CONTEXT_ATTR_FIELD_WORK_BUFFER_SIZE   = UCC_BIT(4)
+    UCC_CONTEXT_ATTR_FIELD_WORK_BUFFER_SIZE   = UCC_BIT(4),
+    UCC_CONTEXT_ATTR_FIELD_FAILED_RANKS       = UCC_BIT(5)  /*!< Set of ranks that have failed */
 };
 
 /**
@@ -972,6 +973,10 @@ typedef struct ucc_context_attr {
     ucc_context_addr_h      ctx_addr;
     ucc_context_addr_len_t  ctx_addr_len;
     uint64_t                global_work_buffer_size;
+    ucc_rank_t             *failed_ranks;    /*!< Array of ranks that have failed (valid
+                                                  when UCC_CONTEXT_ATTR_FIELD_FAILED_RANKS
+                                                  is set) */
+    ucc_rank_t              n_failed_ranks;  /*!< Number of failed ranks in failed_ranks */
 } ucc_context_attr_t;
 
 /**
@@ -1183,6 +1188,87 @@ ucc_status_t ucc_context_destroy(ucc_context_h context);
 
 ucc_status_t ucc_context_get_attr(ucc_context_h context,
                                   ucc_context_attr_t *context_attr);
+
+/**
+ *  @ingroup UCC_CONTEXT
+ *
+ *  @brief Initiate collective drain on a context after rank failure.
+ *
+ *  Transitions the context to ABORTING state and drains all outstanding
+ *  collectives with UCC_ERR_ABORTED. Then launches a service-level BOR
+ *  allreduce to gather the global failure map.
+ *
+ *  @return UCC_OK on success, UCC_ERR_INVALID_STATE if not in ACTIVE state.
+ */
+ucc_status_t ucc_context_abort(ucc_context_h ctx);
+
+/**
+ *  @ingroup UCC_CONTEXT
+ *
+ *  @brief Test for completion of the abort allreduce.
+ *
+ *  Must be called repeatedly (poll loop) after ucc_context_abort until it
+ *  returns UCC_OK, which indicates the global failure map has been gathered.
+ *
+ *  @return UCC_OK when abort is complete, UCC_INPROGRESS when still running,
+ *          UCC_ERR_INVALID_STATE if not in ABORTING state.
+ */
+ucc_status_t ucc_context_abort_test(ucc_context_h ctx);
+
+/**
+ *  @ingroup UCC_CONTEXT
+ *
+ *  @brief Transition context to RECOVERED state.
+ *
+ *  Exposes the failed_ranks array via context attributes.
+ *
+ *  @return UCC_OK on success, UCC_ERR_INVALID_STATE if not in ABORTED state.
+ */
+ucc_status_t ucc_context_recover(ucc_context_h ctx);
+
+/**
+ *  @ingroup UCC_CONTEXT
+ *
+ *  @brief Create a new context over the surviving (non-failed) ranks.
+ *
+ *  Can only be called when context is in RECOVERED state and has no
+ *  active teams. Creates a new context using the provided params/config,
+ *  then destroys the old context.
+ *
+ *  @return UCC_OK on success with *new_ctx set to the new context handle.
+ */
+ucc_status_t ucc_context_shrink(ucc_context_h              ctx,
+                                const ucc_context_params_t *params,
+                                const ucc_context_config_h  config,
+                                ucc_context_h              *new_ctx);
+
+/**
+ *  @ingroup UCC_TEAM
+ *
+ *  @brief Initiate collective drain on a team after rank failure.
+ *
+ *  @return UCC_OK on success, UCC_ERR_INVALID_STATE if not in ACTIVE state.
+ */
+ucc_status_t ucc_team_abort(ucc_team_h team);
+
+/**
+ *  @ingroup UCC_TEAM
+ *
+ *  @brief Test for completion of the team abort allreduce.
+ *
+ *  @return UCC_OK when complete, UCC_INPROGRESS when running,
+ *          UCC_ERR_INVALID_STATE if not in ABORTING state.
+ */
+ucc_status_t ucc_team_abort_test(ucc_team_h team);
+
+/**
+ *  @ingroup UCC_TEAM
+ *
+ *  @brief Transition team to RECOVERED state.
+ *
+ *  @return UCC_OK on success, UCC_ERR_INVALID_STATE if not in ABORTED state.
+ */
+ucc_status_t ucc_team_recover(ucc_team_h team);
 
 /*
  * *************************************************************

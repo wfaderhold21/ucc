@@ -41,6 +41,9 @@ typedef enum {
     UCC_ERR_NOT_FOUND                   =   -7,
     UCC_ERR_TIMED_OUT                   =   -8,
     UCC_ERR_IO_ERROR                    =   -9,
+    UCC_ERR_COMM_FAILURE                =  -10, /*!< Remote rank unreachable or timed out */
+    UCC_ERR_ABORTED                     =  -11, /*!< Collective drained by ucc_context_abort */
+    UCC_ERR_INVALID_STATE               =  -12, /*!< Call invalid in current context/team state */
     UCC_ERR_LAST                        = -100,
 } ucc_status_t;
 
