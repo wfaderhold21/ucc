@@ -14,6 +14,7 @@
 #include "tl_ucp_ep.h"
 #include "utils/ucc_compiler_def.h"
 #include "tl_ucp_task.h"
+#include "tl_ucp_am.h"
 
 #define UCC_TL_UCP_MAKE_TAG(_user_tag, _tag, _rank, _id, _scope_id, _scope)    \
     ((((uint64_t) (_user_tag)) << UCC_TL_UCP_USER_TAG_BITS_OFFSET) |           \
@@ -733,5 +734,39 @@ static inline ucc_status_t ucc_tl_ucp_atomic_inc(void *     target,
             goto _label;                                                       \
         }                                                                      \
     } while (0)
+
+static inline ucc_status_t
+ucc_tl_ucp_am_barrier_send(ucc_rank_t peer, ucc_tl_ucp_team_t *team,
+                            ucc_tl_ucp_task_t *task)
+{
+    ucc_tl_ucp_am_barrier_hdr_t hdr = {
+        .team_id  = (uint16_t)team->super.super.params.id,
+        .coll_tag = task->tagged.tag,
+    };
+    ucp_request_param_t params = {
+        .op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK |
+                        UCP_OP_ATTR_FIELD_USER_DATA,
+        .cb.send      = UCC_TL_UCP_TEAM_CTX(team)->sendrecv_cbs.send_cb,
+        .user_data    = task,
+    };
+    ucs_status_ptr_t req;
+    ucc_status_t     status;
+    ucp_ep_h         ep;
+
+    status = ucc_tl_ucp_get_ep(team, peer, &ep);
+    if (ucc_unlikely(UCC_OK != status)) {
+        return status;
+    }
+    req = ucp_am_send_nbx(ep, UCC_TL_UCP_AM_ID_BARRIER,
+                          &hdr, sizeof(hdr), NULL, 0, &params);
+    if (ucc_unlikely(UCS_PTR_IS_ERR(req))) {
+        return ucs_status_to_ucc_status(UCS_PTR_STATUS(req));
+    }
+    task->tagged.send_posted++;
+    if (req == NULL) {
+        task->tagged.send_completed++;
+    }
+    return UCC_OK;
+}
 
 #endif

@@ -12,6 +12,7 @@
 #include "utils/ucc_mpool.h"
 #include "tl_ucp_ep_hash.h"
 #include "schedule/ucc_schedule_pipelined.h"
+#include "utils/ucc_list.h"
 #include <ucp/api/ucp.h>
 #include <ucs/memory/memory_type.h>
 #include "core/ucc_service_coll.h"
@@ -179,6 +180,7 @@ typedef struct ucc_tl_ucp_team {
     ucc_rank_t                 opt_radix; /* generic opt radix */
     ucc_rank_t                 opt_radix_host; /* host specific opt radix */
     ucc_ring_pattern_t         *cuda_ring;
+    ucc_list_link_t            active_barrier_tasks;
 } ucc_tl_ucp_team_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_team_t, ucc_base_context_t *,
                   const ucc_base_team_params_t *);
@@ -236,6 +238,8 @@ typedef struct ucc_tl_ucp_context {
         ucc_tl_ucp_copy_test_fn_t     test;
         ucc_tl_ucp_copy_finalize_fn_t finalize;
     } copy;
+    ucc_tl_ucp_team_t **teams;
+    int                  n_teams;
 } ucc_tl_ucp_context_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_context_t, const ucc_base_context_params_t *,
                     const ucc_base_config_t *);

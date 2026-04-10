@@ -25,3 +25,16 @@ ucc_status_t ucc_tl_ucp_barrier_init(ucc_tl_ucp_task_t *task)
     task->super.progress = ucc_tl_ucp_barrier_knomial_progress;
     return UCC_OK;
 }
+
+ucc_status_t ucc_tl_ucp_barrier_knomial_init(ucc_base_coll_args_t *coll_args,
+                                             ucc_base_team_t      *team,
+                                             ucc_coll_task_t     **task_h)
+{
+    ucc_tl_ucp_task_t *task;
+    ucc_status_t       status;
+
+    task    = ucc_tl_ucp_init_task(coll_args, team);
+    status  = ucc_tl_ucp_barrier_init(task);
+    *task_h = &task->super;
+    return status;
+}

@@ -16,6 +16,7 @@
 #include <limits.h>
 
 #include "tl_ucp_sendrecv.h"
+#include "tl_ucp_am.h"
 
 #define UCP_CHECK(function, msg, go, ctx)                                      \
     status = function;                                                         \
@@ -136,6 +137,49 @@ err_cfg_read:
         ucc_free(service_prefix);
     }
     return ucc_status;
+}
+
+static ucc_tl_ucp_team_t *
+ucc_tl_ucp_context_find_team(ucc_tl_ucp_context_t *ctx, uint16_t team_id)
+{
+    int i;
+
+    for (i = 0; i < ctx->n_teams; i++) {
+        if (ctx->teams[i]->super.super.params.id == team_id) {
+            return ctx->teams[i];
+        }
+    }
+    return NULL;
+}
+
+static ucs_status_t
+ucc_tl_ucp_am_barrier_handler(void *arg, const void *header,
+                               size_t header_length, void *data,
+                               size_t length,
+                               const ucp_am_recv_param_t *param)
+{
+    ucc_tl_ucp_context_t              *ctx  = (ucc_tl_ucp_context_t *)arg;
+    const ucc_tl_ucp_am_barrier_hdr_t *hdr  =
+        (const ucc_tl_ucp_am_barrier_hdr_t *)header;
+    ucc_tl_ucp_team_t                 *team;
+    ucc_tl_ucp_task_t                 *task;
+
+    (void)header_length;
+    (void)data;
+    (void)length;
+    (void)param;
+
+    team = ucc_tl_ucp_context_find_team(ctx, hdr->team_id);
+    if (ucc_unlikely(!team)) {
+        return UCS_ERR_NO_ELEM;
+    }
+    ucc_list_for_each(task, &team->active_barrier_tasks, barrier.list_elem) {
+        if (task->tagged.tag == hdr->coll_tag) {
+            task->barrier.recv_count++;
+            return UCS_OK;
+        }
+    }
+    return UCS_ERR_NO_ELEM;
 }
 
 UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
@@ -283,6 +327,20 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     self->worker.ucp_worker     = ucp_worker;
     self->worker.worker_address = NULL;
 
+    {
+        ucp_am_handler_param_t am_param;
+
+        am_param.field_mask = UCP_AM_HANDLER_PARAM_FIELD_ID  |
+                              UCP_AM_HANDLER_PARAM_FIELD_CB  |
+                              UCP_AM_HANDLER_PARAM_FIELD_ARG;
+        am_param.id         = UCC_TL_UCP_AM_ID_BARRIER;
+        am_param.cb         = ucc_tl_ucp_am_barrier_handler;
+        am_param.arg        = self;
+        UCP_CHECK(ucp_worker_set_am_recv_handler(ucp_worker, &am_param),
+                  "failed to register barrier AM handler", err_thread_mode,
+                  self);
+    }
+
     self->topo_required = (((lib->cfg.use_topo == UCC_TRY ||
                              lib->cfg.use_topo == UCC_AUTO) &&
                             (self->super.super.ucc_context->params.mask &
@@ -310,6 +368,8 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     self->remote_info  = NULL;
     self->n_rinfo_segs = 0;
     self->rkeys        = NULL;
+    self->teams        = NULL;
+    self->n_teams      = 0;
     if (params->params.mask & UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS &&
         params->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
         ucc_status = ucc_tl_ucp_ctx_remote_populate(
@@ -470,6 +530,10 @@ static inline void ucc_tl_ucp_worker_cleanup(ucc_tl_ucp_worker_t worker)
 UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
 {
     tl_debug(self->super.super.lib, "finalizing tl context: %p", self);
+    if (self->teams) {
+        ucc_free(self->teams);
+        self->teams = NULL;
+    }
     if (self->remote_info) {
         ucc_tl_ucp_rinfo_destroy(self);
     }

@@ -49,9 +49,9 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
 {
     ucc_tl_ucp_context_t *ctx = ucc_derived_of(tl_context,
                                                ucc_tl_ucp_context_t);
-    ucc_kn_radix_t max_radix, min_radix;
-    ucc_rank_t            tsize;
-    ucc_status_t   status;
+    ucc_kn_radix_t         max_radix, min_radix;
+    ucc_rank_t             tsize;
+    ucc_status_t           status;
 
     UCC_CLASS_CALL_SUPER_INIT(ucc_tl_team_t, &ctx->super, params);
     /* TODO: init based on ctx settings and on params: need to check
@@ -64,6 +64,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
     self->opt_radix       = UCC_UUNITS_AUTO_RADIX;
     self->opt_radix_host  = UCC_UUNITS_AUTO_RADIX;
     self->cuda_ring       = NULL;
+    ucc_list_head_init(&self->active_barrier_tasks);
 
     status = ucc_config_clone_table(&UCC_TL_UCP_TEAM_LIB(self)->cfg, &self->cfg,
                                     ucc_tl_ucp_lib_config_table);
@@ -155,7 +156,16 @@ UCC_CLASS_DEFINE(ucc_tl_ucp_team_t, ucc_tl_team_t);
 
 ucc_status_t ucc_tl_ucp_team_destroy(ucc_base_team_t *tl_team)
 {
-    ucc_tl_ucp_team_t *team = ucc_derived_of(tl_team, ucc_tl_ucp_team_t);
+    ucc_tl_ucp_team_t    *team = ucc_derived_of(tl_team, ucc_tl_ucp_team_t);
+    ucc_tl_ucp_context_t *ctx  = UCC_TL_UCP_TEAM_CTX(team);
+    int                   i;
+
+    for (i = 0; i < ctx->n_teams; i++) {
+        if (ctx->teams[i] == team) {
+            ctx->teams[i] = ctx->teams[--ctx->n_teams];
+            break;
+        }
+    }
 
     if (team->cuda_ring) {
         ucc_ring_pattern_destroy(team->cuda_ring);
@@ -216,6 +226,7 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
 {
     ucc_tl_ucp_team_t *   team = ucc_derived_of(tl_team, ucc_tl_ucp_team_t);
     ucc_tl_ucp_context_t *ctx  = UCC_TL_UCP_TEAM_CTX(team);
+    ucc_tl_ucp_team_t   **new_teams;
     int                   i;
     ucc_status_t          status;
 
@@ -245,6 +256,17 @@ ucc_status_t ucc_tl_ucp_team_create_test(ucc_base_team_t *tl_team)
         }
     }
 
+    new_teams = ucc_realloc(ctx->teams,
+                            (ctx->n_teams + 1) * sizeof(*ctx->teams),
+                            "tl_ucp_teams");
+    if (ucc_unlikely(!new_teams)) {
+        tl_error(tl_team->context->lib,
+                 "failed to allocate memory for teams array");
+        return UCC_ERR_NO_MEMORY;
+    }
+    ctx->teams               = new_teams;
+    ctx->teams[ctx->n_teams] = team;
+    ctx->n_teams++;
     tl_debug(tl_team->context->lib, "initialized tl team: %p", team);
     team->status = UCC_OK;
     return UCC_OK;

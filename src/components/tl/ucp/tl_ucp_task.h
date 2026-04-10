@@ -60,6 +60,9 @@ typedef struct ucc_tl_ucp_task {
         struct {
             int                     phase;
             ucc_knomial_pattern_t   p;
+            uint32_t                recv_count;
+            uint32_t                recv_expected;
+            ucc_list_link_t         list_elem;
         } barrier;
         struct {
             int                     phase;
