@@ -156,9 +156,6 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     ucc_rank_t         grank       = UCC_TL_TEAM_RANK(team);
     ucc_rank_t         gsize       = UCC_TL_TEAM_SIZE(team);
     int64_t            npolls      = task->alltoall_onesided.npolls;
-    uint32_t           ntokens     = task->alltoall_onesided.tokens;
-    uint32_t          *posted      = &task->onesided.put_posted;
-    uint32_t          *completed   = &task->onesided.put_completed;
     ucc_mem_map_mem_h *dst_memh    = TASK_ARGS(task).dst_memh.global_memh;
     uint8_t           *peer_done   = task->alltoall_onesided.peer_done;
     uint32_t          *peer_cmp    = &task->alltoall_onesided.peers_completed;
