@@ -172,6 +172,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     double             stime;
     double             ctime;
     double             est_time;
+    int64_t            polls;
     ucp_ep_h                     ep;
     ucp_ep_evaluate_perf_param_t perf_param;
     ucp_ep_evaluate_perf_attr_t  perf_attr;
@@ -182,7 +183,30 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
                    ? TASK_ARGS(task).src_memh.global_memh[grank]
                    : TASK_ARGS(task).src_memh.local_memh;
 
-    for (; *peer_cmp < gsize; peer = (peer + 1) % gsize) {
+    /* Drain outstanding operations from a previous yield. */
+    if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+        polls = 0;
+        while (polls++ < npolls) {
+            ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
+            if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                break;
+            }
+        }
+        if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+            return;
+        }
+        /* Mark peers whose transfer completed (offset reached nelems). */
+        for (peer = 0; peer < gsize; peer++) {
+            if (!peer_done[peer] && peer_offset[peer] >= nelems) {
+                peer_offset[peer] = 0;
+                peer_done[peer]   = 1;
+                (*peer_cmp)++;
+            }
+        }
+    }
+
+    for (peer = (grank + 1) % gsize; *peer_cmp < gsize;
+         peer = (peer + 1) % gsize) {
         if (peer_done[peer]) {
             continue;
         }
@@ -192,8 +216,8 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
         if (peer_skip[peer] < 5) {
             /*
              * Probe: send one segment and measure RTT to detect congestion.
-             * Done on every visit (including after a yield from the bulk loop)
-             * so congestion is re-checked after other peers have been served.
+             * Done on every visit (including after a skip) so congestion is
+             * re-checked after other peers have been served.
              */
             chunk = ucc_min(SEG_SIZE, nelems - offset);
             stime = ucc_get_time() * 1e6;
@@ -204,10 +228,22 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
                                   team, task),
                 task, out);
             UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task, out);
-            /* Spin until probe + flush complete for an accurate RTT measurement */
-            while (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+
+            /* Bounded poll for probe completion. */
+            polls = 0;
+            while (polls++ < npolls) {
                 ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
+                if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                    break;
+                }
             }
+            if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                /* Probe didn't complete in time — treat as congested. */
+                peer_offset[peer] = offset + chunk;
+                peer_skip[peer]++;
+                return;
+            }
+
             ctime = ucc_get_time() * 1e6;
             if (peer_rtt[peer] > 0.0) {
                 peer_rtt[peer] = (1.0 - alpha) * peer_rtt[peer] +
@@ -227,14 +263,13 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
             est_time = perf_attr.estimated_time * 2e6;
 
             if (offset < nelems && should_skip_peer(peer, task, est_time)) {
-                /* Peer is congested: defer remaining data, serve other peers first */
+                /* Peer is congested: defer remaining data, serve others. */
                 peer_skip[peer]++;
                 peer_offset[peer] = offset;
                 continue;
             }
 
-            /* Not congested (or this was the last segment): send all
-             * remaining data in one put and flush. */
+            /* Not congested (or last segment): send remaining in one put. */
             if (offset < nelems) {
                 UCPCHECK_GOTO(
                     ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
@@ -244,12 +279,20 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
                     task, out);
                 UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task,
                               out);
-                while (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                polls = 0;
+                while (polls++ < npolls) {
                     ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
+                    if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                        break;
+                    }
+                }
+                if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                    peer_offset[peer] = nelems;
+                    return;
                 }
             }
         } else {
-            /* Gave up on CA: send all remaining data in one shot */
+            /* Gave up on CA: send all remaining data in one shot. */
             UCPCHECK_GOTO(
                 ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
                                   PTR_OFFSET(dest, grank * nelems + offset),
@@ -257,9 +300,16 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
                                   dst_memh, team, task),
                 task, out);
             UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task, out);
-            /* Spin to drain before next probe, avoiding RTT contamination */
-            while (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+            polls = 0;
+            while (polls++ < npolls) {
                 ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
+                if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                    break;
+                }
+            }
+            if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                peer_offset[peer] = nelems;
+                return;
             }
         }
         peer_offset[peer] = 0;
