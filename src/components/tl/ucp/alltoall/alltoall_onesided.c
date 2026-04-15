@@ -163,7 +163,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     uint8_t           *peer_skip   = task->alltoall_onesided.peer_skip;
     double            *peer_rtt    = task->alltoall_onesided.peer_rtt;
     size_t            *peer_offset = task->alltoall_onesided.peer_offset;
-    ucc_rank_t         peer        = (grank + 1) % gsize;
+    ucc_rank_t         peer;
     double             alpha       = 0.125;
     ucc_mem_map_mem_h  src_memh;
     size_t             nelems;
@@ -173,6 +173,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     double             ctime;
     double             est_time;
     int64_t            polls;
+    int                i;
     ucp_ep_h                     ep;
     ucp_ep_evaluate_perf_param_t perf_param;
     ucp_ep_evaluate_perf_attr_t  perf_attr;
@@ -195,14 +196,6 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
         if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
             return;
         }
-        /* Mark peers whose transfer completed (offset reached nelems). */
-        for (peer = 0; peer < gsize; peer++) {
-            if (!peer_done[peer] && peer_offset[peer] >= nelems) {
-                peer_offset[peer] = 0;
-                peer_done[peer]   = 1;
-                (*peer_cmp)++;
-            }
-        }
     }
 
     for (peer = (grank + 1) % gsize; *peer_cmp < gsize;
@@ -213,103 +206,85 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
 
         offset = peer_offset[peer];
 
-        if (peer_skip[peer] < 5) {
+        if (peer_skip[peer] < 3) {
             /*
-             * Probe: send one segment and measure RTT to detect congestion.
-             * Done on every visit (including after a skip) so congestion is
-             * re-checked after other peers have been served.
+             * Two probes: the first warms the path (first touch on a new
+             * peer always shows high RTT), the second is the real
+             * measurement used for the congestion decision.
              */
-            chunk = ucc_min(SEG_SIZE, nelems - offset);
-            stime = ucc_get_time() * 1e6;
-            UCPCHECK_GOTO(
-                ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
-                                  PTR_OFFSET(dest, grank * nelems + offset),
-                                  chunk, mtype, peer, src_memh, dst_memh,
-                                  team, task),
-                task, out);
-            UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task, out);
-
-            /* Bounded poll for probe completion. */
-            polls = 0;
-            while (polls++ < npolls) {
-                ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
-                if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
-                    break;
-                }
-            }
-            if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
-                /* Probe didn't complete in time — treat as congested. */
-                peer_offset[peer] = offset + chunk;
-                peer_skip[peer]++;
-                return;
-            }
-
-            ctime = ucc_get_time() * 1e6;
-            if (peer_rtt[peer] > 0.0) {
-                peer_rtt[peer] = (1.0 - alpha) * peer_rtt[peer] +
-                                 alpha * (ctime - stime);
-            } else {
-                peer_rtt[peer] = ctime - stime;
-            }
-            offset += chunk;
-
-            /* Compute per-peer est_time so the skip threshold reflects
-             * this peer's transport (e.g. shm vs RDMA). */
-            perf_param.field_mask   = UCP_EP_PERF_PARAM_FIELD_MESSAGE_SIZE;
-            perf_attr.field_mask    = UCP_EP_PERF_ATTR_FIELD_ESTIMATED_TIME;
-            perf_param.message_size = chunk;
-            ucc_tl_ucp_get_ep(team, peer, &ep);
-            ucp_ep_evaluate_perf(ep, &perf_param, &perf_attr);
-            est_time = perf_attr.estimated_time * 2e6;
-
-            if (offset < nelems && should_skip_peer(peer, task, est_time)) {
-                /* Peer is congested: defer remaining data, serve others. */
-                peer_skip[peer]++;
-                peer_offset[peer] = offset;
-                continue;
-            }
-
-            /* Not congested (or last segment): send remaining in one put. */
-            if (offset < nelems) {
+            for (i = 0; i < 2 && offset < nelems; i++) {
+                chunk = ucc_min(SEG_SIZE, nelems - offset);
+                stime = ucc_get_time() * 1e6;
                 UCPCHECK_GOTO(
-                    ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
-                                      PTR_OFFSET(dest, grank * nelems + offset),
-                                      nelems - offset, mtype, peer, src_memh,
-                                      dst_memh, team, task),
+                    ucc_tl_ucp_put_nb(
+                        PTR_OFFSET(src, peer * nelems + offset),
+                        PTR_OFFSET(dest, grank * nelems + offset),
+                        chunk, mtype, peer, src_memh, dst_memh,
+                        team, task),
                     task, out);
-                UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task,
-                              out);
+                UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task),
+                              task, out);
                 polls = 0;
                 while (polls++ < npolls) {
-                    ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
+                    ucp_worker_progress(
+                        TASK_CTX(task)->worker.ucp_worker);
                     if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
                         break;
                     }
                 }
                 if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
-                    peer_offset[peer] = nelems;
+                    peer_offset[peer] = offset + chunk;
+                    peer_skip[peer]++;
                     return;
                 }
+                ctime = ucc_get_time() * 1e6;
+                if (peer_rtt[peer] > 0.0) {
+                    peer_rtt[peer] = (1.0 - alpha) * peer_rtt[peer] +
+                                     alpha * (ctime - stime);
+                } else {
+                    peer_rtt[peer] = ctime - stime;
+                }
+                offset += chunk;
+            }
+
+            /* Use the second probe's RTT for the congestion decision. */
+            perf_param.field_mask   = UCP_EP_PERF_PARAM_FIELD_MESSAGE_SIZE;
+            perf_attr.field_mask    = UCP_EP_PERF_ATTR_FIELD_ESTIMATED_TIME;
+            perf_param.message_size = ucc_min(SEG_SIZE, nelems);
+            ucc_tl_ucp_get_ep(team, peer, &ep);
+            ucp_ep_evaluate_perf(ep, &perf_param, &perf_attr);
+            est_time = perf_attr.estimated_time * 2e6;
+
+            if (offset < nelems && should_skip_peer(peer, task, est_time)) {
+                peer_skip[peer]++;
+                peer_offset[peer] = offset;
+                continue;
+            }
+
+            /* Not congested: fire remaining data and move on. */
+            if (offset < nelems) {
+                UCPCHECK_GOTO(
+                    ucc_tl_ucp_put_nb(
+                        PTR_OFFSET(src, peer * nelems + offset),
+                        PTR_OFFSET(dest, grank * nelems + offset),
+                        nelems - offset, mtype, peer, src_memh,
+                        dst_memh, team, task),
+                    task, out);
+                UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task),
+                              task, out);
             }
         } else {
-            /* Gave up on CA: send all remaining data in one shot. */
-            UCPCHECK_GOTO(
-                ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
-                                  PTR_OFFSET(dest, grank * nelems + offset),
-                                  nelems - offset, mtype, peer, src_memh,
-                                  dst_memh, team, task),
-                task, out);
-            UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task, out);
-            polls = 0;
-            while (polls++ < npolls) {
-                ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
-                if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
-                    break;
-                }
-            }
-            if (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
-                peer_offset[peer] = nelems;
-                return;
+            /* Gave up on CA: fire remaining and move on. */
+            if (offset < nelems) {
+                UCPCHECK_GOTO(
+                    ucc_tl_ucp_put_nb(
+                        PTR_OFFSET(src, peer * nelems + offset),
+                        PTR_OFFSET(dest, grank * nelems + offset),
+                        nelems - offset, mtype, peer, src_memh,
+                        dst_memh, team, task),
+                    task, out);
+                UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task),
+                              task, out);
             }
         }
         peer_offset[peer] = 0;
