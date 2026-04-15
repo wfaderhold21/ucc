@@ -219,7 +219,6 @@ typedef struct ucc_tl_ucp_task {
             uint32_t                tokens;
             uint32_t                npolls;
             uint32_t                peers_completed;
-            double                  est_time;
             uint8_t                *peer_done;
             double                 *peer_rtt;
             uint8_t                *peer_skip;

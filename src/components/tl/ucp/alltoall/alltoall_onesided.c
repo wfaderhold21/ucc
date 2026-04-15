@@ -56,13 +56,14 @@ static inline void alltoall_onesided_wait_completion(ucc_tl_ucp_task_t *task,
 }
 
 static int should_skip_peer(ucc_rank_t         peer,
-                            ucc_tl_ucp_task_t *task)
+                            ucc_tl_ucp_task_t *task,
+                            double             est_time)
 {
     if (!task->alltoall_onesided.peer_rtt) {
         return 0;
     }
 
-    if (task->alltoall_onesided.peer_rtt[peer] > (1.25 * task->alltoall_onesided.est_time)) {
+    if (task->alltoall_onesided.peer_rtt[peer] > (1.25 * est_time)) {
         return 1;
     }
     return 0;
@@ -170,6 +171,10 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     size_t             chunk;
     double             stime;
     double             ctime;
+    double             est_time;
+    ucp_ep_h                     ep;
+    ucp_ep_evaluate_perf_param_t perf_param;
+    ucp_ep_evaluate_perf_attr_t  perf_attr;
 
     nelems   = TASK_ARGS(task).src.info.count;
     nelems   = (nelems / gsize) * ucc_dt_size(TASK_ARGS(task).src.info.datatype);
@@ -212,7 +217,16 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
             }
             offset += chunk;
 
-            if (offset < nelems && should_skip_peer(peer, task)) {
+            /* Compute per-peer est_time so the skip threshold reflects
+             * this peer's transport (e.g. shm vs RDMA). */
+            perf_param.field_mask   = UCP_EP_PERF_PARAM_FIELD_MESSAGE_SIZE;
+            perf_attr.field_mask    = UCP_EP_PERF_ATTR_FIELD_ESTIMATED_TIME;
+            perf_param.message_size = chunk;
+            ucc_tl_ucp_get_ep(team, peer, &ep);
+            ucp_ep_evaluate_perf(ep, &perf_param, &perf_attr);
+            est_time = perf_attr.estimated_time * 2e6;
+
+            if (offset < nelems && should_skip_peer(peer, task, est_time)) {
                 /* Peer is congested: defer remaining data, serve other peers first */
                 peer_skip[peer]++;
                 peer_offset[peer] = offset;
@@ -428,23 +442,12 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
     rate   = (1 / attr.estimated_time) * (double)(perc_bw / 100.0);
     ratio  = (nelems > 0) ? nelems * group_size : 1;
 
-    task->alltoall_onesided.est_time = attr.estimated_time * 1e6;
     task->alltoall_onesided.tokens = rate / ratio;
     if (task->alltoall_onesided.tokens < 1 &&
         alg != UCC_TL_UCP_ALLTOALL_ONESIDED_GET &&
         param.message_size >=
             UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_rtt_threshold) {
         ucc_rank_t team_size = UCC_TL_TEAM_SIZE(tl_team);
-
-        /* Re-query perf for one probe segment to get an accurate RTT threshold.
-         * peer_rtt measures per-segment latency; est_time must match that scale.
-         * The probe measures put+flush completion (a full round-trip: send + remote
-         * ACK), while ucp_ep_evaluate_perf returns the one-way estimated transfer
-         * time.  Multiply by 2 so est_time represents the expected probe baseline,
-         * keeping the 1.25x skip threshold meaningful. */
-        param.message_size = ucc_min(SEG_SIZE, param.message_size);
-        ucp_ep_evaluate_perf(ep, &param, &attr);
-        task->alltoall_onesided.est_time = attr.estimated_time * 2e6;
 
         task->alltoall_onesided.peers_completed = 0;
         task->alltoall_onesided.tokens          = 1;
