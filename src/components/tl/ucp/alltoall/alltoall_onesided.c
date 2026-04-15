@@ -222,27 +222,20 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
                 continue;
             }
 
-            /* Not congested (or this was the last segment): bulk-send remainder
-             * without a per-segment flush — only one flush at the end. */
-            while (offset < nelems) {
-                chunk = ucc_min(SEG_SIZE, nelems - offset);
+            /* Not congested (or this was the last segment): send all
+             * remaining data in one put and flush. */
+            if (offset < nelems) {
                 UCPCHECK_GOTO(
                     ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
                                       PTR_OFFSET(dest, grank * nelems + offset),
-                                      chunk, mtype, peer, src_memh, dst_memh,
-                                      team, task),
+                                      nelems - offset, mtype, peer, src_memh,
+                                      dst_memh, team, task),
                     task, out);
-                offset += chunk;
-                if (!alltoall_onesided_handle_completion(task, posted, completed,
-                                                         ntokens, npolls)) {
-                    peer_offset[peer] = offset;
-                    return;
+                UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task,
+                              out);
+                while (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
+                    ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
                 }
-            }
-            /* Single flush for all bulk segments; spin since peer is non-congested */
-            UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task), task, out);
-            while (!UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task)) {
-                ucp_worker_progress(TASK_CTX(task)->worker.ucp_worker);
             }
         } else {
             /* Gave up on CA: send all remaining data in one shot */
@@ -442,7 +435,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
     task->alltoall_onesided.tokens = rate / ratio;
     if (task->alltoall_onesided.tokens < 1 &&
         alg != UCC_TL_UCP_ALLTOALL_ONESIDED_GET &&
-        param.message_size <=
+        param.message_size >=
             UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_rtt_threshold) {
         ucc_rank_t team_size = UCC_TL_TEAM_SIZE(tl_team);
 
