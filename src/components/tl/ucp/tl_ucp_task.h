@@ -220,7 +220,7 @@ typedef struct ucc_tl_ucp_task {
             uint32_t                npolls;
             uint32_t                peers_completed;
             uint8_t                *peer_done;
-            double                 *peer_rtt;
+            ucs_status_ptr_t       *probe_req;
             uint8_t                *peer_skip;
             size_t                 *peer_offset;
         } alltoall_onesided;
