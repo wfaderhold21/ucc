@@ -219,6 +219,8 @@ typedef struct ucc_tl_ucp_task {
             uint32_t                tokens;
             uint32_t                npolls;
             uint32_t                peers_completed;
+            uint32_t                probes_in_flight;
+            uint32_t                next_probe_idx;
             uint8_t                *peer_done;
             ucs_status_ptr_t       *probe_req;
             uint8_t                *peer_skip;
