@@ -139,18 +139,6 @@ err_cfg_read:
     return ucc_status;
 }
 
-static ucc_tl_ucp_team_t *
-ucc_tl_ucp_context_find_team(ucc_tl_ucp_context_t *ctx, uint16_t team_id)
-{
-    int i;
-
-    for (i = 0; i < ctx->n_teams; i++) {
-        if (ctx->teams[i]->super.super.params.id == team_id) {
-            return ctx->teams[i];
-        }
-    }
-    return NULL;
-}
 
 static ucs_status_t
 ucc_tl_ucp_am_barrier_handler(void *arg, const void *header,
