@@ -163,20 +163,20 @@ ucc_tl_ucp_am_barrier_handler(void *arg, const void *header,
         (const ucc_tl_ucp_am_barrier_hdr_t *)header;
     ucc_tl_ucp_team_t                 *team;
     ucc_tl_ucp_task_t                 *task;
+    int                                i;
 
     (void)header_length;
     (void)data;
     (void)length;
     (void)param;
 
-    team = ucc_tl_ucp_context_find_team(ctx, hdr->team_id);
-    if (ucc_unlikely(!team)) {
-        return UCS_ERR_NO_ELEM;
-    }
-    ucc_list_for_each(task, &team->active_barrier_tasks, barrier.list_elem) {
-        if (task->tagged.tag == hdr->coll_tag) {
-            task->barrier.recv_count++;
-            return UCS_OK;
+    for (i = 0; i < ctx->n_teams; i++) {
+        team = ctx->teams[i];
+        ucc_list_for_each(task, &team->active_barrier_tasks, barrier.list_elem) {
+            if (task->tagged.tag == hdr->coll_tag) {
+                task->barrier.recv_count++;
+                return UCS_OK;
+            }
         }
     }
     return UCS_OK;

@@ -740,7 +740,6 @@ ucc_tl_ucp_am_barrier_send(ucc_rank_t peer, ucc_tl_ucp_team_t *team,
                             ucc_tl_ucp_task_t *task)
 {
     ucc_tl_ucp_am_barrier_hdr_t hdr = {
-        .team_id  = (uint16_t)team->super.super.params.id,
         .coll_tag = task->tagged.tag,
     };
     ucp_request_param_t params = {
