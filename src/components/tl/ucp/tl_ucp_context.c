@@ -179,7 +179,7 @@ ucc_tl_ucp_am_barrier_handler(void *arg, const void *header,
             return UCS_OK;
         }
     }
-    return UCS_ERR_NO_ELEM;
+    return UCS_OK;
 }
 
 UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,

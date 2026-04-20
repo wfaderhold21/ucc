@@ -19,7 +19,7 @@
 
 #define UCC_TL_UCP_BARRIER_AM_COMPLETE(_task)                              \
     (UCC_TL_UCP_TASK_SEND_COMPLETE(_task) &&                               \
-     ((_task)->barrier.recv_count == (_task)->barrier.recv_expected))
+     ((_task)->barrier.recv_count >= (_task)->barrier.recv_expected))
 
 void ucc_tl_ucp_barrier_knomial_am_progress(ucc_coll_task_t *coll_task)
 {
