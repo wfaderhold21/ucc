@@ -10,6 +10,7 @@
 
 enum {
     UCC_TL_UCP_BARRIER_ALG_KNOMIAL,
+    UCC_TL_UCP_BARRIER_ALG_KNOMIAL_AM,
     UCC_TL_UCP_BARRIER_ALG_LAST
 };
 
@@ -32,5 +33,9 @@ ucc_status_t ucc_tl_ucp_barrier_init(ucc_tl_ucp_task_t *task);
 ucc_status_t ucc_tl_ucp_barrier_knomial_init(ucc_base_coll_args_t *coll_args,
                                              ucc_base_team_t      *team,
                                              ucc_coll_task_t     **task_h);
+
+ucc_status_t ucc_tl_ucp_barrier_knomial_am_init(ucc_base_coll_args_t *coll_args,
+                                                ucc_base_team_t      *team,
+                                                ucc_coll_task_t     **task_h);
 
 #endif

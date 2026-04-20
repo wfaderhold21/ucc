@@ -50,10 +50,11 @@ allreduce =                           \
 	allreduce/allreduce_dbt.c                  \
 	allreduce/allreduce_ring.c
 
-barrier =                     \
-	barrier/barrier.h         \
-	barrier/barrier.c         \
-	barrier/barrier_knomial.c
+barrier =                        \
+	barrier/barrier.h            \
+	barrier/barrier.c            \
+	barrier/barrier_knomial.c    \
+	barrier/barrier_knomial_am.c
 
 bcast =                       \
 	bcast/bcast.h             \
