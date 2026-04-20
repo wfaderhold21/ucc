@@ -167,6 +167,10 @@ ucc_tl_ucp_am_barrier_handler(void *arg, const void *header,
             }
         }
     }
+    /* Task not yet registered — buffer for later consumption in start. */
+    if (ctx->n_pending_barrier_tags < 64) {
+        ctx->pending_barrier_tags[ctx->n_pending_barrier_tags++] = hdr->coll_tag;
+    }
     return UCS_OK;
 }
 
@@ -356,8 +360,9 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     self->remote_info  = NULL;
     self->n_rinfo_segs = 0;
     self->rkeys        = NULL;
-    self->teams        = NULL;
-    self->n_teams      = 0;
+    self->teams                   = NULL;
+    self->n_teams                 = 0;
+    self->n_pending_barrier_tags  = 0;
     if (params->params.mask & UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS &&
         params->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
         ucc_status = ucc_tl_ucp_ctx_remote_populate(

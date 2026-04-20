@@ -240,6 +240,8 @@ typedef struct ucc_tl_ucp_context {
     } copy;
     ucc_tl_ucp_team_t **teams;
     int                  n_teams;
+    uint32_t             pending_barrier_tags[64];
+    int                  n_pending_barrier_tags;
 } ucc_tl_ucp_context_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_context_t, const ucc_base_context_params_t *,
                     const ucc_base_config_t *);

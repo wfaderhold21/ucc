@@ -111,10 +111,12 @@ out:
 
 ucc_status_t ucc_tl_ucp_barrier_knomial_am_start(ucc_coll_task_t *coll_task)
 {
-    ucc_tl_ucp_task_t *task = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
-    ucc_tl_ucp_team_t *team = TASK_TEAM(task);
-    ucc_rank_t         rank = UCC_TL_TEAM_RANK(team);
-    ucc_rank_t         size = UCC_TL_TEAM_SIZE(team);
+    ucc_tl_ucp_task_t    *task = ucc_derived_of(coll_task, ucc_tl_ucp_task_t);
+    ucc_tl_ucp_team_t    *team = TASK_TEAM(task);
+    ucc_tl_ucp_context_t *ctx  = UCC_TL_UCP_TEAM_CTX(team);
+    ucc_rank_t            rank = UCC_TL_TEAM_RANK(team);
+    ucc_rank_t            size = UCC_TL_TEAM_SIZE(team);
+    int                   i;
 
     UCC_TL_UCP_PROFILE_REQUEST_EVENT(coll_task, "ucp_barrier_kn_start", 0);
     ucc_tl_ucp_task_reset(task, UCC_INPROGRESS);
@@ -122,6 +124,15 @@ ucc_status_t ucc_tl_ucp_barrier_knomial_am_start(ucc_coll_task_t *coll_task)
     task->barrier.recv_count    = 0;
     task->barrier.recv_expected = 0;
     ucc_list_add_tail(&team->active_barrier_tasks, &task->barrier.list_elem);
+    /* Drain tags buffered before this task was registered. */
+    for (i = 0; i < ctx->n_pending_barrier_tags; i++) {
+        if (ctx->pending_barrier_tags[i] == task->tagged.tag) {
+            task->barrier.recv_count++;
+            ctx->pending_barrier_tags[i] =
+                ctx->pending_barrier_tags[--ctx->n_pending_barrier_tags];
+            i--;
+        }
+    }
     ucc_knomial_pattern_init(size, rank,
                              ucc_min(UCC_TL_UCP_TEAM_LIB(team)->
                                      cfg.barrier_kn_radix, size),
