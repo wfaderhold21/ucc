@@ -117,6 +117,14 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_rtt_threshold),
      UCC_CONFIG_TYPE_MEMUNITS},
 
+    {"ALLTOALL_ONESIDED_INITIAL_WINDOW", "0",
+     "Initial window size for the RTT-based alltoall onesided CA path. "
+     "0 means use team_size (open fully on the first call and let AIMD "
+     "throttle on observed congestion). Set to a smaller positive value "
+     "to slow-start instead.",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_initial_window),
+     UCC_CONFIG_TYPE_UINT},
+
     {"KN_RADIX", "0",
      "Radix of all algorithms based on knomial pattern. When set to a "
      "positive value it is used as a convenience parameter to set all "
