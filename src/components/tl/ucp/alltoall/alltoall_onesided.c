@@ -18,6 +18,7 @@
 #define CA_RTT_BAD            16
 #define CA_STALL_THRESHOLD    128
 #define CA_BULK_THRESHOLD     3
+#define CA_BULK_MAX           (1 << 20)
 
 /* Common helper function to check completion and handle polling */
 static inline int alltoall_onesided_handle_completion(
@@ -223,7 +224,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
          */
         offset = peer_offset[peer];
         if (peer_healthy[peer] >= CA_BULK_THRESHOLD) {
-            chunk = nelems - offset;
+            chunk = ucc_min((size_t)CA_BULK_MAX, nelems - offset);
         } else {
             chunk = ucc_min(SEG_SIZE, nelems - offset);
         }
