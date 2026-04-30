@@ -96,6 +96,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_finalize(ucc_coll_task_t *coll_task)
         ucc_free(task->alltoall_onesided.peer_offset);
         ucc_free(task->alltoall_onesided.peer_order);
         ucc_free(task->alltoall_onesided.peer_healthy);
+        ucc_free(task->alltoall_onesided.peer_last_chunk);
     }
     status = ucc_tl_ucp_coll_finalize(coll_task);
     if (ucc_unlikely(UCC_OK != status)) {
@@ -169,6 +170,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     uint32_t            *probes_inflight = &task->alltoall_onesided.probes_in_flight;
     ucc_rank_t          *peer_order      = task->alltoall_onesided.peer_order;
     uint8_t             *peer_healthy    = task->alltoall_onesided.peer_healthy;
+    size_t              *peer_last_chunk = task->alltoall_onesided.peer_last_chunk;
     ucc_rank_t           peer;
     ucc_rank_t           idx;
     ucc_mem_map_mem_h    src_memh;
@@ -241,8 +243,9 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
             goto out;
         }
         memset(&probe_flush_param, 0, sizeof(probe_flush_param));
-        probe_req[peer]   = ucp_ep_flush_nbx(ep, &probe_flush_param);
-        peer_offset[peer] = offset + chunk;
+        probe_req[peer]       = ucp_ep_flush_nbx(ep, &probe_flush_param);
+        peer_offset[peer]     = offset + chunk;
+        peer_last_chunk[peer] = chunk;
 
         if (UCS_OK == probe_req[peer]) {
             /* Inline completion: fast RTT, grow window, stay in state 0 */
@@ -301,17 +304,21 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
         (*probes_inflight)--;
 
         /*
-         * AIMD: adjust window based on observed flush latency.
-         * Track per-peer healthy streaks for the adaptive bulk decision:
-         * fast RTT increments, slow RTT resets so a single congested
-         * sample knocks the peer back into segmented probing.
+         * AIMD: adjust window based on observed flush latency.  The skip
+         * thresholds are calibrated against probe-sized chunks; a bulk
+         * flush is naturally slower simply because more bytes need to
+         * drain, so treating its skip count as a congestion signal would
+         * be a false positive.  Only let a slow RTT halve the window and
+         * reset the healthy streak when the just-completed chunk was a
+         * SEG_SIZE probe.
          */
         if (peer_skip[peer] < CA_RTT_GOOD) {
             window = ucc_min(window + 1, (uint32_t)gsize);
             if (peer_healthy[peer] < UINT8_MAX) {
                 peer_healthy[peer]++;
             }
-        } else if (peer_skip[peer] >= CA_RTT_BAD) {
+        } else if (peer_skip[peer] >= CA_RTT_BAD &&
+                   peer_last_chunk[peer] <= SEG_SIZE) {
             window = ucc_max(window >> 1, CA_PROBE_WINDOW_MIN);
             peer_healthy[peer] = 0;
         }
@@ -480,6 +487,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
     task->alltoall_onesided.peer_offset     = NULL;
     task->alltoall_onesided.peer_order      = NULL;
     task->alltoall_onesided.peer_healthy    = NULL;
+    task->alltoall_onesided.peer_last_chunk = NULL;
     task->alltoall_onesided.probes_in_flight = 0;
     task->super.post     = ucc_tl_ucp_alltoall_onesided_start;
     a2a_task             = &task->super;
@@ -574,6 +582,19 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
             ucc_free(task->alltoall_onesided.peer_skip);
             ucc_free(task->alltoall_onesided.peer_offset);
             ucc_free(task->alltoall_onesided.peer_order);
+            goto out;
+        }
+        task->alltoall_onesided.peer_last_chunk = ucc_calloc(team_size, sizeof(size_t), "peer last chunk");
+        if (!task->alltoall_onesided.peer_last_chunk) {
+            tl_error(UCC_TL_TEAM_LIB(tl_team),
+                "onesided alltoall OOM: unable to allocate peer_last_chunk array");
+            status = UCC_ERR_NO_RESOURCE;
+            ucc_free(task->alltoall_onesided.peer_done);
+            ucc_free(task->alltoall_onesided.probe_req);
+            ucc_free(task->alltoall_onesided.peer_skip);
+            ucc_free(task->alltoall_onesided.peer_offset);
+            ucc_free(task->alltoall_onesided.peer_order);
+            ucc_free(task->alltoall_onesided.peer_healthy);
             goto out;
         }
         {
