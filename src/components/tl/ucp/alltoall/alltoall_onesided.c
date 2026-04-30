@@ -13,9 +13,10 @@
 
 #define CONGESTION_THRESHOLD  8
 #define SEG_SIZE              4096
-#define CA_PROBE_WINDOW_BASE  256
 #define CA_PROBE_WINDOW_MIN   4
-#define CA_SKIP_THRESHOLD     64
+#define CA_RTT_GOOD           4
+#define CA_RTT_BAD            16
+#define CA_STALL_THRESHOLD    128
 
 /* Common helper function to check completion and handle polling */
 static inline int alltoall_onesided_handle_completion(
@@ -91,6 +92,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_finalize(ucc_coll_task_t *coll_task)
         ucc_free(task->alltoall_onesided.probe_req);
         ucc_free(task->alltoall_onesided.peer_skip);
         ucc_free(task->alltoall_onesided.peer_offset);
+        ucc_free(task->alltoall_onesided.peer_order);
     }
     status = ucc_tl_ucp_coll_finalize(coll_task);
     if (ucc_unlikely(UCC_OK != status)) {
@@ -162,7 +164,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     size_t              *peer_offset     = task->alltoall_onesided.peer_offset;
     uint32_t             window          = task->alltoall_onesided.tokens;
     uint32_t            *probes_inflight = &task->alltoall_onesided.probes_in_flight;
-    uint32_t            *next_idx        = &task->alltoall_onesided.next_probe_idx;
+    ucc_rank_t          *peer_order      = task->alltoall_onesided.peer_order;
     ucc_rank_t           peer;
     ucc_rank_t           idx;
     ucc_mem_map_mem_h    src_memh;
@@ -181,21 +183,21 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
                    : TASK_ARGS(task).src_memh.local_memh;
 
     /*
-     * Windowed scatter: start probes for remote peers up to the window
-     * limit.  Local peers (shared memory) are sent directly without
-     * probing since they do not touch the NIC.  The window bounds the
-     * number of concurrent in-flight probes per rank so that, across
-     * all ranks on a node, total NIC pressure stays manageable.
+     * Injection phase: find peers ready for their next chunk (state 0) and
+     * post a SEG_SIZE put+flush for each, up to the current window.  Local
+     * peers bypass the window entirely — shared memory never touches the NIC.
+     * Inline-completing flushes grow the window immediately (fast RTT signal).
+     * The window is initialized conservatively and adapts via AIMD as flushes
+     * complete in the service phase below.
      */
-    while (*probes_inflight < window && *next_idx < gsize) {
-        peer = (grank + 1 + *next_idx) % gsize;
-        (*next_idx)++;
+    for (idx = 0; idx < gsize && *probes_inflight < window; idx++) {
+        peer = peer_order[idx];
 
         if (peer_done[peer]) {
             continue;
         }
 
-        /* Local peer — send all data directly, no probe needed */
+        /* Local peer — send all data directly, no windowing needed */
         if (ucc_rank_on_local_node(peer, team->topo)) {
             UCPCHECK_GOTO(
                 ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems),
@@ -210,11 +212,12 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
             continue;
         }
 
-        /* Remote peer — send small probe segment */
-        chunk = ucc_min(SEG_SIZE, nelems);
+        /* Remote peer — post next SEG_SIZE chunk and a flush to measure RTT */
+        offset = peer_offset[peer];
+        chunk  = ucc_min(SEG_SIZE, nelems - offset);
         UCPCHECK_GOTO(
-            ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems),
-                               PTR_OFFSET(dest, grank * nelems),
+            ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
+                               PTR_OFFSET(dest, grank * nelems + offset),
                                chunk, mtype, peer, src_memh, dst_memh,
                                team, task),
             task, out);
@@ -225,21 +228,28 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
             goto out;
         }
         memset(&probe_flush_param, 0, sizeof(probe_flush_param));
-        probe_req[peer] = ucp_ep_flush_nbx(ep, &probe_flush_param);
+        probe_req[peer]   = ucp_ep_flush_nbx(ep, &probe_flush_param);
+        peer_offset[peer] = offset + chunk;
 
         if (UCS_OK == probe_req[peer]) {
+            /* Inline completion: fast RTT, grow window, stay in state 0 */
             probe_req[peer] = NULL;
-            peer_done[peer] = 2; /* completed inline, ready for bulk */
+            window = ucc_min(window + 1, (uint32_t)gsize);
+            task->alltoall_onesided.tokens = window;
+            if (peer_offset[peer] >= nelems) {
+                peer_done[peer] = 3;
+                (*peer_cmp)++;
+            }
         } else if (UCS_PTR_IS_ERR(probe_req[peer])) {
             task->super.status = ucs_status_to_ucc_status(
                 UCS_PTR_STATUS(probe_req[peer]));
             probe_req[peer] = NULL;
             goto out;
         } else {
-            peer_done[peer] = 1; /* in flight */
+            peer_done[peer] = 1; /* flush in flight, window slot occupied */
+            peer_skip[peer] = 0;
             (*probes_inflight)++;
         }
-        peer_offset[peer] = chunk;
     }
 
     /* Drive completions */
@@ -249,48 +259,46 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     }
 
     /*
-     * Service phase: check completed probes, fire bulk data.
-     * Completed probes free window slots so the next progress call
-     * can start new probes — this pipelines probing batch N+1 with
-     * bulk transfers for batch N.
+     * Service phase: poll each in-flight flush.  On completion apply AIMD:
+     * fast RTT (skip < CA_RTT_GOOD) grows the window; slow RTT
+     * (skip >= CA_RTT_BAD) halves it.  Return the peer to state 0 for its
+     * next chunk, or mark it done.  Stalled peers release their window slot
+     * so other peers can proceed; the stalled peer is retried next call.
      */
     for (idx = 0; idx < gsize; idx++) {
-        peer = (grank + 1 + idx) % gsize;
+        peer = peer_order[idx];
 
-        if (peer_done[peer] == 1) {
-            if (ucp_request_check_status(probe_req[peer]) ==
-                UCS_INPROGRESS) {
-                peer_skip[peer]++;
-                if (peer_skip[peer] < CA_SKIP_THRESHOLD) {
-                    continue;
-                }
-                /* Gave up on CA for this peer */
-            }
-            ucp_request_free(probe_req[peer]);
-            probe_req[peer] = NULL;
-            peer_done[peer] = 2;
-            (*probes_inflight)--;
-        }
-
-        if (peer_done[peer] != 2) {
+        if (peer_done[peer] != 1) {
             continue;
         }
 
-        /* Fire remaining bulk data */
-        offset = peer_offset[peer];
-        if (offset < nelems) {
-            UCPCHECK_GOTO(
-                ucc_tl_ucp_put_nb(
-                    PTR_OFFSET(src, peer * nelems + offset),
-                    PTR_OFFSET(dest, grank * nelems + offset),
-                    nelems - offset, mtype, peer, src_memh,
-                    dst_memh, team, task),
-                task, out);
-            UCPCHECK_GOTO(ucc_tl_ucp_ep_flush(peer, team, task),
-                          task, out);
+        if (ucp_request_check_status(probe_req[peer]) == UCS_INPROGRESS) {
+            if (peer_skip[peer] < CA_STALL_THRESHOLD) {
+                peer_skip[peer]++;
+                continue;
+            }
+            /* Stall: release window slot, retry this peer next call */
         }
-        peer_done[peer] = 3;
-        (*peer_cmp)++;
+
+        ucp_request_free(probe_req[peer]);
+        probe_req[peer] = NULL;
+        (*probes_inflight)--;
+
+        /* AIMD: adjust window based on observed flush latency */
+        if (peer_skip[peer] < CA_RTT_GOOD) {
+            window = ucc_min(window + 1, (uint32_t)gsize);
+        } else if (peer_skip[peer] >= CA_RTT_BAD) {
+            window = ucc_max(window >> 1, CA_PROBE_WINDOW_MIN);
+        }
+        task->alltoall_onesided.tokens = window;
+
+        if (peer_offset[peer] >= nelems) {
+            peer_done[peer] = 3;
+            (*peer_cmp)++;
+        } else {
+            peer_done[peer] = 0; /* ready for next chunk */
+            peer_skip[peer] = 0;
+        }
     }
 
     if (*peer_cmp < gsize) {
@@ -445,8 +453,8 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
     task->alltoall_onesided.probe_req       = NULL;
     task->alltoall_onesided.peer_skip       = NULL;
     task->alltoall_onesided.peer_offset     = NULL;
+    task->alltoall_onesided.peer_order      = NULL;
     task->alltoall_onesided.probes_in_flight = 0;
-    task->alltoall_onesided.next_probe_idx   = 0;
     task->super.post     = ucc_tl_ucp_alltoall_onesided_start;
     a2a_task             = &task->super;
     npolls               = task->n_polls;
@@ -480,19 +488,10 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
         param.message_size >=
             UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_rtt_threshold) {
         ucc_rank_t team_size = UCC_TL_TEAM_SIZE(tl_team);
-        uint32_t   window;
 
         task->alltoall_onesided.peers_completed  = 0;
-        window = CA_PROBE_WINDOW_BASE / group_size;
-        if (window < CA_PROBE_WINDOW_MIN) {
-            window = CA_PROBE_WINDOW_MIN;
-        }
-        if (window > team_size) {
-            window = team_size;
-        }
-        task->alltoall_onesided.tokens           = window;
+        task->alltoall_onesided.tokens           = CA_PROBE_WINDOW_MIN;
         task->alltoall_onesided.probes_in_flight = 0;
-        task->alltoall_onesided.next_probe_idx   = 0;
         task->alltoall_onesided.peer_done        = ucc_calloc(team_size, sizeof(uint8_t), "peer rtt done");
         if (!task->alltoall_onesided.peer_done) {
             tl_error(UCC_TL_TEAM_LIB(tl_team),
@@ -527,6 +526,63 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
             ucc_free(task->alltoall_onesided.probe_req);
             ucc_free(task->alltoall_onesided.peer_skip);
             goto out;
+        }
+        task->alltoall_onesided.peer_order = ucc_malloc(team_size * sizeof(ucc_rank_t), "peer order");
+        if (!task->alltoall_onesided.peer_order) {
+            tl_error(UCC_TL_TEAM_LIB(tl_team),
+                "onesided alltoall OOM: unable to allocate peer_order array");
+            status = UCC_ERR_NO_RESOURCE;
+            ucc_free(task->alltoall_onesided.peer_done);
+            ucc_free(task->alltoall_onesided.probe_req);
+            ucc_free(task->alltoall_onesided.peer_skip);
+            ucc_free(task->alltoall_onesided.peer_offset);
+            goto out;
+        }
+        {
+            /*
+             * Stagger NIC pressure across co-located ranks: half the local
+             * ranks drain shared-memory peers first then hit the NIC; the
+             * other half hit the NIC first then finish with shared memory.
+             * This halves the number of co-located PEs racing for the NIC at
+             * any moment without changing what each rank ultimately sends.
+             */
+            ucc_rank_t  grank      = UCC_TL_TEAM_RANK(tl_team);
+            ucc_rank_t  gsize      = team_size;
+            ucc_rank_t  local_rank = (sbgp && sbgp->status != UCC_SBGP_NOT_EXISTS)
+                                         ? sbgp->group_rank : 0;
+            ucc_rank_t  local_size = (sbgp && sbgp->status != UCC_SBGP_NOT_EXISTS)
+                                         ? sbgp->group_size : 1;
+            int         shm_first  = (local_rank < (local_size + 1) / 2);
+            ucc_rank_t *order      = task->alltoall_onesided.peer_order;
+            ucc_rank_t  i, p;
+            ucc_rank_t  shm_idx;
+            ucc_rank_t  rem_idx;
+            ucc_rank_t  n_shm      = 0;
+            ucc_rank_t  n_rem      = 0;
+
+            /*
+             * Self counts as a co-located (SHM) peer here so that
+             * peer_done[grank] gets driven through the local-peer fast
+             * path, matching the original loop's completion accounting.
+             */
+            for (i = 0; i < gsize; i++) {
+                p = (grank + 1 + i) % gsize;
+                if (ucc_rank_on_local_node(p, tl_team->topo)) {
+                    n_shm++;
+                } else {
+                    n_rem++;
+                }
+            }
+            shm_idx = shm_first ? 0      : n_rem;
+            rem_idx = shm_first ? n_shm  : 0;
+            for (i = 0; i < gsize; i++) {
+                p = (grank + 1 + i) % gsize;
+                if (ucc_rank_on_local_node(p, tl_team->topo)) {
+                    order[shm_idx++] = p;
+                } else {
+                    order[rem_idx++] = p;
+                }
+            }
         }
         task->super.progress = ucc_tl_ucp_alltoall_onesided_put_seg_progress;
     } else {
