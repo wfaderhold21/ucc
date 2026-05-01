@@ -576,9 +576,32 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
 
         size_t seg_size =
             UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_seg_size;
+        size_t per_peer_bytes = param.message_size;
 
         if (seg_size == 0) {
             seg_size = SEG_SIZE;
+        }
+
+        /*
+         * Scale seg_size down for very large per-peer messages.  Large
+         * collectives sustain heavy injection long enough to fill switch
+         * buffers; smaller probes spread the same total bytes across more
+         * (smaller) bursts at the switch ingress, reducing ECN-mark rate
+         * and hence retransmit cost.  Smaller probes also give more
+         * frequent control-loop events for the AIMD/MIMD adjustment to
+         * react.  Threshold ladder:
+         *   per_peer >=  4 MB  -> seg_size / 2
+         *   per_peer >= 64 MB  -> seg_size / 4
+         * Hard floor at 4 KB so we don't fall below the bcopy/zcopy
+         * boundary on typical Mellanox transports.
+         */
+        if (per_peer_bytes >= (64UL << 20)) {
+            seg_size = seg_size >> 2;
+        } else if (per_peer_bytes >= (4UL << 20)) {
+            seg_size = seg_size >> 1;
+        }
+        if (seg_size < (4UL << 10)) {
+            seg_size = (4UL << 10);
         }
 
         task->alltoall_onesided.peers_completed  = 0;
