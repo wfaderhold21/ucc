@@ -19,6 +19,7 @@
 #define CA_STALL_THRESHOLD    128
 #define CA_BULK_THRESHOLD     3
 #define CA_BULK_MAX           (1 << 20)
+#define CA_BAD_PROBES_THRESH  4
 
 /* Common helper function to check completion and handle polling */
 static inline int alltoall_onesided_handle_completion(
@@ -250,10 +251,14 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
         if (UCS_OK == probe_req[peer]) {
             /* Inline completion: fast RTT, grow window, stay in state 0 */
             probe_req[peer] = NULL;
-            window = ucc_min(window + 1, (uint32_t)gsize);
+            /* MIMD: double window on healthy completion (capped at gsize) */
+            window = ucc_min(window << 1, (uint32_t)gsize);
             task->alltoall_onesided.tokens = window;
             if (peer_healthy[peer] < UINT8_MAX) {
                 peer_healthy[peer]++;
+            }
+            if (task->alltoall_onesided.bad_probes > 0) {
+                task->alltoall_onesided.bad_probes--;
             }
             if (peer_offset[peer] >= nelems) {
                 peer_done[peer] = 3;
@@ -304,23 +309,34 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
         (*probes_inflight)--;
 
         /*
-         * AIMD: adjust window based on observed flush latency.  The skip
-         * thresholds are calibrated against probe-sized chunks; a bulk
-         * flush is naturally slower simply because more bytes need to
-         * drain, so treating its skip count as a congestion signal would
-         * be a false positive.  Only let a slow RTT halve the window and
-         * reset the healthy streak when the just-completed chunk was a
-         * SEG_SIZE probe.
+         * MIMD with hysteresis on the bad-probe side.  Healthy probe
+         * completions double the window (capped at gsize) so recovery
+         * matches the time constant of the halving step.  Slow probes
+         * accumulate a global streak counter; only when the streak hits
+         * CA_BAD_PROBES_THRESH do we halve.  This requires either
+         * sustained slowness over time or a fraction of in-flight
+         * probes simultaneously slow before reacting — a single noisy
+         * flush no longer collapses the window.  Bulk-sized chunks are
+         * still ignored on the bad path (their drain time is a function
+         * of size, not congestion).
          */
         if (peer_skip[peer] < CA_RTT_GOOD) {
-            window = ucc_min(window + 1, (uint32_t)gsize);
+            window = ucc_min(window << 1, (uint32_t)gsize);
             if (peer_healthy[peer] < UINT8_MAX) {
                 peer_healthy[peer]++;
             }
+            if (task->alltoall_onesided.bad_probes > 0) {
+                task->alltoall_onesided.bad_probes--;
+            }
         } else if (peer_skip[peer] >= CA_RTT_BAD &&
                    peer_last_chunk[peer] <= SEG_SIZE) {
-            window = ucc_max(window >> 1, CA_PROBE_WINDOW_MIN);
-            peer_healthy[peer] = 0;
+            task->alltoall_onesided.bad_probes++;
+            if (task->alltoall_onesided.bad_probes >= CA_BAD_PROBES_THRESH) {
+                window = ucc_max(window >> 1,
+                                 task->alltoall_onesided.window_floor);
+                task->alltoall_onesided.bad_probes = 0;
+                peer_healthy[peer] = 0;
+            }
         }
         task->alltoall_onesided.tokens = window;
 
@@ -524,6 +540,7 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
         ucc_rank_t team_size      = UCC_TL_TEAM_SIZE(tl_team);
         uint32_t   initial_window =
             UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_initial_window;
+        uint32_t   window_floor;
 
         if (initial_window == 0 || initial_window > (uint32_t)team_size) {
             initial_window = (uint32_t)team_size;
@@ -532,9 +549,20 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
             initial_window = CA_PROBE_WINDOW_MIN;
         }
 
+        /*
+         * Floor scales with team_size so a series of MD halvings cannot
+         * collapse the window into a deep slow-start crater on large teams.
+         */
+        window_floor = (uint32_t)(team_size / 4);
+        if (window_floor < CA_PROBE_WINDOW_MIN) {
+            window_floor = CA_PROBE_WINDOW_MIN;
+        }
+
         task->alltoall_onesided.peers_completed  = 0;
         task->alltoall_onesided.tokens           = initial_window;
         task->alltoall_onesided.probes_in_flight = 0;
+        task->alltoall_onesided.bad_probes       = 0;
+        task->alltoall_onesided.window_floor     = window_floor;
         task->alltoall_onesided.peer_done        = ucc_calloc(team_size, sizeof(uint8_t), "peer rtt done");
         if (!task->alltoall_onesided.peer_done) {
             tl_error(UCC_TL_TEAM_LIB(tl_team),

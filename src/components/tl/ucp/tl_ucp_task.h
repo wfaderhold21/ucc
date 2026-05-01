@@ -227,6 +227,8 @@ typedef struct ucc_tl_ucp_task {
             ucc_rank_t             *peer_order;
             uint8_t                *peer_healthy;
             size_t                 *peer_last_chunk;
+            uint32_t                bad_probes;
+            uint32_t                window_floor;
         } alltoall_onesided;
         char                        plugin_data[UCC_TL_UCP_TASK_PLUGIN_MAX_DATA];
     };
