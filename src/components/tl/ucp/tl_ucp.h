@@ -92,6 +92,7 @@ typedef struct ucc_tl_ucp_lib_config {
     ucc_tl_ucp_alltoall_onesided_alg_t alltoall_onesided_alg;
     size_t                             alltoall_onesided_rtt_threshold;
     uint32_t                           alltoall_onesided_initial_window;
+    size_t                             alltoall_onesided_seg_size;
 } ucc_tl_ucp_lib_config_t;
 
 typedef enum ucc_tl_ucp_local_copy_type {

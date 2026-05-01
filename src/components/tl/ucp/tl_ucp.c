@@ -125,6 +125,15 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_initial_window),
      UCC_CONFIG_TYPE_UINT},
 
+    {"ALLTOALL_ONESIDED_SEG_SIZE", "16k",
+     "Probe segment size for the RTT-based alltoall onesided CA path. "
+     "Smaller values give finer RTT samples and gentler switch bursts at "
+     "the cost of more per-flush CPU overhead; larger values amortize "
+     "per-flush cost but produce burstier injection. Should sit above the "
+     "UCX zcopy threshold of the underlying transport.",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_seg_size),
+     UCC_CONFIG_TYPE_MEMUNITS},
+
     {"KN_RADIX", "0",
      "Radix of all algorithms based on knomial pattern. When set to a "
      "positive value it is used as a convenience parameter to set all "

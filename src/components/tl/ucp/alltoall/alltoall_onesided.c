@@ -172,6 +172,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
     ucc_rank_t          *peer_order      = task->alltoall_onesided.peer_order;
     uint8_t             *peer_healthy    = task->alltoall_onesided.peer_healthy;
     size_t              *peer_last_chunk = task->alltoall_onesided.peer_last_chunk;
+    size_t               seg_size        = task->alltoall_onesided.seg_size;
     ucc_rank_t           peer;
     ucc_rank_t           idx;
     ucc_mem_map_mem_h    src_memh;
@@ -229,7 +230,7 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
         if (peer_healthy[peer] >= CA_BULK_THRESHOLD) {
             chunk = ucc_min((size_t)CA_BULK_MAX, nelems - offset);
         } else {
-            chunk = ucc_min(SEG_SIZE, nelems - offset);
+            chunk = ucc_min(seg_size, nelems - offset);
         }
         UCPCHECK_GOTO(
             ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
@@ -309,33 +310,48 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
         (*probes_inflight)--;
 
         /*
-         * MIMD with hysteresis on the bad-probe side.  Healthy probe
-         * completions double the window (capped at gsize) so recovery
-         * matches the time constant of the halving step.  Slow probes
-         * accumulate a global streak counter; only when the streak hits
-         * CA_BAD_PROBES_THRESH do we halve.  This requires either
-         * sustained slowness over time or a fraction of in-flight
-         * probes simultaneously slow before reacting — a single noisy
-         * flush no longer collapses the window.  Bulk-sized chunks are
-         * still ignored on the bad path (their drain time is a function
-         * of size, not congestion).
+         * MIMD with hysteresis on the bad side.  Skip thresholds scale
+         * with chunk size: a flush's natural drain time is roughly
+         * proportional to its byte count, so comparing peer_skip
+         * against constants only stays calibrated when chunk_factor=1.
+         * Scaling CA_RTT_GOOD/BAD by ceil(chunk/seg_size) keeps the
+         * control loop honest across probe-sized chunks, smaller tail
+         * chunks, and bulk chunks alike.  Very large bulks naturally
+         * fall outside peer_skip's range (capped by CA_STALL_THRESHOLD)
+         * and contribute neither healthy nor bad signal — the same
+         * effect the previous bulk gate produced, but as a continuous
+         * limit instead of a hard cutoff.
          */
-        if (peer_skip[peer] < CA_RTT_GOOD) {
-            window = ucc_min(window << 1, (uint32_t)gsize);
-            if (peer_healthy[peer] < UINT8_MAX) {
-                peer_healthy[peer]++;
+        {
+            size_t   chunk_bytes  = peer_last_chunk[peer];
+            uint32_t chunk_factor = (uint32_t)((chunk_bytes + seg_size - 1) /
+                                               seg_size);
+            uint32_t rtt_good;
+            uint32_t rtt_bad;
+
+            if (chunk_factor < 1) {
+                chunk_factor = 1;
             }
-            if (task->alltoall_onesided.bad_probes > 0) {
-                task->alltoall_onesided.bad_probes--;
-            }
-        } else if (peer_skip[peer] >= CA_RTT_BAD &&
-                   peer_last_chunk[peer] <= SEG_SIZE) {
-            task->alltoall_onesided.bad_probes++;
-            if (task->alltoall_onesided.bad_probes >= CA_BAD_PROBES_THRESH) {
-                window = ucc_max(window >> 1,
-                                 task->alltoall_onesided.window_floor);
-                task->alltoall_onesided.bad_probes = 0;
-                peer_healthy[peer] = 0;
+            rtt_good = CA_RTT_GOOD * chunk_factor;
+            rtt_bad  = CA_RTT_BAD  * chunk_factor;
+
+            if (peer_skip[peer] < rtt_good) {
+                window = ucc_min(window << 1, (uint32_t)gsize);
+                if (peer_healthy[peer] < UINT8_MAX) {
+                    peer_healthy[peer]++;
+                }
+                if (task->alltoall_onesided.bad_probes > 0) {
+                    task->alltoall_onesided.bad_probes--;
+                }
+            } else if (peer_skip[peer] >= rtt_bad) {
+                task->alltoall_onesided.bad_probes++;
+                if (task->alltoall_onesided.bad_probes >=
+                    CA_BAD_PROBES_THRESH) {
+                    window = ucc_max(window >> 1,
+                                     task->alltoall_onesided.window_floor);
+                    task->alltoall_onesided.bad_probes = 0;
+                    peer_healthy[peer] = 0;
+                }
             }
         }
         task->alltoall_onesided.tokens = window;
@@ -558,11 +574,19 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
             window_floor = CA_PROBE_WINDOW_MIN;
         }
 
+        size_t seg_size =
+            UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_seg_size;
+
+        if (seg_size == 0) {
+            seg_size = SEG_SIZE;
+        }
+
         task->alltoall_onesided.peers_completed  = 0;
         task->alltoall_onesided.tokens           = initial_window;
         task->alltoall_onesided.probes_in_flight = 0;
         task->alltoall_onesided.bad_probes       = 0;
         task->alltoall_onesided.window_floor     = window_floor;
+        task->alltoall_onesided.seg_size         = seg_size;
         task->alltoall_onesided.peer_done        = ucc_calloc(team_size, sizeof(uint8_t), "peer rtt done");
         if (!task->alltoall_onesided.peer_done) {
             tl_error(UCC_TL_TEAM_LIB(tl_team),
