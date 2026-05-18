@@ -17,8 +17,6 @@
 #define CA_RTT_GOOD           4
 #define CA_RTT_BAD            16
 #define CA_STALL_THRESHOLD    128
-#define CA_BULK_THRESHOLD     3
-#define CA_BULK_MAX           (1 << 20)
 #define CA_BAD_PROBES_THRESH  4
 
 /* Common helper function to check completion and handle polling */
@@ -220,18 +218,9 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
             continue;
         }
 
-        /*
-         * Remote peer — post next chunk and a flush to measure RTT.
-         * After CA_BULK_THRESHOLD consecutive healthy completions, stop
-         * segmenting and send the entire remainder in one shot; the
-         * trailing flush still gives us an RTT sample on the final chunk.
-         */
+        /* Remote peer — post next seg_size chunk and a flush to measure RTT. */
         offset = peer_offset[peer];
-        if (peer_healthy[peer] >= CA_BULK_THRESHOLD) {
-            chunk = ucc_min((size_t)CA_BULK_MAX, nelems - offset);
-        } else {
-            chunk = ucc_min(seg_size, nelems - offset);
-        }
+        chunk  = ucc_min(seg_size, nelems - offset);
         UCPCHECK_GOTO(
             ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems + offset),
                                PTR_OFFSET(dest, grank * nelems + offset),
@@ -287,11 +276,32 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
      * Service phase: poll each in-flight flush.  On completion apply AIMD:
      * fast RTT (skip < CA_RTT_GOOD) grows the window; slow RTT
      * (skip >= CA_RTT_BAD) halves it.  Return the peer to state 0 for its
-     * next chunk, or mark it done.  Stalled peers release their window slot
-     * so other peers can proceed; the stalled peer is retried next call.
+     * next chunk, or mark it done.
+     *
+     * State 2 = stalled: AIMD was already applied at stall detection; the
+     * window slot stays occupied until the flush actually drains to avoid
+     * injecting new traffic while the fabric is congested.
      */
     for (idx = 0; idx < gsize; idx++) {
         peer = peer_order[idx];
+
+        if (peer_done[peer] == 2) {
+            /* Waiting for a stalled flush to drain — keep slot occupied */
+            if (ucp_request_check_status(probe_req[peer]) == UCS_INPROGRESS) {
+                continue;
+            }
+            ucp_request_free(probe_req[peer]);
+            probe_req[peer] = NULL;
+            (*probes_inflight)--;
+            if (peer_offset[peer] >= nelems) {
+                peer_done[peer] = 3;
+                (*peer_cmp)++;
+            } else {
+                peer_done[peer] = 0;
+                peer_skip[peer] = 0;
+            }
+            continue;
+        }
 
         if (peer_done[peer] != 1) {
             continue;
@@ -302,7 +312,14 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
                 peer_skip[peer]++;
                 continue;
             }
-            /* Stall: release window slot, retry this peer next call */
+            /* Stall detected: keep slot, apply AIMD once, wait for drain */
+            peer_done[peer]    = 2;
+            window             = ucc_max(window >> 1,
+                                         task->alltoall_onesided.window_floor);
+            task->alltoall_onesided.tokens = window;
+            peer_healthy[peer] = 0;
+            task->alltoall_onesided.bad_probes = 0;
+            continue;
         }
 
         ucp_request_free(probe_req[peer]);
@@ -311,16 +328,9 @@ void ucc_tl_ucp_alltoall_onesided_put_seg_progress(ucc_coll_task_t *ctask)
 
         /*
          * MIMD with hysteresis on the bad side.  Skip thresholds scale
-         * with chunk size: a flush's natural drain time is roughly
-         * proportional to its byte count, so comparing peer_skip
-         * against constants only stays calibrated when chunk_factor=1.
-         * Scaling CA_RTT_GOOD/BAD by ceil(chunk/seg_size) keeps the
-         * control loop honest across probe-sized chunks, smaller tail
-         * chunks, and bulk chunks alike.  Very large bulks naturally
-         * fall outside peer_skip's range (capped by CA_STALL_THRESHOLD)
-         * and contribute neither healthy nor bad signal — the same
-         * effect the previous bulk gate produced, but as a continuous
-         * limit instead of a hard cutoff.
+         * with chunk size so that tail chunks (smaller than seg_size at
+         * the end of a peer's data) are judged against the same RTT
+         * budget as full seg_size chunks.
          */
         {
             size_t   chunk_bytes  = peer_last_chunk[peer];
@@ -557,51 +567,41 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
         uint32_t   initial_window =
             UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_initial_window;
         uint32_t   window_floor;
+        ucc_rank_t n_remote = 0;
+
+        {
+            ucc_rank_t _gr = UCC_TL_TEAM_RANK(tl_team);
+            ucc_rank_t _ri;
+            for (_ri = 0; _ri < (ucc_rank_t)team_size; _ri++) {
+                ucc_rank_t _p = (_gr + 1 + _ri) % team_size;
+                if (!ucc_rank_on_local_node(_p, tl_team->topo)) {
+                    n_remote++;
+                }
+            }
+        }
 
         if (initial_window == 0 || initial_window > (uint32_t)team_size) {
-            initial_window = (uint32_t)team_size;
-        }
-        if (initial_window < CA_PROBE_WINDOW_MIN) {
+            /* Start narrow: probe at most CA_PROBE_WINDOW_MIN remote peers */
+            initial_window = ucc_max(1u,
+                                     ucc_min((uint32_t)n_remote,
+                                             CA_PROBE_WINDOW_MIN));
+        } else if (initial_window < CA_PROBE_WINDOW_MIN) {
             initial_window = CA_PROBE_WINDOW_MIN;
         }
 
         /*
-         * Floor scales with team_size so a series of MD halvings cannot
-         * collapse the window into a deep slow-start crater on large teams.
+         * Floor at team_size/16 (min CA_PROBE_WINDOW_MIN) so sustained
+         * halvings can meaningfully throttle large teams without pinning
+         * all ranks to a single in-flight probe.
          */
-        window_floor = (uint32_t)(team_size / 4);
-        if (window_floor < CA_PROBE_WINDOW_MIN) {
-            window_floor = CA_PROBE_WINDOW_MIN;
-        }
+        window_floor = ucc_max(CA_PROBE_WINDOW_MIN,
+                               (uint32_t)(team_size / 16));
 
         size_t seg_size =
             UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_seg_size;
-        size_t per_peer_bytes = param.message_size;
 
         if (seg_size == 0) {
             seg_size = SEG_SIZE;
-        }
-
-        /*
-         * Scale seg_size down for very large per-peer messages.  Large
-         * collectives sustain heavy injection long enough to fill switch
-         * buffers; smaller probes spread the same total bytes across more
-         * (smaller) bursts at the switch ingress, reducing ECN-mark rate
-         * and hence retransmit cost.  Smaller probes also give more
-         * frequent control-loop events for the AIMD/MIMD adjustment to
-         * react.  Threshold ladder:
-         *   per_peer >=  4 MB  -> seg_size / 2
-         *   per_peer >= 64 MB  -> seg_size / 4
-         * Hard floor at 4 KB so we don't fall below the bcopy/zcopy
-         * boundary on typical Mellanox transports.
-         */
-        if (per_peer_bytes >= (64UL << 20)) {
-            seg_size = seg_size >> 2;
-        } else if (per_peer_bytes >= (4UL << 20)) {
-            seg_size = seg_size >> 1;
-        }
-        if (seg_size < (4UL << 10)) {
-            seg_size = (4UL << 10);
         }
 
         task->alltoall_onesided.peers_completed  = 0;
