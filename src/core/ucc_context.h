@@ -114,6 +114,8 @@ typedef struct ucc_context {
     ucc_service_coll_req_t  *abort_req;       /*!< In-flight abort allreduce    */
     int                      abort_new_failure; /*!< New failure arrived while
                                                      abort allreduce running    */
+    ucc_rank_t              *abort_map;       /*!< Surviving-ranks array backing
+                                                     the abort allreduce subset  */
 } ucc_context_t;
 
 typedef struct ucc_context_config {

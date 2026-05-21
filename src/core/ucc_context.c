@@ -1289,6 +1289,49 @@ void ucc_context_mark_rank_failed(ucc_context_t *ctx, ucc_rank_t rank)
 }
 
 /**
+ * Build an ep_map subset that covers only the ranks NOT present in
+ * failure_map.  Allocates an array of surviving rank indices and stores
+ * it in *map_out; the caller is responsible for freeing it.  The map
+ * embedded in subset_out->map may point into that array (ARRAY type) or
+ * may be FULL/STRIDED (optimised by ucc_ep_map_from_array); either way
+ * the caller must free *map_out when done.
+ */
+static ucc_status_t ucc_context_abort_build_subset(ucc_context_t *ctx,
+                                                    ucc_rank_t   **map_out,
+                                                    ucc_subset_t  *subset_out)
+{
+    ucc_rank_t  n_ranks = (ucc_rank_t)ctx->params.oob.n_oob_eps;
+    ucc_rank_t  n_alive = 0, myrank = UCC_RANK_MAX;
+    ucc_rank_t *alive, i;
+
+    for (i = 0; i < n_ranks; i++) {
+        if (!(ctx->failure_map[i / 64] & ((uint64_t)1 << (i % 64)))) {
+            n_alive++;
+        }
+    }
+
+    alive = ucc_malloc(n_alive * sizeof(ucc_rank_t), "abort_map");
+    if (!alive) {
+        return UCC_ERR_NO_MEMORY;
+    }
+
+    n_alive = 0;
+    for (i = 0; i < n_ranks; i++) {
+        if (!(ctx->failure_map[i / 64] & ((uint64_t)1 << (i % 64)))) {
+            if (i == ctx->rank) {
+                myrank = n_alive;
+            }
+            alive[n_alive++] = i;
+        }
+    }
+
+    *map_out           = alive;
+    subset_out->map    = ucc_ep_map_from_array(&alive, n_alive, n_ranks, 0);
+    subset_out->myrank = myrank;
+    return UCC_OK;
+}
+
+/**
  * Begin abort sequence:
  *  1. Guard: must be ACTIVE.
  *  2. Drain all in-flight collectives with UCC_ERR_ABORTED.
@@ -1344,10 +1387,19 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
     }
     memcpy(ctx->abort_sbuf, ctx->failure_map, map_words * sizeof(uint64_t));
 
-    /* Step 3: Post BOR allreduce over the full context service set */
+    /* Step 3: Post BOR allreduce over the full context service set.
+     *
+     * All surviving ranks must use the same initial subset; since ranks
+     * have asymmetric failure_map views at abort time (only some may have
+     * already observed the failure), FULL is the only choice that keeps
+     * them in sync.  If a rank has truly crashed it won't participate and
+     * UCX will return COMM_FAILURE; the restart path in abort_test then
+     * re-reads the updated failure_map (populated by the recv completion
+     * tag) and posts over surviving ranks only, breaking the loop. */
     subset.map.type   = UCC_EP_MAP_FULL;
     subset.map.ep_num = n_ranks;
     subset.myrank     = ctx->rank;
+    ctx->abort_map    = NULL; /* no backing array needed for FULL */
 
     tl_iface = UCC_TL_CTX_IFACE(ctx->service_ctx);
     ctx->abort_req = ucc_malloc(sizeof(*ctx->abort_req), "abort_service_req");
@@ -1427,17 +1479,28 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
         memcpy(ctx->abort_sbuf, ctx->failure_map,
                map_words * sizeof(uint64_t));
 
-        /* re-post */
-        ucc_subset_t subset;
-        subset.map.type   = UCC_EP_MAP_FULL;
-        subset.map.ep_num = n_ranks;
-        subset.myrank     = ctx->rank;
+        /* re-post over surviving ranks (re-reads failure_map, which may now
+         * include the rank that caused the previous COMM_FAILURE) */
+        ucc_subset_t  subset;
+        ucc_rank_t   *new_map = NULL;
+
+        ucc_free(ctx->abort_map);
+        ctx->abort_map = NULL;
+        status = ucc_context_abort_build_subset(ctx, &new_map, &subset);
+        if (status < 0) {
+            ucc_error("failed to rebuild abort subset: %s",
+                      ucc_status_string(status));
+            return status;
+        }
+        ctx->abort_map = new_map;
 
         tl_iface = UCC_TL_CTX_IFACE(ctx->service_ctx);
         ctx->abort_req = ucc_malloc(sizeof(*ctx->abort_req),
                                     "abort_service_req");
         if (!ctx->abort_req) {
             ucc_error("failed to re-allocate abort service req");
+            ucc_free(ctx->abort_map);
+            ctx->abort_map = NULL;
             return UCC_ERR_NO_MEMORY;
         }
         ctx->abort_req->team   = NULL;
@@ -1453,7 +1516,9 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
             ucc_error("failed to re-post abort allreduce: %s",
                       ucc_status_string(status));
             ucc_free(ctx->abort_req);
+            ucc_free(ctx->abort_map);
             ctx->abort_req = NULL;
+            ctx->abort_map = NULL;
             return status;
         }
         return UCC_INPROGRESS;
@@ -1466,16 +1531,13 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
         return UCC_INPROGRESS;
     }
     if (status == UCC_ERR_COMM_FAILURE) {
-        /* A rank failed during the abort allreduce.  Set abort_new_failure
-           so the restart path re-snapshots and reposts.
-           Phase 1 limitation: TL UCP completion callbacks report failures
-           with UCC_RANK_MAX (unknown rank) because endpoints don't carry a
-           rank back-reference, so failure_map may not be updated with the
-           dead rank's identity.  The restart therefore reposts over the full
-           membership and may COMM_FAILURE again for true hardware failures.
-           Resolving this requires an endpoint->rank mapping in the TL layer
-           (Phase 2).  For Phase 1 (simulated failures with all ranks alive)
-           the BOR always succeeds among participating ranks. */
+        /* A rank failed during the abort allreduce.  The restart path will
+           re-snapshot failure_map and rebuild the subset excluding any newly
+           identified failed ranks.  Recv completions carry the sender tag so
+           the peer rank is usually identified; send completions cannot, so
+           the failed rank may remain unknown (UCC_RANK_MAX) until a recv
+           error fires.  Either way the restart rebuilds the best subset
+           possible from the current failure_map. */
         ctx->abort_new_failure = 1;
         return UCC_INPROGRESS;
     }
@@ -1528,6 +1590,8 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
     ctx->abort_sbuf = NULL;
     ucc_free(ctx->abort_rbuf);
     ctx->abort_rbuf = NULL;
+    ucc_free(ctx->abort_map);
+    ctx->abort_map = NULL;
 
     ctx->state = UCC_CTX_STATE_ABORTED;
     ucc_debug("context %p abort complete: %u failed ranks", ctx, n_failed);
