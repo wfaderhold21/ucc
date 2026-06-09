@@ -89,6 +89,10 @@ typedef struct ucc_tl_ucp_lib_config {
     ucc_ternary_auto_value_t           use_topo;
     int                                use_reordering;
     uint32_t                           alltoall_onesided_percent_bw;
+    int                                alltoall_onesided_fractional_pacing;
+    size_t                             alltoall_onesided_seg_size;
+    size_t                             alltoall_onesided_rtt_threshold;
+    uint32_t                           alltoall_onesided_initial_window;
     ucc_tl_ucp_alltoall_onesided_alg_t alltoall_onesided_alg;
 } ucc_tl_ucp_lib_config_t;
 

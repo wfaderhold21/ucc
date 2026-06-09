@@ -107,6 +107,32 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_percent_bw),
      UCC_CONFIG_TYPE_UINT},
 
+    {"ALLTOALL_ONESIDED_FRACTIONAL_PACING", "n",
+     "Enable fractional pacing when the estimated alltoall onesided token "
+     "count is less than one",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t,
+                  alltoall_onesided_fractional_pacing),
+     UCC_CONFIG_TYPE_BOOL},
+
+    {"ALLTOALL_ONESIDED_SEG_SIZE", "auto",
+     "Fragment size for alltoall onesided tokenized transfers. Auto disables "
+     "fragmentation",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_seg_size),
+     UCC_CONFIG_TYPE_MEMUNITS},
+
+    {"ALLTOALL_ONESIDED_RTT_THRESHOLD", "auto",
+     "Minimum per-peer alltoall onesided message size for fragmented token "
+     "transfers. Auto enables fragmentation whenever SEG_SIZE is set",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t,
+                  alltoall_onesided_rtt_threshold),
+     UCC_CONFIG_TYPE_MEMUNITS},
+
+    {"ALLTOALL_ONESIDED_INITIAL_WINDOW", "1",
+     "Minimum token window for alltoall onesided fragmented transfers",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t,
+                  alltoall_onesided_initial_window),
+     UCC_CONFIG_TYPE_UINT},
+
     {"ALLTOALL_ONESIDED_ALG", "auto",
      "Algorithm to be used with onesided Alltoall",
      ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_alg),
