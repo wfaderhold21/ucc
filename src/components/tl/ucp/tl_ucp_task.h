@@ -218,6 +218,10 @@ typedef struct ucc_tl_ucp_task {
         struct {
             uint32_t                tokens;
             uint32_t                npolls;
+            uint32_t                stride;
+            uint32_t                fractional_pacing;
+            double                  pacing_interval;
+            double                  next_post_time;
         } alltoall_onesided;
         char                        plugin_data[UCC_TL_UCP_TASK_PLUGIN_MAX_DATA];
     };

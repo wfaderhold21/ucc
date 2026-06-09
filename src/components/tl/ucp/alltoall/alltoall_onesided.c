@@ -91,13 +91,14 @@ void ucc_tl_ucp_alltoall_onesided_get_progress(ucc_coll_task_t *ctask)
     ucc_rank_t         gsize     = UCC_TL_TEAM_SIZE(team);
     uint32_t           ntokens   = task->alltoall_onesided.tokens;
     int64_t            npolls    = task->alltoall_onesided.npolls;
+    uint32_t           stride    = task->alltoall_onesided.stride;
     /* To resolve remote virtual addresses, the dst_memh is the one that must
      * have the rkey information. For this algorithm, we need to swap the
      * src and dst handles to operate correctly */
     ucc_mem_map_mem_h *dst_memh  = TASK_ARGS(task).src_memh.global_memh;
     uint32_t          *posted    = &task->onesided.get_posted;
     uint32_t          *completed = &task->onesided.get_completed;
-    ucc_rank_t         peer      = (grank + *posted + 1) % gsize;
+    ucc_rank_t         peer;
     ucc_mem_map_mem_h  src_memh;
     size_t             nelems;
 
@@ -107,7 +108,15 @@ void ucc_tl_ucp_alltoall_onesided_get_progress(ucc_coll_task_t *ctask)
                    ? TASK_ARGS(task).dst_memh.global_memh[grank]
                    : TASK_ARGS(task).dst_memh.local_memh;
 
-    for (; *posted < gsize; peer = (peer + 1) % gsize) {
+    for (; *posted < gsize;) {
+        if (task->alltoall_onesided.fractional_pacing) {
+            if (ucc_get_time() < task->alltoall_onesided.next_post_time) {
+                return;
+            }
+            task->alltoall_onesided.next_post_time +=
+                task->alltoall_onesided.pacing_interval;
+        }
+        peer = (grank + (*posted * stride) % gsize + 1) % gsize;
         UCPCHECK_GOTO(ucc_tl_ucp_get_nb(PTR_OFFSET(dest, peer * nelems),
                                         PTR_OFFSET(src, grank * nelems),
                                         nelems, mtype, peer, src_memh, dst_memh,
@@ -136,10 +145,11 @@ void ucc_tl_ucp_alltoall_onesided_put_progress(ucc_coll_task_t *ctask)
     ucc_rank_t         gsize     = UCC_TL_TEAM_SIZE(team);
     uint32_t           ntokens   = task->alltoall_onesided.tokens;
     int64_t            npolls    = task->alltoall_onesided.npolls;
+    uint32_t           stride    = task->alltoall_onesided.stride;
     ucc_mem_map_mem_h *dst_memh  = TASK_ARGS(task).dst_memh.global_memh;
     uint32_t          *posted    = &task->onesided.put_posted;
     uint32_t          *completed = &task->onesided.put_completed;
-    ucc_rank_t         peer      = (grank + *posted + 1) % gsize;
+    ucc_rank_t         peer;
     ucc_mem_map_mem_h  src_memh;
     size_t             nelems;
 
@@ -149,7 +159,15 @@ void ucc_tl_ucp_alltoall_onesided_put_progress(ucc_coll_task_t *ctask)
                    ? TASK_ARGS(task).src_memh.global_memh[grank]
                    : TASK_ARGS(task).src_memh.local_memh;
 
-    for (; *posted < gsize; peer = (peer + 1) % gsize) {
+    for (; *posted < gsize;) {
+        if (task->alltoall_onesided.fractional_pacing) {
+            if (ucc_get_time() < task->alltoall_onesided.next_post_time) {
+                return;
+            }
+            task->alltoall_onesided.next_post_time +=
+                task->alltoall_onesided.pacing_interval;
+        }
+        peer = (grank + (*posted * stride) % gsize + 1) % gsize;
         UCPCHECK_GOTO(
             ucc_tl_ucp_put_nb(PTR_OFFSET(src, peer * nelems),
                               PTR_OFFSET(dest, grank * nelems), nelems, mtype,
@@ -194,18 +212,23 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
         UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_alg;
     ucc_tl_ucp_schedule_t       *tl_schedule = NULL;
     ucc_rank_t                   group_size  = 1;
+    ucc_rank_t                   node_rank   = 0;
+    ucc_rank_t                   node_size   = 1;
     ucc_coll_task_t             *barrier_task;
     ucc_coll_task_t             *a2a_task;
     ucc_tl_ucp_task_t           *task;
     ucc_status_t                 status;
     size_t                       nelems;
     double                       rate;
+    double                       raw_tokens;
     size_t                       ratio;
     ucp_ep_h                     ep;
     ucp_ep_evaluate_perf_param_t param;
     ucp_ep_evaluate_perf_attr_t  attr;
     int64_t                      npolls;
     ucc_sbgp_t                  *sbgp;
+    ucc_rank_t                   gsize;
+    uint32_t                     stride;
 
     ALLTOALL_TASK_CHECK(coll_args->args, tl_team);
     if (!(coll_args->args.mask & UCC_COLL_ARGS_FIELD_FLAGS) ||
@@ -258,6 +281,8 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
         }
     } else {
         group_size = sbgp->group_size;
+        node_rank  = sbgp->group_rank;
+        node_size  = sbgp->group_size;
     }
 
     task                 = ucc_tl_ucp_init_task(coll_args, team);
@@ -284,12 +309,40 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
         &ep);
     ucp_ep_evaluate_perf(ep, &param, &attr);
 
-    rate  = (1 / attr.estimated_time) * (double)(perc_bw / 100.0);
-    ratio = (nelems > 0) ? nelems * group_size : 1;
-    task->alltoall_onesided.tokens = rate / ratio;
-    if (task->alltoall_onesided.tokens < 1) {
-        task->alltoall_onesided.tokens = 1;
+    rate       = (1 / attr.estimated_time) * (double)(perc_bw / 100.0);
+    ratio      = (nelems > 0) ? nelems * group_size : 1;
+    raw_tokens = rate / (double)ratio;
+    if (raw_tokens < 1.0) {
+        task->alltoall_onesided.tokens           = 1;
+        task->alltoall_onesided.fractional_pacing = 1;
+        task->alltoall_onesided.pacing_interval   =
+            (double)ratio / rate;
+        task->alltoall_onesided.next_post_time    =
+            ucc_get_time() +
+            (double)node_rank * task->alltoall_onesided.pacing_interval /
+                (double)node_size;
+    } else {
+        task->alltoall_onesided.tokens            = (uint32_t)raw_tokens;
+        task->alltoall_onesided.fractional_pacing = 0;
+        task->alltoall_onesided.pacing_interval   = 0.0;
+        task->alltoall_onesided.next_post_time    = 0.0;
     }
+
+    /* Option 3: stride-permuted peer ordering to desynchronize ranks.
+     * Find the smallest stride coprime with gsize (i.e. gcd(stride,gsize)==1).
+     * stride=1 degenerates to the original sequential order. */
+    gsize  = UCC_TL_TEAM_SIZE(tl_team);
+    stride = 1;
+    if (gsize > 2) {
+        uint32_t s;
+        for (s = 2; s < gsize; s++) {
+            uint32_t a = s, b = gsize;
+            while (b) { uint32_t t = b; b = a % b; a = t; }
+            if (a == 1) { stride = s; break; }
+        }
+    }
+    task->alltoall_onesided.stride = stride;
+
     task->super.post = ucc_tl_ucp_alltoall_onesided_start;
     npolls           = task->n_polls;
     if (alg == UCC_TL_UCP_ALLTOALL_ONESIDED_GET ||
