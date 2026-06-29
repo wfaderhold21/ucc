@@ -93,6 +93,9 @@ ucc_tl_ucp_context_service_init(const char *prefix, ucp_params_t ucp_params,
     ucc_free(service_prefix);
     service_prefix = NULL;
 
+    if (ctx->cfg.fault_tolerance) {
+        ucp_params.features |= UCP_FEATURE_WAKEUP;
+    }
     UCP_CHECK(ucp_init(&ucp_params, ucp_config, &ucp_context_service),
               "failed to init ucp context for service worker", err_cfg, ctx);
     ucp_config_release(ucp_config);
@@ -331,6 +334,26 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
               "failed to init service worker", err_cfg, UCC_ERR_NO_MESSAGE,
               self);
     }
+
+    self->ep_err_args = NULL;
+    if (self->cfg.fault_tolerance && UCC_TL_CTX_HAS_OOB(self)) {
+        ucc_rank_t n_eps = (ucc_rank_t)
+            self->super.super.ucc_context->params.oob.n_oob_eps;
+        ucc_rank_t r;
+        self->ep_err_args = ucc_calloc(n_eps, sizeof(*self->ep_err_args),
+                                       "ep_err_args");
+        if (!self->ep_err_args) {
+            tl_error(self->super.super.lib,
+                     "failed to allocate ep_err_args");
+            ucc_status = UCC_ERR_NO_MEMORY;
+            goto err_cfg;
+        }
+        for (r = 0; r < n_eps; r++) {
+            self->ep_err_args[r].ctx  = self;
+            self->ep_err_args[r].rank = r;
+        }
+    }
+
     ucc_free(prefix);
     prefix = NULL;
 
@@ -470,6 +493,8 @@ static inline void ucc_tl_ucp_worker_cleanup(ucc_tl_ucp_worker_t worker)
 UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
 {
     tl_debug(self->super.super.lib, "finalizing tl context: %p", self);
+    ucc_free(self->ep_err_args);
+    self->ep_err_args = NULL;
     if (self->remote_info) {
         ucc_tl_ucp_rinfo_destroy(self);
     }

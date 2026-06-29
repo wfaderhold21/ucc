@@ -111,7 +111,15 @@ typedef struct ucc_tl_ucp_context_config {
     ucc_tl_ucp_local_copy_type_t local_copy_type;
     int                          memtype_copy_enable;
     uint32_t                     exported_memory_handle;
+    uint32_t                     fault_tolerance;
 } ucc_tl_ucp_context_config_t;
+
+/* Per-endpoint argument passed to the UCX error handler when fault_tolerance
+ * is enabled.  Lets the handler identify which context rank died. */
+typedef struct ucc_tl_ucp_ep_err_handler_arg {
+    struct ucc_tl_ucp_context *ctx;
+    ucc_rank_t                 rank;
+} ucc_tl_ucp_ep_err_handler_arg_t;
 
 typedef ucc_tl_ucp_lib_config_t ucc_tl_ucp_team_config_t;
 
@@ -210,11 +218,14 @@ typedef ucc_status_t (*ucc_tl_ucp_send_nz_fn_t)(void *buffer, size_t msglen,
 typedef void (*ucc_tl_ucp_send_recv_counter_inc_fn_t)(uint32_t *counter);
 
 typedef struct ucc_tl_ucp_context {
-    ucc_tl_context_t            super;
-    ucc_tl_ucp_context_config_t cfg;
-    ucc_thread_mode_t           thread_mode;
-    ucc_tl_ucp_worker_t         worker;
-    ucc_tl_ucp_worker_t         service_worker;
+    ucc_tl_context_t                  super;
+    ucc_tl_ucp_context_config_t       cfg;
+    ucc_thread_mode_t                 thread_mode;
+    ucc_tl_ucp_worker_t               worker;
+    ucc_tl_ucp_worker_t               service_worker;
+    ucc_tl_ucp_ep_err_handler_arg_t  *ep_err_args; /*!< per-rank err handler args;
+                                                         non-NULL when fault_tolerance
+                                                         is enabled */
     struct {
         ucc_tl_ucp_send_nb_fn_t               ucc_tl_ucp_send_nb;
         ucc_tl_ucp_recv_nb_fn_t               ucc_tl_ucp_recv_nb;

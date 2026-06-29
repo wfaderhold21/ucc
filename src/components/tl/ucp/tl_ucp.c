@@ -315,6 +315,15 @@ static ucs_config_field_t ucc_tl_ucp_context_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_context_config_t, exported_memory_handle),
      UCC_CONFIG_TYPE_BOOL},
 
+    {"FAULT_TOLERANCE", "n",
+     "Enable UCX peer error handling on service-worker endpoints.  Required "
+     "for the resilience API (ucc_context_abort/recover/shrink) to detect "
+     "truly crashed ranks during the abort allreduce.  Restricts service "
+     "endpoint transport selection to transports that support "
+     "UCP_ERR_HANDLING_MODE_PEER (e.g. RC on InfiniBand).",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, fault_tolerance),
+     UCC_CONFIG_TYPE_BOOL},
+
     {NULL}};
 
 UCC_CLASS_DEFINE_NEW_FUNC(ucc_tl_ucp_lib_t, ucc_base_lib_t,

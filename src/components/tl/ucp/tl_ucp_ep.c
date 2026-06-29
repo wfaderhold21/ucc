@@ -10,13 +10,16 @@
 //NOLINTNEXTLINE
 static void ucc_tl_ucp_err_handler(void *arg, ucp_ep_h ep, ucs_status_t status)
 {
-    /* In case we don't have OOB barrier, errors are expected.
-     * This cb will suppress UCX from raising errors*/
-    ;
+    ucc_tl_ucp_ep_err_handler_arg_t *a = arg;
+    if (a) {
+        ucc_context_mark_rank_failed(a->ctx->super.super.ucc_context, a->rank);
+    }
 }
 
 static inline ucc_status_t ucc_tl_ucp_connect_ep(ucc_tl_ucp_context_t *ctx,
-                                                 int is_service, ucp_ep_h *ep,
+                                                 int is_service,
+                                                 ucc_rank_t rank,
+                                                 ucp_ep_h *ep,
                                                  void *ucp_address)
 {
     ucp_worker_h worker =
@@ -30,10 +33,12 @@ static inline ucc_status_t ucc_tl_ucp_connect_ep(ucc_tl_ucp_context_t *ctx,
     ep_params.field_mask = UCP_EP_PARAM_FIELD_REMOTE_ADDRESS;
     ep_params.address    = (ucp_address_t *)ucp_address;
 
-    if (!UCC_TL_CTX_HAS_OOB(ctx)) {
+    if (!UCC_TL_CTX_HAS_OOB(ctx) ||
+        (is_service && ctx->cfg.fault_tolerance)) {
         ep_params.err_mode        = UCP_ERR_HANDLING_MODE_PEER;
         ep_params.err_handler.cb  = ucc_tl_ucp_err_handler;
-        ep_params.err_handler.arg = NULL;
+        ep_params.err_handler.arg =
+            (is_service && ctx->ep_err_args) ? &ctx->ep_err_args[rank] : NULL;
         ep_params.field_mask     |= UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
                                     UCP_EP_PARAM_FIELD_ERR_HANDLER;
     }
@@ -52,14 +57,20 @@ ucc_status_t ucc_tl_ucp_connect_team_ep(ucc_tl_ucp_team_t *team,
 {
     ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
     int                   use_service_worker = USE_SERVICE_WORKER(team);
+    ucc_team_t           *core_team = UCC_TL_CORE_TEAM(team);
+    /* For service teams core_team is NULL and core_rank is already the
+     * context-level rank; for regular teams map it via the core team. */
+    ucc_rank_t            ctx_rank = core_team
+                                     ? ucc_get_ctx_rank(core_team, core_rank)
+                                     : core_rank;
     void                 *addr;
 
-    addr = ucc_get_team_ep_addr(UCC_TL_CORE_CTX(team), UCC_TL_CORE_TEAM(team),
+    addr = ucc_get_team_ep_addr(UCC_TL_CORE_CTX(team), core_team,
                                 core_rank, ucc_tl_ucp.super.super.id);
     addr = use_service_worker ? TL_UCP_EP_ADDR_WORKER_SERVICE(addr)
                               : TL_UCP_EP_ADDR_WORKER(addr);
 
-    return ucc_tl_ucp_connect_ep(ctx, use_service_worker, ep, addr);
+    return ucc_tl_ucp_connect_ep(ctx, use_service_worker, ctx_rank, ep, addr);
 }
 
 /* Finds next non-NULL ep in the storage and returns that handle
