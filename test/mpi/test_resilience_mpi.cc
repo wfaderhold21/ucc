@@ -5,18 +5,24 @@
  * Standalone MPI test binary for Phase 1 resilience API.
  *
  * Tests:
- *  1. guard_violations      — single-rank exclusive context; state-machine guards.
+ *  1. guard_violations      — single-rank exclusive context; state-machine
+ *                             guards return the correct error codes.
  *  2. abort_recover_no_fail — all ranks abort+recover; expect 0 failed ranks.
  *  3. post_after_abort      — collective_post while ABORTING → UCC_ERR_ABORTED.
- *  4. simulated_failure     — rank 0 marks rank (size-1); BOR agreement verified.
+ *  4. drain_inflight        — posted request is drained to UCC_ERR_ABORTED
+ *                             when abort is called before any progress.
+ *  5. simulated_failure     — rank 0 marks rank (size-1); BOR agreement
+ *                             propagates it to all surviving ranks.
+ *  6. shrink_allreduce      — full lifecycle: simulated failure → abort →
+ *                             recover → shrink (MPI_Comm_split sub-comm) →
+ *                             new team → allreduce SUM with data verification.
  *
- * Each test function creates its own UCC context and team (if needed), runs
- * the scenario, and returns 0 on pass or 1 on fail.  The final exit code is
- * the OR of all test results so that CI can detect any failure.
+ * Each test creates its own UCC context and team (if needed), runs the
+ * scenario, and returns 0 on pass or 1 on fail.  The final exit code is the
+ * OR of all test results so that CI detects any single failure.
  */
 #include <mpi.h>
 #include <iostream>
-#include <string>
 #include <ucc/api/ucc.h>
 
 extern "C" {
@@ -262,7 +268,57 @@ static int test_post_after_abort(ucc_lib_h lib, MPI_Comm comm)
 }
 
 /* -------------------------------------------------------------------------- */
-/* Test 4: BOR agreement on simulated failure.                                */
+/* Test 4: request posted before abort is drained to UCC_ERR_ABORTED.        */
+/*                                                                            */
+/* This tests the progress-queue drain path, not just the post-guard.        */
+/* The barrier is posted but no progress is made before abort is called;     */
+/* ucc_context_abort must mark the queued request ABORTED synchronously.     */
+/* -------------------------------------------------------------------------- */
+static int test_drain_inflight(ucc_lib_h lib, MPI_Comm comm)
+{
+    const char *label = "drain_inflight";
+
+    ucc_context_h ctx = create_global_ctx(lib, comm);
+    RES_EXPECT(ctx != nullptr, label);
+
+    ucc_team_h team = create_team(ctx, comm);
+    RES_EXPECT(team != nullptr, label);
+
+    ucc_coll_args_t args = {};
+    args.coll_type = UCC_COLL_TYPE_BARRIER;
+    ucc_coll_req_h req;
+    RES_CHECK(ucc_collective_init(&args, &req, team), label);
+
+    /* Post the barrier — it enters the progress queue but cannot complete
+       because no ucc_context_progress is called before abort. */
+    RES_CHECK(ucc_collective_post(req), label);
+
+    /* Abort immediately; the drain inside ucc_context_abort must mark the
+       queued request UCC_ERR_ABORTED. */
+    RES_CHECK(ucc_context_abort(ctx), label);
+
+    /* The posted request must now be ABORTED without requiring any further
+       progress.  This is the key correctness assertion. */
+    ucc_status_t req_st = ucc_collective_test(req);
+    RES_EXPECT(req_st == UCC_ERR_ABORTED, label);
+
+    ucc_collective_finalize(req);
+
+    RES_CHECK(poll_abort_test(ctx), label);
+    RES_CHECK(ucc_context_recover(ctx), label);
+
+    destroy_team(team, ctx);
+    ucc_context_destroy(ctx);
+
+    MPI_Barrier(comm);
+    if (world_rank == 0) {
+        std::cout << "[PASS] " << label << "\n";
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Test 5: BOR agreement on simulated failure.                                */
 /* Rank 0 marks rank (size-1) as failed.  After abort+recover every rank     */
 /* must see exactly that one rank in the agreed failed set.                   */
 /* -------------------------------------------------------------------------- */
@@ -311,6 +367,144 @@ static int test_simulated_failure(ucc_lib_h lib, MPI_Comm comm)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Test 6: shrink produces a functional context — allreduce with data check.  */
+/*                                                                            */
+/* Full lifecycle:                                                             */
+/*   1. All ranks create a context and simulate rank (size-1) failing.       */
+/*   2. All ranks participate in abort+recover (the BOR allreduce needs all  */
+/*      ranks alive, including the "failed" one in this simulation).         */
+/*   3. Survivors (ranks 0..size-2) call ucc_context_shrink with a new      */
+/*      MPI sub-communicator as OOB and create a team.                       */
+/*   4. Survivors run allreduce SUM: each contributes its sub-rank.          */
+/*   5. The expected sum is verified — a passing state machine with a broken */
+/*      context would produce a wrong answer or hang.                        */
+/* -------------------------------------------------------------------------- */
+static int test_shrink_allreduce(ucc_lib_h lib, MPI_Comm comm)
+{
+    const char *label = "shrink_allreduce";
+
+    if (world_size < 2) {
+        if (world_rank == 0) {
+            std::cout << "[SKIP] " << label << " (requires at least 2 ranks)\n";
+        }
+        return 0;
+    }
+
+    const int  failed_rank  = world_size - 1;
+    const bool is_survivor  = (world_rank < world_size - 1);
+
+    ucc_context_h ctx = create_global_ctx(lib, comm);
+    RES_EXPECT(ctx != nullptr, label);
+
+    /* Rank 0 marks rank (size-1) as the failed rank. */
+    if (world_rank == 0) {
+        ucc_context_mark_rank_failed(
+            reinterpret_cast<ucc_context_t *>(ctx),
+            static_cast<ucc_rank_t>(failed_rank));
+    }
+
+    /* All ranks participate in the abort BOR allreduce. */
+    RES_CHECK(ucc_context_abort(ctx), label);
+    RES_CHECK(poll_abort_test(ctx), label);
+    RES_CHECK(ucc_context_recover(ctx), label);
+
+    /* Split comm into survivor group (color 1) and failed group
+       (MPI_UNDEFINED so they get MPI_COMM_NULL). */
+    MPI_Comm sub_comm;
+    MPI_Comm_split(comm, is_survivor ? 1 : MPI_UNDEFINED,
+                   world_rank, &sub_comm);
+
+    if (!is_survivor) {
+        /* "Failed" rank just cleans up and synchronizes. */
+        ucc_context_destroy(ctx);
+        MPI_Barrier(comm);
+        return 0;
+    }
+
+    /* --- Survivors only from here --- */
+
+    int sub_rank, sub_size;
+    MPI_Comm_rank(sub_comm, &sub_rank);
+    MPI_Comm_size(sub_comm, &sub_size);
+
+    /* Shrink: create new context for survivors using the sub-communicator. */
+    ucc_context_config_h cfg;
+    RES_CHECK(ucc_context_config_read(lib, nullptr, &cfg), label);
+
+    ucc_context_params_t new_params = {};
+    new_params.mask              = UCC_CONTEXT_PARAM_FIELD_OOB;
+    new_params.oob.allgather     = oob_allgather;
+    new_params.oob.req_test      = oob_allgather_test;
+    new_params.oob.req_free      = oob_allgather_free;
+    new_params.oob.coll_info     = (void *)(uintptr_t)sub_comm;
+    new_params.oob.n_oob_eps     = sub_size;
+    new_params.oob.oob_ep        = sub_rank;
+
+    ucc_context_h new_ctx;
+    ucc_status_t  shrink_st = ucc_context_shrink(ctx, &new_params, cfg, &new_ctx);
+    ucc_context_config_release(cfg);
+    RES_CHECK(shrink_st, label);
+
+    /* Create a team on the new (smaller) context. */
+    ucc_team_h team = create_team(new_ctx, sub_comm);
+    RES_EXPECT(team != nullptr, label);
+
+    /* Run allreduce SUM: each survivor contributes its sub_rank (0, 1, ...).
+       Expected result: 0 + 1 + ... + (sub_size - 1) = sub_size*(sub_size-1)/2.
+       A correct answer proves the collective ran on the right set of ranks
+       with the right data — not just that it completed without crashing. */
+    int32_t sbuf        = (int32_t)sub_rank;
+    int32_t rbuf        = 0;
+    int32_t expected    = (int32_t)(sub_size * (sub_size - 1) / 2);
+
+    ucc_coll_args_t args = {};
+    args.coll_type            = UCC_COLL_TYPE_ALLREDUCE;
+    args.op                   = UCC_OP_SUM;
+    args.src.info.buffer      = &sbuf;
+    args.src.info.count       = 1;
+    args.src.info.datatype    = UCC_DT_INT32;
+    args.src.info.mem_type    = UCC_MEMORY_TYPE_HOST;
+    args.dst.info.buffer      = &rbuf;
+    args.dst.info.count       = 1;
+    args.dst.info.datatype    = UCC_DT_INT32;
+    args.dst.info.mem_type    = UCC_MEMORY_TYPE_HOST;
+
+    ucc_coll_req_h req;
+    RES_CHECK(ucc_collective_init(&args, &req, team), label);
+    RES_CHECK(ucc_collective_post(req), label);
+
+    ucc_status_t coll_st;
+    do {
+        ucc_context_progress(new_ctx);
+        coll_st = ucc_collective_test(req);
+    } while (coll_st == UCC_INPROGRESS);
+    RES_CHECK(coll_st, label);
+    ucc_collective_finalize(req);
+
+    if (rbuf != expected) {
+        std::cerr << "[rank " << world_rank << "] FAIL " << label
+                  << ": wrong allreduce result: got " << rbuf
+                  << " expected " << expected << "\n";
+        destroy_team(team, new_ctx);
+        ucc_context_destroy(new_ctx);
+        MPI_Comm_free(&sub_comm);
+        MPI_Barrier(comm);
+        return 1;
+    }
+
+    destroy_team(team, new_ctx);
+    ucc_context_destroy(new_ctx);
+    MPI_Comm_free(&sub_comm);
+
+    /* Synchronize with the "failed" rank before declaring pass. */
+    MPI_Barrier(comm);
+    if (world_rank == 0) {
+        std::cout << "[PASS] " << label << "\n";
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
 /* main                                                                        */
 /* -------------------------------------------------------------------------- */
 int main(int argc, char **argv)
@@ -345,7 +539,9 @@ int main(int argc, char **argv)
     failed |= test_guard_violations(lib);
     failed |= test_abort_recover_no_fail(lib, MPI_COMM_WORLD);
     failed |= test_post_after_abort(lib, MPI_COMM_WORLD);
+    failed |= test_drain_inflight(lib, MPI_COMM_WORLD);
     failed |= test_simulated_failure(lib, MPI_COMM_WORLD);
+    failed |= test_shrink_allreduce(lib, MPI_COMM_WORLD);
 
     /* Aggregate: if any rank failed, all ranks report failure. */
     int global_failed;
