@@ -959,6 +959,18 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     if (UCC_OK != ucc_context_free_attr(&context->attr)) {
         ucc_error("failed to free context attributes");
     }
+
+    /* A context that has gone through abort/recover/shrink no longer has an
+     * intact original rank group: failed ranks are gone and, after a shrink,
+     * the survivors live in a different (smaller) context.  The TL/UCP context
+     * teardown calls a collective OOB barrier (ucc_tl_ucp_context_barrier) that
+     * requires ALL original ranks to participate, so running it here would hang
+     * forever.  Suppress it by clearing the OOB field for any non-ACTIVE
+     * context; UCC_TL_CTX_HAS_OOB reads this mask live during cleanup. */
+    if (context->state != UCC_CTX_STATE_ACTIVE) {
+        context->params.mask &= ~UCC_CONTEXT_PARAM_FIELD_OOB;
+    }
+
     for (i = 0; i < context->n_cl_ctx; i++) {
         cl_ctx = context->cl_ctx[i];
         cl_lib = ucc_derived_of(cl_ctx->super.lib, ucc_cl_lib_t);
@@ -1655,7 +1667,10 @@ ucc_status_t ucc_context_shrink(ucc_context_h              ctx_h,
         return status;
     }
 
-    /* Destroy the old context */
+    /* Destroy the old context.  It is in RECOVERED state, so
+     * ucc_context_destroy suppresses the collective TL/UCP teardown barrier
+     * that would otherwise hang waiting on ranks that are no longer part of
+     * this context's rank group. */
     ucc_context_destroy(ctx_h);
 
     return UCC_OK;
