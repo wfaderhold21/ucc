@@ -72,7 +72,7 @@ static void ucc_pq_st_drain(ucc_progress_queue_t *pq, ucc_team_t *team_filter,
 
     ucc_list_for_each_safe(task, tmp, &pq_st->list, list_elem) {
         if (team_filter != NULL &&
-            task->team->params.team != team_filter) {
+            (task->team == NULL || task->team->params.team != team_filter)) {
             continue;
         }
         ucc_list_del(&task->list_elem);

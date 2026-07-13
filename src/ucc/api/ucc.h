@@ -1308,7 +1308,8 @@ enum ucc_team_attr_field {
     UCC_TEAM_ATTR_FIELD_SYNC_TYPE              = UCC_BIT(4),
     UCC_TEAM_ATTR_FIELD_MEM_PARAMS             = UCC_BIT(5),
     UCC_TEAM_ATTR_FIELD_SIZE                   = UCC_BIT(6),
-    UCC_TEAM_ATTR_FIELD_EPS                    = UCC_BIT(7)
+    UCC_TEAM_ATTR_FIELD_EPS                    = UCC_BIT(7),
+    UCC_TEAM_ATTR_FIELD_FAILED_RANKS           = UCC_BIT(8)
 };
 
 /**
@@ -1598,6 +1599,8 @@ typedef struct ucc_team_attr {
     ucc_mem_map_params_t   mem_params;
     uint32_t               size;
     uint64_t              *eps;
+    uint32_t              *failed_ranks;    /*!< Array of failed team ranks */
+    uint32_t               n_failed_ranks;  /*!< Number of failed team ranks */
 } ucc_team_attr_t;
 
 

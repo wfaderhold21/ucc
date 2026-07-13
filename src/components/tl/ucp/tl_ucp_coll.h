@@ -129,10 +129,16 @@ static inline ucc_status_t ucc_tl_ucp_test(ucc_tl_ucp_task_t *task)
 {
     int polls = 0;
 
+    if (task->super.status < 0) {
+        return UCC_INPROGRESS;
+    }
     if (UCC_TL_UCP_TASK_P2P_COMPLETE(task)) {
         return UCC_OK;
     }
     while (polls++ < task->n_polls) {
+        if (task->super.status < 0) {
+            return UCC_INPROGRESS;
+        }
         if (UCC_TL_UCP_TASK_P2P_COMPLETE(task)) {
             return UCC_OK;
         }
@@ -151,10 +157,16 @@ static inline ucc_status_t ucc_tl_ucp_test_recv(ucc_tl_ucp_task_t *task)
 {
     int polls = 0;
 
+    if (task->super.status < 0) {
+        return UCC_INPROGRESS;
+    }
     if (UCC_TL_UCP_TASK_RECV_COMPLETE(task)) {
         return UCC_OK;
     }
     while (polls++ < task->n_polls) {
+        if (task->super.status < 0) {
+            return UCC_INPROGRESS;
+        }
         if (UCC_TL_UCP_TASK_RECV_COMPLETE(task)) {
             return UCC_OK;
         }
@@ -167,10 +179,16 @@ static inline ucc_status_t ucc_tl_ucp_test_send(ucc_tl_ucp_task_t *task)
 {
     int polls = 0;
 
+    if (task->super.status < 0) {
+        return UCC_INPROGRESS;
+    }
     if (UCC_TL_UCP_TASK_SEND_COMPLETE(task)) {
         return UCC_OK;
     }
     while (polls++ < task->n_polls) {
+        if (task->super.status < 0) {
+            return UCC_INPROGRESS;
+        }
         if (UCC_TL_UCP_TASK_SEND_COMPLETE(task)) {
             return UCC_OK;
         }
@@ -187,10 +205,16 @@ static inline ucc_status_t ucc_tl_ucp_test_ring(ucc_tl_ucp_task_t *task)
 {
     int polls = 0;
 
+    if (task->super.status < 0) {
+        return UCC_INPROGRESS;
+    }
     if (UCC_TL_UCP_TASK_RING_P2P_COMPLETE(task)) {
         return UCC_OK;
     }
     while (polls++ < task->n_polls) {
+        if (task->super.status < 0) {
+            return UCC_INPROGRESS;
+        }
         if (UCC_TL_UCP_TASK_RING_P2P_COMPLETE(task)) {
             return UCC_OK;
         }
@@ -212,11 +236,17 @@ static inline ucc_status_t ucc_tl_ucp_test_onesided(ucc_tl_ucp_task_t *task,
 {
     int polls = 0;
 
+    if (task->super.status < 0) {
+        return UCC_INPROGRESS;
+    }
     if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task) &&
         UCC_TL_UCP_TASK_ONESIDED_SYNC_COMPLETE(task, sync_end)) {
         return UCC_OK;
     }
     while (polls++ < task->n_polls) {
+        if (task->super.status < 0) {
+            return UCC_INPROGRESS;
+        }
         if (UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE(task) &&
             UCC_TL_UCP_TASK_ONESIDED_SYNC_COMPLETE(task, sync_end)) {
             return UCC_OK;

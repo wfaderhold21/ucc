@@ -34,6 +34,7 @@ static doca_error_t ucc_status_to_doca_error(ucc_status_t status)
         doca_err = DOCA_ERROR_FULL;
         break;
     case UCC_ERR_NO_MESSAGE:
+    case UCC_ERR_IO_ERROR:
     case UCC_ERR_LAST:
         doca_err = DOCA_ERROR_UNKNOWN;
         break;
@@ -42,6 +43,16 @@ static doca_error_t ucc_status_to_doca_error(ucc_status_t status)
         break;
     case UCC_ERR_TIMED_OUT:
         doca_err = DOCA_ERROR_TIME_OUT;
+        break;
+    case UCC_ERR_COMM_FAILURE:
+    case UCC_ERR_ABORTED:
+        doca_err = DOCA_ERROR_UNKNOWN;
+        break;
+    case UCC_ERR_INVALID_STATE:
+        doca_err = DOCA_ERROR_BAD_STATE;
+        break;
+    default:
+        doca_err = DOCA_ERROR_UNKNOWN;
         break;
     }
 

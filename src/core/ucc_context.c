@@ -947,6 +947,40 @@ static ucc_status_t ucc_context_free_attr(ucc_context_attr_t *context_attr)
     return UCC_OK;
 }
 
+static inline uint64_t ucc_context_failure_map_load(ucc_context_t *context,
+                                                    size_t word)
+{
+    return __atomic_load_n(&context->failure_map[word], __ATOMIC_RELAXED);
+}
+
+static void ucc_context_failure_map_snapshot(ucc_context_t *context,
+                                             uint64_t *dst, size_t map_words)
+{
+    size_t w;
+
+    for (w = 0; w < map_words; w++) {
+        dst[w] = ucc_context_failure_map_load(context, w);
+    }
+}
+
+static int ucc_context_has_failed_ranks(ucc_context_t *context)
+{
+    size_t map_words, w;
+
+    if (!context->failure_map ||
+        !(context->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB)) {
+        return 0;
+    }
+
+    map_words = ((ucc_rank_t)context->params.oob.n_oob_eps + 63) / 64;
+    for (w = 0; w < map_words; w++) {
+        if (ucc_context_failure_map_load(context, w) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 ucc_status_t ucc_context_destroy(ucc_context_t *context)
 {
     ucc_cl_context_t *cl_ctx;
@@ -960,14 +994,21 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
         ucc_error("failed to free context attributes");
     }
 
-    /* A context that has gone through abort/recover/shrink no longer has an
-     * intact original rank group: failed ranks are gone and, after a shrink,
-     * the survivors live in a different (smaller) context.  The TL/UCP context
-     * teardown calls a collective OOB barrier (ucc_tl_ucp_context_barrier) that
-     * requires ALL original ranks to participate, so running it here would hang
-     * forever.  Suppress it by clearing the OOB field for any non-ACTIVE
-     * context; UCC_TL_CTX_HAS_OOB reads this mask live during cleanup. */
-    if (context->state != UCC_CTX_STATE_ACTIVE) {
+    if (context->abort_req) {
+        ucc_service_coll_finalize(context->abort_req);
+        context->abort_req = NULL;
+    }
+    ucc_free(context->abort_sbuf);
+    context->abort_sbuf = NULL;
+    ucc_free(context->abort_rbuf);
+    context->abort_rbuf = NULL;
+    ucc_free(context->abort_map);
+    context->abort_map = NULL;
+
+    /* Skip TL/UCP teardown barrier only after real failure.  With no failed
+     * rank, all original ranks still exist and normal OOB cleanup can run. */
+    if (context->state != UCC_CTX_STATE_ACTIVE &&
+        ucc_context_has_failed_ranks(context)) {
         context->params.mask &= ~UCC_CONTEXT_PARAM_FIELD_OOB;
     }
 
@@ -1020,11 +1061,6 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     ucc_free(context->ids.pool);
     ucc_free(context->failure_map);
     ucc_free(context->failed_ranks);
-    ucc_free(context->abort_sbuf);
-    ucc_free(context->abort_rbuf);
-    if (context->abort_req) {
-        ucc_service_coll_finalize(context->abort_req);
-    }
     ucc_free(context);
     return UCC_OK;
 }
@@ -1288,7 +1324,7 @@ void ucc_context_mark_rank_failed(ucc_context_t *ctx, ucc_rank_t rank)
            regardless of current state.  If an abort allreduce is in flight
            the restart logic will pick this up; if abort has not started yet
            the flag survives until abort_test sees it. */
-        ctx->abort_new_failure = 1;
+        __atomic_store_n(&ctx->abort_new_failure, 1, __ATOMIC_RELAXED);
         return;
     }
 
@@ -1296,7 +1332,7 @@ void ucc_context_mark_rank_failed(ucc_context_t *ctx, ucc_rank_t rank)
     bitmask = (uint64_t)1 << (rank % 64);
     __atomic_fetch_or(&ctx->failure_map[word], bitmask, __ATOMIC_RELAXED);
     if (ctx->state == UCC_CTX_STATE_ABORTING) {
-        ctx->abort_new_failure = 1;
+        __atomic_store_n(&ctx->abort_new_failure, 1, __ATOMIC_RELAXED);
     }
 }
 
@@ -1317,9 +1353,13 @@ static ucc_status_t ucc_context_abort_build_subset(ucc_context_t *ctx,
     ucc_rank_t *alive, i;
 
     for (i = 0; i < n_ranks; i++) {
-        if (!(ctx->failure_map[i / 64] & ((uint64_t)1 << (i % 64)))) {
+        if (!(ucc_context_failure_map_load(ctx, i / 64) &
+              ((uint64_t)1 << (i % 64)))) {
             n_alive++;
         }
+    }
+    if (n_alive == 0) {
+        return UCC_ERR_INVALID_STATE;
     }
 
     alive = ucc_malloc(n_alive * sizeof(ucc_rank_t), "abort_map");
@@ -1329,12 +1369,17 @@ static ucc_status_t ucc_context_abort_build_subset(ucc_context_t *ctx,
 
     n_alive = 0;
     for (i = 0; i < n_ranks; i++) {
-        if (!(ctx->failure_map[i / 64] & ((uint64_t)1 << (i % 64)))) {
+        if (!(ucc_context_failure_map_load(ctx, i / 64) &
+              ((uint64_t)1 << (i % 64)))) {
             if (i == ctx->rank) {
                 myrank = n_alive;
             }
             alive[n_alive++] = i;
         }
+    }
+    if (myrank == UCC_RANK_MAX) {
+        ucc_free(alive);
+        return UCC_ERR_INVALID_STATE;
     }
 
     *map_out           = alive;
@@ -1346,8 +1391,8 @@ static ucc_status_t ucc_context_abort_build_subset(ucc_context_t *ctx,
 /**
  * Begin abort sequence:
  *  1. Guard: must be ACTIVE.
- *  2. Drain all in-flight collectives with UCC_ERR_ABORTED.
- *  3. Snapshot failure_map into abort_sbuf.
+ *  2. Snapshot failure_map into abort_sbuf.
+ *  3. Drain all in-flight collectives with UCC_ERR_ABORTED.
  *  4. Post service-level allreduce BOR to gather global failure map.
  *
  * Requires an internal service team (ctx->service_team != NULL).
@@ -1359,6 +1404,7 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
     size_t                  map_words;
     ucc_subset_t            subset;
     ucc_tl_iface_t         *tl_iface;
+    ucc_service_coll_req_t *abort_req;
     ucc_status_t            status;
 
     if (ucc_unlikely(ctx->state != UCC_CTX_STATE_ACTIVE)) {
@@ -1372,21 +1418,15 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
         return UCC_ERR_INVALID_STATE;
     }
 
-    ctx->state = UCC_CTX_STATE_ABORTING;
-    /* Do not clear abort_new_failure: a pre-abort unknown-rank failure may
-       have already set it and we want abort_test to re-snapshot on restart. */
-
-    /* Step 1: Drain all queued collectives */
-    ucc_progress_queue_drain(ctx->pq, NULL, UCC_ERR_ABORTED);
-
-    /* Step 2: Allocate and snapshot failure_map into abort_sbuf */
+    /* Allocate abort scratch before draining user collectives.  The service
+     * allreduce is posted after the drain because TL implementations may
+     * enqueue the service task on this context's progress queue. */
     n_ranks   = (ucc_rank_t)ctx->params.oob.n_oob_eps;
     map_words = (n_ranks + 63) / 64;
 
     ctx->abort_sbuf = ucc_malloc(map_words * sizeof(uint64_t), "abort_sbuf");
     if (!ctx->abort_sbuf) {
         ucc_error("failed to allocate abort_sbuf");
-        ctx->state = UCC_CTX_STATE_ACTIVE;
         return UCC_ERR_NO_MEMORY;
     }
     ctx->abort_rbuf = ucc_malloc(map_words * sizeof(uint64_t), "abort_rbuf");
@@ -1394,12 +1434,21 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
         ucc_error("failed to allocate abort_rbuf");
         ucc_free(ctx->abort_sbuf);
         ctx->abort_sbuf = NULL;
-        ctx->state = UCC_CTX_STATE_ACTIVE;
         return UCC_ERR_NO_MEMORY;
     }
-    memcpy(ctx->abort_sbuf, ctx->failure_map, map_words * sizeof(uint64_t));
+    abort_req = ucc_malloc(sizeof(*abort_req), "abort_service_req");
+    if (!abort_req) {
+        ucc_error("failed to allocate abort service req");
+        ucc_free(ctx->abort_sbuf);
+        ucc_free(ctx->abort_rbuf);
+        ctx->abort_sbuf = NULL;
+        ctx->abort_rbuf = NULL;
+        return UCC_ERR_NO_MEMORY;
+    }
 
-    /* Step 3: Post BOR allreduce over the full context service set.
+    ucc_context_failure_map_snapshot(ctx, ctx->abort_sbuf, map_words);
+
+    /* Post BOR allreduce over the full context service set.
      *
      * All surviving ranks must use the same initial subset; since ranks
      * have asymmetric failure_map views at abort time (only some may have
@@ -1414,38 +1463,34 @@ ucc_status_t ucc_context_abort(ucc_context_h ctx_h)
     ctx->abort_map    = NULL; /* no backing array needed for FULL */
 
     tl_iface = UCC_TL_CTX_IFACE(ctx->service_ctx);
-    ctx->abort_req = ucc_malloc(sizeof(*ctx->abort_req), "abort_service_req");
-    if (!ctx->abort_req) {
-        ucc_error("failed to allocate abort service req");
-        ucc_free(ctx->abort_sbuf);
-        ucc_free(ctx->abort_rbuf);
-        ctx->abort_sbuf = NULL;
-        ctx->abort_rbuf = NULL;
-        ctx->state      = UCC_CTX_STATE_ACTIVE;
-        return UCC_ERR_NO_MEMORY;
-    }
-    ctx->abort_req->team   = NULL;
-    ctx->abort_req->subset = subset;
-    ctx->abort_req->data   = NULL;
+    abort_req->team   = NULL;
+    abort_req->subset = subset;
+    abort_req->data   = NULL;
+
+    ctx->state = UCC_CTX_STATE_ABORTING;
+    /* Do not clear abort_new_failure: a pre-abort unknown-rank failure may
+       have already set it and we want abort_test to re-snapshot on restart. */
+
+    ucc_progress_queue_drain(ctx->pq, NULL, UCC_ERR_ABORTED);
 
     status = tl_iface->scoll.allreduce(&ctx->service_team->super,
                                        ctx->abort_sbuf, ctx->abort_rbuf,
                                        UCC_DT_UINT64, map_words,
                                        UCC_OP_BOR, subset,
-                                       &ctx->abort_req->task);
+                                       &abort_req->task);
     if (status < 0) {
         ucc_error("failed to post abort allreduce: %s",
                   ucc_status_string(status));
-        ucc_free(ctx->abort_req);
+        ucc_free(abort_req);
         ucc_free(ctx->abort_sbuf);
         ucc_free(ctx->abort_rbuf);
-        ctx->abort_req  = NULL;
         ctx->abort_sbuf = NULL;
         ctx->abort_rbuf = NULL;
         ctx->state      = UCC_CTX_STATE_ACTIVE;
         return status;
     }
 
+    ctx->abort_req = abort_req;
     return UCC_OK;
 }
 
@@ -1467,9 +1512,13 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
         ucc_error("ucc_context_abort_test: context not in ABORTING state");
         return UCC_ERR_INVALID_STATE;
     }
+    if (ucc_unlikely(!ctx->abort_req)) {
+        ucc_error("ucc_context_abort_test: no abort allreduce in flight");
+        return UCC_ERR_INVALID_STATE;
+    }
 
     /* If a new failure arrived, restart the allreduce */
-    if (ctx->abort_new_failure) {
+    if (__atomic_load_n(&ctx->abort_new_failure, __ATOMIC_RELAXED)) {
         /* Only finalize and restart once the running BOR has actually
            completed. abort_new_failure can be set by mark_rank_failed during
            a progress call before the task's own status is updated, so the
@@ -1478,61 +1527,57 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
             ucc_context_progress(ctx_h);
             return UCC_INPROGRESS;
         }
-        ctx->abort_new_failure = 0;
         n_ranks   = (ucc_rank_t)ctx->params.oob.n_oob_eps;
         map_words = (n_ranks + 63) / 64;
 
-        /* finalize old request */
-        ucc_collective_finalize_internal(ctx->abort_req->task);
-        ucc_free(ctx->abort_req);
-        ctx->abort_req = NULL;
-
         /* re-snapshot */
-        memcpy(ctx->abort_sbuf, ctx->failure_map,
-               map_words * sizeof(uint64_t));
+        ucc_context_failure_map_snapshot(ctx, ctx->abort_sbuf, map_words);
 
         /* re-post over surviving ranks (re-reads failure_map, which may now
          * include the rank that caused the previous COMM_FAILURE) */
-        ucc_subset_t  subset;
-        ucc_rank_t   *new_map = NULL;
+        ucc_subset_t             subset;
+        ucc_rank_t              *new_map = NULL;
+        ucc_rank_t              *old_map = ctx->abort_map;
+        ucc_service_coll_req_t  *old_req = ctx->abort_req;
+        ucc_service_coll_req_t  *new_req;
 
-        ucc_free(ctx->abort_map);
-        ctx->abort_map = NULL;
         status = ucc_context_abort_build_subset(ctx, &new_map, &subset);
         if (status < 0) {
             ucc_error("failed to rebuild abort subset: %s",
                       ucc_status_string(status));
             return status;
         }
-        ctx->abort_map = new_map;
 
         tl_iface = UCC_TL_CTX_IFACE(ctx->service_ctx);
-        ctx->abort_req = ucc_malloc(sizeof(*ctx->abort_req),
-                                    "abort_service_req");
-        if (!ctx->abort_req) {
+        new_req = ucc_malloc(sizeof(*new_req), "abort_service_req");
+        if (!new_req) {
             ucc_error("failed to re-allocate abort service req");
-            ucc_free(ctx->abort_map);
-            ctx->abort_map = NULL;
+            ucc_free(new_map);
             return UCC_ERR_NO_MEMORY;
         }
-        ctx->abort_req->team   = NULL;
-        ctx->abort_req->subset = subset;
-        ctx->abort_req->data   = NULL;
+        new_req->team   = NULL;
+        new_req->subset = subset;
+        new_req->data   = NULL;
 
         status = tl_iface->scoll.allreduce(&ctx->service_team->super,
                                            ctx->abort_sbuf, ctx->abort_rbuf,
                                            UCC_DT_UINT64, map_words,
                                            UCC_OP_BOR, subset,
-                                           &ctx->abort_req->task);
+                                           &new_req->task);
         if (status < 0) {
             ucc_error("failed to re-post abort allreduce: %s",
                       ucc_status_string(status));
-            ucc_free(ctx->abort_req);
-            ucc_free(ctx->abort_map);
-            ctx->abort_req = NULL;
-            ctx->abort_map = NULL;
+            ucc_free(new_req);
+            ucc_free(new_map);
             return status;
         }
+
+        ctx->abort_req = new_req;
+        ctx->abort_map = new_map;
+        __atomic_store_n(&ctx->abort_new_failure, 0, __ATOMIC_RELAXED);
+        ucc_collective_finalize_internal(old_req->task);
+        ucc_free(old_req);
+        ucc_free(old_map);
         return UCC_INPROGRESS;
     }
 
@@ -1550,7 +1595,7 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
            the failed rank may remain unknown (UCC_RANK_MAX) until a recv
            error fires.  Either way the restart rebuilds the best subset
            possible from the current failure_map. */
-        ctx->abort_new_failure = 1;
+        __atomic_store_n(&ctx->abort_new_failure, 1, __ATOMIC_RELAXED);
         return UCC_INPROGRESS;
     }
     if (status < 0) {
@@ -1563,13 +1608,19 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
     map_words = (n_ranks + 63) / 64;
 
     for (size_t w = 0; w < map_words; w++) {
-        ctx->failure_map[w] |= ctx->abort_rbuf[w];
+        __atomic_fetch_or(&ctx->failure_map[w], ctx->abort_rbuf[w],
+                          __ATOMIC_RELAXED);
+    }
+
+    if (__atomic_load_n(&ctx->abort_new_failure, __ATOMIC_RELAXED)) {
+        return UCC_INPROGRESS;
     }
 
     /* Count failed ranks */
     n_failed = 0;
     for (i = 0; i < n_ranks; i++) {
-        if (ctx->failure_map[i / 64] & ((uint64_t)1 << (i % 64))) {
+        if (ucc_context_failure_map_load(ctx, i / 64) &
+            ((uint64_t)1 << (i % 64))) {
             n_failed++;
         }
     }
@@ -1587,11 +1638,16 @@ ucc_status_t ucc_context_abort_test(ucc_context_h ctx_h)
         }
         ucc_rank_t idx = 0;
         for (i = 0; i < n_ranks; i++) {
-            if (ctx->failure_map[i / 64] & ((uint64_t)1 << (i % 64))) {
+            if (ucc_context_failure_map_load(ctx, i / 64) &
+                ((uint64_t)1 << (i % 64))) {
                 ctx->failed_ranks[idx++] = i;
             }
         }
         ctx->n_failed_ranks = n_failed;
+    }
+
+    if (__atomic_load_n(&ctx->abort_new_failure, __ATOMIC_RELAXED)) {
+        return UCC_INPROGRESS;
     }
 
     /* Finalize and free abort request/buffers */

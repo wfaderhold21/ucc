@@ -73,6 +73,7 @@ typedef struct ucc_team {
     uint64_t               *abort_rbuf;        /*!< Recv buffer for abort BOR    */
     ucc_service_coll_req_t *abort_req;         /*!< In-flight abort allreduce    */
     int                     abort_new_failure; /*!< New failure during allreduce */
+    ucc_rank_t             *abort_map;         /*!< Surviving team-ranks array   */
 } ucc_team_t;
 
 /* If the bit is set then team_id is provided by the user */
@@ -81,6 +82,8 @@ typedef struct ucc_team {
 #define UCC_TEAM_ID_MAX ((uint16_t)UCC_BIT(15) - 1)
 
 void ucc_copy_team_params(ucc_team_params_t *dst, const ucc_team_params_t *src);
+
+void ucc_team_mark_rank_failed(ucc_team_t *team, ucc_rank_t rank);
 
 /* Returns addressing information for "rank" in a team.
    If ucc context was created with OOB then addr storage is located on context.

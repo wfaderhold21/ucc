@@ -28,6 +28,7 @@ void ucc_tl_ucp_scatterv_linear_progress(ucc_coll_task_t *coll_task)
     int                polls = 0;
     ucc_rank_t         peer, posts, nreqs;
     size_t             dt_size, data_size, data_displ;
+    ucc_status_t       status;
 
     if (UCC_IS_ROOT(*args, grank)) {
         posts   = UCC_TL_UCP_TEAM_LIB(team)->cfg.scatterv_linear_num_posts;
@@ -55,7 +56,11 @@ void ucc_tl_ucp_scatterv_linear_progress(ucc_coll_task_t *coll_task)
         }
     }
 
-    task->super.status = ucc_tl_ucp_test(task);
+    status = ucc_tl_ucp_test(task);
+    if (task->super.status < 0) {
+        goto out;
+    }
+    task->super.status = status;
 out:
     if (task->super.status != UCC_INPROGRESS) {
         UCC_TL_UCP_PROFILE_REQUEST_EVENT(coll_task, "ucp_scatterv_linear_done",

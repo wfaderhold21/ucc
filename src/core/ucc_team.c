@@ -40,7 +40,8 @@ void ucc_copy_team_params(ucc_team_params_t *dst, const ucc_team_params_t *src)
 ucc_status_t ucc_team_get_attr(ucc_team_h team, ucc_team_attr_t *team_attr)
 {
     uint64_t supported_fields =
-        UCC_TEAM_ATTR_FIELD_SIZE | UCC_TEAM_ATTR_FIELD_EP;
+        UCC_TEAM_ATTR_FIELD_SIZE | UCC_TEAM_ATTR_FIELD_EP |
+        UCC_TEAM_ATTR_FIELD_FAILED_RANKS;
 
     if (team_attr->mask & ~supported_fields) {
         ucc_error("ucc_team_get_attr() is not implemented for specified field");
@@ -55,6 +56,11 @@ ucc_status_t ucc_team_get_attr(ucc_team_h team, ucc_team_attr_t *team_attr)
         team_attr->ep = team->rank;
     }
 
+    if (team_attr->mask & UCC_TEAM_ATTR_FIELD_FAILED_RANKS) {
+        team_attr->failed_ranks   = team->failed_ranks;
+        team_attr->n_failed_ranks = team->n_failed_ranks;
+    }
+
     return UCC_OK;
 }
 
@@ -62,6 +68,13 @@ static ucc_status_t ucc_team_create_post_single(ucc_context_t *context,
                                                 ucc_team_t *team)
 {
     ucc_status_t status;
+
+    team->cl_teams = ucc_malloc(sizeof(ucc_cl_team_t *) * context->n_cl_ctx);
+    if (!team->cl_teams) {
+        ucc_error("failed to allocate %zd bytes for cl teams array",
+                  sizeof(ucc_cl_team_t *) * context->n_cl_ctx);
+        return UCC_ERR_NO_MEMORY;
+    }
 
     if (context->service_team && team->size > 1) {
         /* Use internal service team for OOB, skip OOB if team size is 1 */
@@ -75,12 +88,6 @@ static ucc_status_t ucc_team_create_post_single(ucc_context_t *context,
         team->bp.params.mask |= UCC_TEAM_PARAM_FIELD_OOB;
     }
 
-    team->cl_teams = ucc_malloc(sizeof(ucc_cl_team_t *) * context->n_cl_ctx);
-    if (!team->cl_teams) {
-        ucc_error("failed to allocate %zd bytes for cl teams array",
-                  sizeof(ucc_cl_team_t *) * context->n_cl_ctx);
-        return UCC_ERR_NO_MEMORY;
-    }
     team->bp.rank                 = team->rank;
     team->bp.size                 = team->size;
     team->bp.team                 = team;
@@ -214,6 +221,7 @@ ucc_status_t ucc_team_create_post(ucc_context_h *contexts, uint32_t num_contexts
     team->abort_rbuf        = NULL;
     team->abort_req         = NULL;
     team->abort_new_failure = 0;
+    team->abort_map         = NULL;
     {
         /* Allocate failure_map: one bit per team rank */
         size_t map_words = ((size_t)team->size + 63) / 64;
@@ -231,13 +239,12 @@ ucc_status_t ucc_team_create_post(ucc_context_h *contexts, uint32_t num_contexts
     if (ucc_unlikely(status < 0)) {
         goto err_ctx_alloc;
     }
-    /* Track team count on the context only after post succeeds */
-    contexts[0]->n_teams++;
     *new_team = team;
     return status;
 
 err_ctx_alloc:
     *new_team = NULL;
+    ucc_free(team->cl_teams);
     ucc_free(team->failure_map);
     ucc_free(team->contexts);
     ucc_free(team);
@@ -493,6 +500,7 @@ ucc_status_t ucc_team_create_test_single(ucc_context_t *context,
 out:
     if (UCC_OK == status) {
         team->state = UCC_TEAM_ACTIVE;
+        context->n_teams++;
         status = ucc_team_build_score_map(team);
     }
 
@@ -529,6 +537,17 @@ static ucc_status_t ucc_team_destroy_single(ucc_team_h team)
     ucc_cl_iface_t *cl_iface;
     int             i;
     ucc_status_t    status;
+
+    if (team->abort_req) {
+        ucc_service_coll_finalize(team->abort_req);
+        team->abort_req = NULL;
+    }
+    ucc_free(team->abort_sbuf);
+    team->abort_sbuf = NULL;
+    ucc_free(team->abort_rbuf);
+    team->abort_rbuf = NULL;
+    ucc_free(team->abort_map);
+    team->abort_map = NULL;
 
     if (team->service_team) {
         if (UCC_OK != (status = UCC_TL_CTX_IFACE(team->contexts[0]->service_ctx)
@@ -574,11 +593,6 @@ static ucc_status_t ucc_team_destroy_single(ucc_team_h team)
     /* Free resilience fields */
     ucc_free(team->failure_map);
     ucc_free(team->failed_ranks);
-    ucc_free(team->abort_sbuf);
-    ucc_free(team->abort_rbuf);
-    if (team->abort_req) {
-        ucc_service_coll_finalize(team->abort_req);
-    }
 
     ucc_free(team->contexts);
     ucc_free(team);
@@ -700,24 +714,184 @@ static void ucc_team_release_id(ucc_team_t *team)
     }
 }
 
+static inline uint64_t ucc_team_failure_map_load(ucc_team_t *team, size_t word)
+{
+    return __atomic_load_n(&team->failure_map[word], __ATOMIC_RELAXED);
+}
+
+void ucc_team_mark_rank_failed(ucc_team_t *team, ucc_rank_t rank)
+{
+    size_t   word;
+    uint64_t bitmask, old;
+
+    if (ucc_unlikely(!team || !team->failure_map || rank >= team->size)) {
+        return;
+    }
+
+    word    = rank / 64;
+    bitmask = (uint64_t)1 << (rank % 64);
+    old = __atomic_fetch_or(&team->failure_map[word], bitmask,
+                            __ATOMIC_RELAXED);
+    if (!(old & bitmask) &&
+        team->fault_state == UCC_TEAM_FAULT_STATE_ABORTING) {
+        __atomic_store_n(&team->abort_new_failure, 1, __ATOMIC_RELAXED);
+    }
+}
+
 /* =========================================================================
  * Team Resilience API: team_abort / team_abort_test / team_recover
  * ========================================================================= */
 
+static void ucc_team_sync_failure_map_from_context(ucc_team_t *team)
+{
+    ucc_context_t *ctx = team->contexts[0];
+    ucc_rank_t     n_ctx_ranks;
+    ucc_rank_t     tr;
+
+    if (!ctx->failure_map ||
+        !(ctx->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB)) {
+        return;
+    }
+
+    n_ctx_ranks = (ucc_rank_t)ctx->params.oob.n_oob_eps;
+    for (tr = 0; tr < team->size; tr++) {
+        ucc_rank_t cr = ucc_get_ctx_rank(team, tr);
+        if (cr < n_ctx_ranks &&
+            (__atomic_load_n(&ctx->failure_map[cr / 64], __ATOMIC_RELAXED) &
+             ((uint64_t)1 << (cr % 64)))) {
+            __atomic_fetch_or(&team->failure_map[tr / 64],
+                              ((uint64_t)1 << (tr % 64)),
+                              __ATOMIC_RELAXED);
+        }
+    }
+}
+
+static int ucc_team_abort_snapshot_stale(ucc_team_t *team, size_t map_words)
+{
+    size_t w;
+
+    ucc_team_sync_failure_map_from_context(team);
+    for (w = 0; w < map_words; w++) {
+        if (ucc_team_failure_map_load(team, w) != team->abort_sbuf[w]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void ucc_team_failure_map_snapshot(ucc_team_t *team,
+                                          uint64_t *dst, size_t map_words)
+{
+    size_t w;
+
+    for (w = 0; w < map_words; w++) {
+        dst[w] = ucc_team_failure_map_load(team, w);
+    }
+}
+
+static ucc_status_t ucc_team_abort_build_subset(ucc_team_t  *team,
+                                                ucc_rank_t **map_out,
+                                                ucc_subset_t *subset_out)
+{
+    ucc_rank_t  n_ranks = team->size;
+    ucc_rank_t  n_alive = 0, myrank = UCC_RANK_MAX;
+    ucc_rank_t *alive, i;
+
+    for (i = 0; i < n_ranks; i++) {
+        if (!(ucc_team_failure_map_load(team, i / 64) &
+              ((uint64_t)1 << (i % 64)))) {
+            n_alive++;
+        }
+    }
+    if (n_alive == 0) {
+        return UCC_ERR_INVALID_STATE;
+    }
+
+    alive = ucc_malloc(n_alive * sizeof(ucc_rank_t), "team_abort_map");
+    if (!alive) {
+        return UCC_ERR_NO_MEMORY;
+    }
+
+    n_alive = 0;
+    for (i = 0; i < n_ranks; i++) {
+        if (!(ucc_team_failure_map_load(team, i / 64) &
+              ((uint64_t)1 << (i % 64)))) {
+            if (i == team->rank) {
+                myrank = n_alive;
+            }
+            alive[n_alive++] = i;
+        }
+    }
+    if (myrank == UCC_RANK_MAX) {
+        ucc_free(alive);
+        return UCC_ERR_INVALID_STATE;
+    }
+
+    *map_out           = alive;
+    subset_out->map    = ucc_ep_map_from_array(&alive, n_alive, n_ranks, 0);
+    subset_out->myrank = myrank;
+    return UCC_OK;
+}
+
+static ucc_status_t ucc_team_abort_repost(ucc_team_t *team, size_t map_words)
+{
+    ucc_service_coll_req_t *old_req = team->abort_req;
+    ucc_service_coll_req_t *new_req = NULL;
+    ucc_rank_t             *old_map = team->abort_map;
+    ucc_rank_t             *new_map = NULL;
+    ucc_subset_t            subset;
+    ucc_status_t            status;
+
+    ucc_team_sync_failure_map_from_context(team);
+    ucc_team_failure_map_snapshot(team, team->abort_sbuf, map_words);
+
+    status = ucc_team_abort_build_subset(team, &new_map, &subset);
+    if (status < 0) {
+        ucc_error("ucc_team_abort_test: failed to rebuild subset: %s",
+                  ucc_status_string(status));
+        return status;
+    }
+
+    status = ucc_service_allreduce(team, team->abort_sbuf, team->abort_rbuf,
+                                   UCC_DT_UINT64, map_words, UCC_OP_BOR,
+                                   subset, &new_req);
+    if (status < 0) {
+        ucc_error("ucc_team_abort_test: re-post allreduce failed: %s",
+                  ucc_status_string(status));
+        ucc_free(new_map);
+        return status;
+    }
+
+    team->abort_req = new_req;
+    team->abort_map = new_map;
+    if (old_req) {
+        ucc_service_coll_finalize(old_req);
+    }
+    ucc_free(old_map);
+    return UCC_OK;
+}
+
 /**
  * Begin abort sequence on a single team.
  *  1. Guard: fault_state must be ACTIVE.
- *  2. Drain in-flight collectives tagged to this team with UCC_ERR_ABORTED.
- *  3. Snapshot failure_map into abort_sbuf.
+ *  2. Snapshot failure_map into abort_sbuf.
+ *  3. Drain in-flight collectives tagged to this team with UCC_ERR_ABORTED.
  *  4. Post service-level BOR allreduce over the team.
  */
 ucc_status_t ucc_team_abort(ucc_team_h team)
 {
-    ucc_context_t          *ctx = team->contexts[0];
+    ucc_context_t          *ctx;
     ucc_rank_t              n_ranks;
     size_t                  map_words;
     ucc_subset_t            subset;
     ucc_status_t            status;
+
+    if (ucc_unlikely(team->state != UCC_TEAM_ACTIVE)) {
+        ucc_error("ucc_team_abort: team not active (state=%d)", team->state);
+        return UCC_ERR_INVALID_STATE;
+    }
+
+    ctx = team->contexts[0];
 
     if (ucc_unlikely(team->fault_state != UCC_TEAM_FAULT_STATE_ACTIVE)) {
         ucc_error("ucc_team_abort: team not in ACTIVE fault state (state=%d)",
@@ -730,48 +904,38 @@ ucc_status_t ucc_team_abort(ucc_team_h team)
         return UCC_ERR_INVALID_STATE;
     }
 
-    team->fault_state       = UCC_TEAM_FAULT_STATE_ABORTING;
-    team->abort_new_failure = 0;
-
-    /* Drain only the queued collectives that belong to this team, leaving
-       tasks for any other teams on the same context untouched. */
-    ucc_progress_queue_drain(ctx->pq, team, UCC_ERR_ABORTED);
-
     n_ranks   = team->size;
     map_words = (n_ranks + 63) / 64;
 
     team->abort_sbuf = ucc_malloc(map_words * sizeof(uint64_t), "team_abort_sbuf");
     if (!team->abort_sbuf) {
         ucc_error("failed to allocate team abort_sbuf");
-        team->fault_state = UCC_TEAM_FAULT_STATE_ACTIVE;
         return UCC_ERR_NO_MEMORY;
     }
     team->abort_rbuf = ucc_malloc(map_words * sizeof(uint64_t), "team_abort_rbuf");
     if (!team->abort_rbuf) {
         ucc_error("failed to allocate team abort_rbuf");
         ucc_free(team->abort_sbuf);
-        team->abort_sbuf  = NULL;
-        team->fault_state = UCC_TEAM_FAULT_STATE_ACTIVE;
+        team->abort_sbuf = NULL;
         return UCC_ERR_NO_MEMORY;
     }
 
-    /* Seed from the context failure_map so that ranks already known to have
-       failed before ucc_team_abort() was called are included in the first BOR
-       rather than discovered only on a COMM_FAILURE retry.
-       ctx->failure_map may be NULL for exclusive contexts (no context OOB). */
-    memcpy(team->abort_sbuf, team->failure_map, map_words * sizeof(uint64_t));
-    if (ctx->failure_map) {
-        for (ucc_rank_t tr = 0; tr < n_ranks; tr++) {
-            ucc_rank_t cr = ucc_get_ctx_rank(team, tr);
-            if (ctx->failure_map[cr / 64] & ((uint64_t)1 << (cr % 64))) {
-                team->abort_sbuf[tr / 64] |= ((uint64_t)1 << (tr % 64));
-            }
-        }
-    }
+    /* Seed from the context failure_map so ranks already known failed before
+       ucc_team_abort() are represented in team-rank space. */
+    ucc_team_sync_failure_map_from_context(team);
+    ucc_team_failure_map_snapshot(team, team->abort_sbuf, map_words);
 
     subset.map.type   = UCC_EP_MAP_FULL;
     subset.map.ep_num = n_ranks;
     subset.myrank     = team->rank;
+    team->abort_map   = NULL;
+
+    team->fault_state       = UCC_TEAM_FAULT_STATE_ABORTING;
+    team->abort_new_failure = 0;
+
+    /* Drain before posting the service allreduce because TL implementations
+       may enqueue the service task on the same context progress queue. */
+    ucc_progress_queue_drain(ctx->pq, team, UCC_ERR_ABORTED);
 
     status = ucc_service_allreduce(team, team->abort_sbuf, team->abort_rbuf,
                                    UCC_DT_UINT64, map_words, UCC_OP_BOR,
@@ -781,6 +945,7 @@ ucc_status_t ucc_team_abort(ucc_team_h team)
                   ucc_status_string(status));
         ucc_free(team->abort_sbuf);
         ucc_free(team->abort_rbuf);
+        team->abort_req   = NULL;
         team->abort_sbuf  = NULL;
         team->abort_rbuf  = NULL;
         team->fault_state = UCC_TEAM_FAULT_STATE_ACTIVE;
@@ -799,7 +964,6 @@ ucc_status_t ucc_team_abort_test(ucc_team_h team)
     ucc_context_t  *ctx = team->contexts[0];
     ucc_rank_t      n_ranks;
     size_t          map_words;
-    ucc_subset_t    subset;
     ucc_status_t    status;
     ucc_rank_t      i;
     ucc_rank_t      n_failed;
@@ -808,36 +972,30 @@ ucc_status_t ucc_team_abort_test(ucc_team_h team)
         ucc_error("ucc_team_abort_test: team not in ABORTING state");
         return UCC_ERR_INVALID_STATE;
     }
+    if (ucc_unlikely(!team->abort_req)) {
+        ucc_error("ucc_team_abort_test: no abort allreduce in flight");
+        return UCC_ERR_INVALID_STATE;
+    }
 
-    if (team->abort_new_failure) {
+    n_ranks   = team->size;
+    map_words = (n_ranks + 63) / 64;
+
+    if (ucc_team_abort_snapshot_stale(team, map_words)) {
+        __atomic_store_n(&team->abort_new_failure, 1, __ATOMIC_RELAXED);
+    }
+
+    if (__atomic_load_n(&team->abort_new_failure, __ATOMIC_RELAXED)) {
         /* Only finalize and restart once the running BOR has completed. */
         if (team->abort_req->task->super.status == UCC_INPROGRESS) {
             ucc_context_progress(ctx);
             return UCC_INPROGRESS;
         }
-        team->abort_new_failure = 0;
-        n_ranks   = team->size;
-        map_words = (n_ranks + 63) / 64;
 
-        ucc_service_coll_finalize(team->abort_req);
-        team->abort_req = NULL;
-
-        memcpy(team->abort_sbuf, team->failure_map,
-               map_words * sizeof(uint64_t));
-
-        subset.map.type   = UCC_EP_MAP_FULL;
-        subset.map.ep_num = n_ranks;
-        subset.myrank     = team->rank;
-
-        status = ucc_service_allreduce(team, team->abort_sbuf,
-                                       team->abort_rbuf, UCC_DT_UINT64,
-                                       map_words, UCC_OP_BOR,
-                                       subset, &team->abort_req);
+        status = ucc_team_abort_repost(team, map_words);
         if (status < 0) {
-            ucc_error("ucc_team_abort_test: re-post allreduce failed: %s",
-                      ucc_status_string(status));
             return status;
         }
+        __atomic_store_n(&team->abort_new_failure, 0, __ATOMIC_RELAXED);
         return UCC_INPROGRESS;
     }
 
@@ -850,28 +1008,8 @@ ucc_status_t ucc_team_abort_test(ucc_team_h team)
         /* A rank failed while the team abort allreduce was in flight.
            Sync team->failure_map from the context failure_map (which the
            TL already updated), then restart the allreduce. */
-        n_ranks   = team->size;
-        map_words = (n_ranks + 63) / 64;
-        for (i = 0; i < n_ranks; i++) {
-            ucc_rank_t cr = ucc_get_ctx_rank(team, i);
-            if (ctx->failure_map[cr / 64] & ((uint64_t)1 << (cr % 64))) {
-                team->failure_map[i / 64] |= ((uint64_t)1 << (i % 64));
-            }
-        }
-        ucc_service_coll_finalize(team->abort_req);
-        team->abort_req = NULL;
-        memcpy(team->abort_sbuf, team->failure_map,
-               map_words * sizeof(uint64_t));
-        subset.map.type   = UCC_EP_MAP_FULL;
-        subset.map.ep_num = n_ranks;
-        subset.myrank     = team->rank;
-        status = ucc_service_allreduce(team, team->abort_sbuf,
-                                       team->abort_rbuf, UCC_DT_UINT64,
-                                       map_words, UCC_OP_BOR,
-                                       subset, &team->abort_req);
+        status = ucc_team_abort_repost(team, map_words);
         if (status < 0) {
-            ucc_error("ucc_team_abort_test: re-post after comm failure: %s",
-                      ucc_status_string(status));
             return status;
         }
         return UCC_INPROGRESS;
@@ -882,17 +1020,25 @@ ucc_status_t ucc_team_abort_test(ucc_team_h team)
         return status;
     }
 
-    /* OR results into failure_map; build failed_ranks[] */
-    n_ranks   = team->size;
-    map_words = (n_ranks + 63) / 64;
+    if (ucc_team_abort_snapshot_stale(team, map_words)) {
+        status = ucc_team_abort_repost(team, map_words);
+        if (status < 0) {
+            return status;
+        }
+        __atomic_store_n(&team->abort_new_failure, 0, __ATOMIC_RELAXED);
+        return UCC_INPROGRESS;
+    }
 
+    /* OR results into failure_map; build failed_ranks[] */
     for (size_t w = 0; w < map_words; w++) {
-        team->failure_map[w] |= team->abort_rbuf[w];
+        __atomic_fetch_or(&team->failure_map[w], team->abort_rbuf[w],
+                          __ATOMIC_RELAXED);
     }
 
     n_failed = 0;
     for (i = 0; i < n_ranks; i++) {
-        if (team->failure_map[i / 64] & ((uint64_t)1 << (i % 64))) {
+        if (ucc_team_failure_map_load(team, i / 64) &
+            ((uint64_t)1 << (i % 64))) {
             n_failed++;
         }
     }
@@ -909,7 +1055,8 @@ ucc_status_t ucc_team_abort_test(ucc_team_h team)
         }
         ucc_rank_t idx = 0;
         for (i = 0; i < n_ranks; i++) {
-            if (team->failure_map[i / 64] & ((uint64_t)1 << (i % 64))) {
+            if (ucc_team_failure_map_load(team, i / 64) &
+                ((uint64_t)1 << (i % 64))) {
                 team->failed_ranks[idx++] = i;
             }
         }
@@ -922,6 +1069,8 @@ ucc_status_t ucc_team_abort_test(ucc_team_h team)
     team->abort_sbuf = NULL;
     ucc_free(team->abort_rbuf);
     team->abort_rbuf = NULL;
+    ucc_free(team->abort_map);
+    team->abort_map = NULL;
 
     team->fault_state = UCC_TEAM_FAULT_STATE_ABORTED;
     ucc_debug("team %p abort complete: %u failed ranks", team, n_failed);

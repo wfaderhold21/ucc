@@ -59,6 +59,7 @@ static void ucc_tl_ucp_alltoallv_pairwise_progress(ucc_coll_task_t *coll_task)
     int                polls = 0;
     ucc_rank_t         peer, nreqs;
     size_t             rdt_size, sdt_size, data_size, data_displ;
+    ucc_status_t       status;
 
     nreqs    = get_num_posts(team);
     rdt_size = ucc_dt_size(TASK_ARGS(task).dst.info_v.datatype);
@@ -106,7 +107,11 @@ static void ucc_tl_ucp_alltoallv_pairwise_progress(ucc_coll_task_t *coll_task)
         (task->tagged.recv_posted < gsize)) {
         return;
     }
-    task->super.status = ucc_tl_ucp_test(task);
+    status = ucc_tl_ucp_test(task);
+    if (task->super.status < 0) {
+        goto out;
+    }
+    task->super.status = status;
 out:
     if (task->super.status != UCC_INPROGRESS) {
         UCC_TL_UCP_PROFILE_REQUEST_EVENT(coll_task,

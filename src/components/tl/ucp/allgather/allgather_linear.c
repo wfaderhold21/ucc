@@ -168,7 +168,11 @@ void ucc_tl_ucp_allgather_linear_progress(ucc_coll_task_t *coll_task)
         return;
     }
 
-    task->super.status = ucc_tl_ucp_test(task);
+    status = ucc_tl_ucp_test(task);
+    if (task->super.status < 0) {
+        return;
+    }
+    task->super.status = status;
     if (task->super.status != UCC_OK) {
         return;
     }

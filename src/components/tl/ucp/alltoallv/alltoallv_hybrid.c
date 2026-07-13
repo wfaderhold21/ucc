@@ -768,7 +768,11 @@ ucc_status_t pairwise_manager(ucc_rank_t trank, ucc_rank_t tsize,
         task->alltoallv_hybrid.num_in++;
         ++(*cur);
     } else {
-        if (UCC_INPROGRESS == ucc_tl_ucp_test(task)) {
+        status = ucc_tl_ucp_test(task);
+        if (task->super.status < 0) {
+            return task->super.status;
+        }
+        if (UCC_INPROGRESS == status) {
             return UCC_INPROGRESS;
         }
         task->alltoallv_hybrid.num_in      = 0;
@@ -889,6 +893,9 @@ static void ucc_tl_ucp_alltoallv_hybrid_progress(ucc_coll_task_t *coll_task)
            (task->alltoallv_hybrid.num2send > 0)) {
         status = pairwise_manager(grank, gsize, dt_size, task);
         if (UCC_OK != status) {
+            if (task->super.status < 0) {
+                goto out;
+            }
             task->super.status = status;
             goto out;
         }

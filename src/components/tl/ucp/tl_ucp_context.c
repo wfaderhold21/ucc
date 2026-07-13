@@ -164,6 +164,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
                               params->context);
     memcpy(&self->cfg, tl_ucp_config, sizeof(*tl_ucp_config));
     self->thread_mode = params->thread_mode;
+    self->ep_err_args = NULL;
     lib = ucc_derived_of(self->super.super.lib, ucc_tl_ucp_lib_t);
     prefix = strdup(params->prefix);
     if (!prefix) {
@@ -219,6 +220,25 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     if (params->estimated_num_eps > 0) {
         ucp_params.field_mask |= UCP_PARAM_FIELD_ESTIMATED_NUM_EPS;
         ucp_params.estimated_num_eps = params->estimated_num_eps;
+    }
+
+    if (self->cfg.fault_tolerance && UCC_TL_CTX_HAS_OOB(self)) {
+        ucc_rank_t n_eps = (ucc_rank_t)
+            self->super.super.ucc_context->params.oob.n_oob_eps;
+        ucc_rank_t r;
+
+        self->ep_err_args = ucc_calloc(n_eps, sizeof(*self->ep_err_args),
+                                       "ep_err_args");
+        if (!self->ep_err_args) {
+            tl_error(self->super.super.lib,
+                     "failed to allocate ep_err_args");
+            ucc_status = UCC_ERR_NO_MEMORY;
+            goto err_cfg;
+        }
+        for (r = 0; r < n_eps; r++) {
+            self->ep_err_args[r].ctx  = self;
+            self->ep_err_args[r].rank = r;
+        }
     }
 
 #ifdef HAVE_UCX_NODE_LOCAL_ID
@@ -335,25 +355,6 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
               self);
     }
 
-    self->ep_err_args = NULL;
-    if (self->cfg.fault_tolerance && UCC_TL_CTX_HAS_OOB(self)) {
-        ucc_rank_t n_eps = (ucc_rank_t)
-            self->super.super.ucc_context->params.oob.n_oob_eps;
-        ucc_rank_t r;
-        self->ep_err_args = ucc_calloc(n_eps, sizeof(*self->ep_err_args),
-                                       "ep_err_args");
-        if (!self->ep_err_args) {
-            tl_error(self->super.super.lib,
-                     "failed to allocate ep_err_args");
-            ucc_status = UCC_ERR_NO_MEMORY;
-            goto err_cfg;
-        }
-        for (r = 0; r < n_eps; r++) {
-            self->ep_err_args[r].ctx  = self;
-            self->ep_err_args[r].rank = r;
-        }
-    }
-
     ucc_free(prefix);
     prefix = NULL;
 
@@ -395,6 +396,8 @@ err_thread_mode:
 err_worker_create:
     ucp_cleanup(ucp_context);
 err_cfg:
+    ucc_free(self->ep_err_args);
+    self->ep_err_args = NULL;
     if (ucp_config) {
         ucp_config_release(ucp_config);
     }

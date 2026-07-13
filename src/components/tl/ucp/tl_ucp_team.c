@@ -184,7 +184,11 @@ static ucc_status_t ucc_tl_ucp_team_preconnect(ucc_tl_ucp_team_t *team)
         team->preconnect_task->tagged.tag = 0;
         team->preconnect_task->super.bargs.args.mask = 0;
     }
-    if (UCC_INPROGRESS == ucc_tl_ucp_test(team->preconnect_task)) {
+    status = ucc_tl_ucp_test(team->preconnect_task);
+    if (team->preconnect_task->super.status < 0) {
+        return team->preconnect_task->super.status;
+    }
+    if (UCC_INPROGRESS == status) {
         ucp_worker_progress(team->worker->ucp_worker);
         return UCC_INPROGRESS;
     }
@@ -201,7 +205,11 @@ static ucc_status_t ucc_tl_ucp_team_preconnect(ucc_tl_ucp_team_t *team)
         if (UCC_OK != status) {
             return status;
         }
-        if (UCC_INPROGRESS == ucc_tl_ucp_test(team->preconnect_task)) {
+        status = ucc_tl_ucp_test(team->preconnect_task);
+        if (team->preconnect_task->super.status < 0) {
+            return team->preconnect_task->super.status;
+        }
+        if (UCC_INPROGRESS == status) {
             return UCC_INPROGRESS;
         }
     }

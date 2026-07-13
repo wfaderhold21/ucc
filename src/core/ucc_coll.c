@@ -339,12 +339,9 @@ free_scratch:
         }                                                               \
     } while(0)
 
-UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_post, (request),
-                      ucc_coll_req_h request)
+static inline ucc_status_t
+ucc_collective_check_fault_state(ucc_coll_task_t *task)
 {
-    ucc_coll_task_t *task = ucc_derived_of(request, ucc_coll_task_t);
-    ucc_status_t status;
-
     if (ucc_unlikely(task->bargs.team->contexts[0]->state !=
                      UCC_CTX_STATE_ACTIVE)) {
         return UCC_ERR_ABORTED;
@@ -352,6 +349,19 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_post, (request),
     if (ucc_unlikely(task->bargs.team->fault_state !=
                      UCC_TEAM_FAULT_STATE_ACTIVE)) {
         return UCC_ERR_ABORTED;
+    }
+    return UCC_OK;
+}
+
+UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_post, (request),
+                      ucc_coll_req_h request)
+{
+    ucc_coll_task_t *task = ucc_derived_of(request, ucc_coll_task_t);
+    ucc_status_t status;
+
+    status = ucc_collective_check_fault_state(task);
+    if (ucc_unlikely(status != UCC_OK)) {
+        return status;
     }
 
     if (ucc_global_config.coll_trace.log_level >= UCC_LOG_LEVEL_DEBUG) {
@@ -399,6 +409,12 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_post, (request),
 ucc_status_t ucc_collective_triggered_post(ucc_ee_h ee, ucc_ev_t *ev)
 {
     ucc_coll_task_t *task = ucc_derived_of(ev->req, ucc_coll_task_t);
+    ucc_status_t     status;
+
+    status = ucc_collective_check_fault_state(task);
+    if (ucc_unlikely(status != UCC_OK)) {
+        return status;
+    }
 
     if (ucc_global_config.coll_trace.log_level >= UCC_LOG_LEVEL_DEBUG) {
         ucc_rank_t rank = task->bargs.team->rank;

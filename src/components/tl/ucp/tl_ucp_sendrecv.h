@@ -13,6 +13,7 @@
 #include "tl_ucp_tag.h"
 #include "tl_ucp_ep.h"
 #include "utils/ucc_compiler_def.h"
+#include "utils/ucc_malloc.h"
 #include "tl_ucp_task.h"
 
 #define UCC_TL_UCP_MAKE_TAG(_user_tag, _tag, _rank, _id, _scope_id, _scope)    \
@@ -38,15 +39,72 @@
                                 (_scope_id), (_scope)); \
     } while (0)
 
+static inline ucc_rank_t
+ucc_tl_ucp_rank_to_team_rank(ucc_tl_ucp_team_t *team, ucc_rank_t rank)
+{
+    if (ucc_unlikely(rank >= UCC_TL_TEAM_SIZE(team))) {
+        return UCC_RANK_MAX;
+    }
+
+    return ucc_ep_map_eval(UCC_TL_TEAM_MAP(team), rank);
+}
+
+static inline ucc_rank_t
+ucc_tl_ucp_rank_to_ctx_rank(ucc_tl_ucp_team_t *team, ucc_rank_t rank)
+{
+    ucc_team_t *core_team = UCC_TL_CORE_TEAM(team);
+    ucc_rank_t  team_rank = ucc_tl_ucp_rank_to_team_rank(team, rank);
+
+    if (ucc_unlikely(team_rank == UCC_RANK_MAX)) {
+        return UCC_RANK_MAX;
+    }
+
+    return core_team ? ucc_get_ctx_rank(core_team, team_rank) : team_rank;
+}
+
+static inline void
+ucc_tl_ucp_mark_peer_failed(ucc_tl_ucp_team_t *team, ucc_rank_t rank)
+{
+    ucc_team_t *core_team = UCC_TL_CORE_TEAM(team);
+    ucc_rank_t  team_rank = ucc_tl_ucp_rank_to_team_rank(team, rank);
+
+    ucc_context_mark_rank_failed(UCC_TL_CORE_CTX(team),
+                                 core_team && team_rank != UCC_RANK_MAX
+                                     ? ucc_get_ctx_rank(core_team, team_rank)
+                                     : team_rank);
+    if (core_team && team_rank != UCC_RANK_MAX) {
+        ucc_team_mark_rank_failed(core_team, team_rank);
+    }
+}
+
+typedef struct ucc_tl_ucp_send_completion_arg {
+    ucc_tl_ucp_task_t      *task;
+    ucc_rank_t              rank;
+    ucp_send_nbx_callback_t cb;
+    void                   *user_data;
+} ucc_tl_ucp_send_completion_arg_t;
+
+typedef struct ucc_tl_ucp_recv_completion_arg {
+    ucc_tl_ucp_task_t          *task;
+    ucc_rank_t                  rank;
+    ucp_tag_recv_nbx_callback_t cb;
+    void                       *user_data;
+} ucc_tl_ucp_recv_completion_arg_t;
+
 #define UCC_TL_UCP_CHECK_REQ_STATUS()                                          \
     do {                                                                       \
         if (ucc_unlikely(UCS_PTR_IS_ERR(ucp_status))) {                        \
+            ucc_status_t _ucc_status =                                         \
+                ucs_status_to_ucc_status(UCS_PTR_STATUS(ucp_status));          \
             tl_error(UCC_TL_TEAM_LIB(team),                                    \
                      "tag %u; dest %d; team_id %u; errmsg %s",                 \
                      task->tagged.tag, dest_group_rank,                        \
                      team->super.super.params.id,                              \
                      ucs_status_string(UCS_PTR_STATUS(ucp_status)));           \
-            return ucs_status_to_ucc_status(UCS_PTR_STATUS(ucp_status));       \
+            if (_ucc_status == UCC_ERR_COMM_FAILURE) {                         \
+                ucc_tl_ucp_mark_peer_failed(team, dest_group_rank);            \
+            }                                                                  \
+            return _ucc_status;                                                \
         }                                                                      \
     } while (0)
 
@@ -54,7 +112,19 @@ void ucc_tl_ucp_send_completion_cb_st(void *request, ucs_status_t status,
                                       void *user_data);
 void ucc_tl_ucp_send_completion_cb_mt(void *request, ucs_status_t status,
                                       void *user_data);
-
+void ucc_tl_ucp_send_completion_ranked_cb_st(void *request,
+                                             ucs_status_t status,
+                                             void *user_data);
+void ucc_tl_ucp_send_completion_ranked_cb_mt(void *request,
+                                             ucs_status_t status,
+                                             void *user_data);
+void ucc_tl_ucp_send_completion_wrapped_cb(void *request,
+                                           ucs_status_t status,
+                                           void *user_data);
+void ucc_tl_ucp_recv_completion_wrapped_cb(void *request,
+                                           ucs_status_t status,
+                                           const ucp_tag_recv_info_t *info,
+                                           void *user_data);
 
 void ucc_tl_ucp_put_completion_cb(void *request, ucs_status_t status,
                                   void *user_data);
@@ -77,20 +147,90 @@ void ucc_tl_ucp_send_recv_counter_inc_st(uint32_t *counter);
 
 void ucc_tl_ucp_send_recv_counter_inc_mt(uint32_t *counter);
 
+static inline ucc_status_t
+ucc_tl_ucp_prepare_send_completion_arg(ucc_tl_ucp_team_t *team,
+                                       ucc_rank_t dest_group_rank,
+                                       ucc_tl_ucp_task_t *task,
+                                       ucp_send_nbx_callback_t *cb,
+                                       void **user_data,
+                                       ucc_tl_ucp_send_completion_arg_t **arg)
+{
+    ucc_tl_ucp_send_completion_arg_t *a;
+
+    *arg = NULL;
+    if (*cb == NULL) {
+        return UCC_OK;
+    }
+
+    a = ucc_malloc(sizeof(*a), "ucp_send_completion_arg");
+    if (!a) {
+        return UCC_ERR_NO_MEMORY;
+    }
+
+    a->task = task;
+    a->rank = dest_group_rank;
+    *arg    = a;
+    if (*user_data == task && *cb == ucc_tl_ucp_send_completion_cb_st) {
+        *cb = ucc_tl_ucp_send_completion_ranked_cb_st;
+    } else if (*user_data == task && *cb == ucc_tl_ucp_send_completion_cb_mt) {
+        *cb = ucc_tl_ucp_send_completion_ranked_cb_mt;
+    } else {
+        a->cb        = *cb;
+        a->user_data = *user_data;
+        *cb          = ucc_tl_ucp_send_completion_wrapped_cb;
+    }
+    *user_data = a;
+    return UCC_OK;
+}
+
+static inline ucc_status_t
+ucc_tl_ucp_prepare_recv_completion_arg(ucc_rank_t dest_group_rank,
+                                       ucc_tl_ucp_task_t *task,
+                                       ucp_tag_recv_nbx_callback_t *cb,
+                                       void **user_data,
+                                       ucc_tl_ucp_recv_completion_arg_t **arg)
+{
+    ucc_tl_ucp_recv_completion_arg_t *a;
+
+    *arg = NULL;
+    if (*cb == NULL) {
+        return UCC_OK;
+    }
+
+    a = ucc_malloc(sizeof(*a), "ucp_recv_completion_arg");
+    if (!a) {
+        return UCC_ERR_NO_MEMORY;
+    }
+
+    a->task      = task;
+    a->rank      = dest_group_rank;
+    a->cb        = *cb;
+    a->user_data = *user_data;
+    *arg         = a;
+    *cb          = ucc_tl_ucp_recv_completion_wrapped_cb;
+    *user_data   = a;
+    return UCC_OK;
+}
+
 static inline ucs_status_ptr_t
 ucc_tl_ucp_send_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
                        ucc_rank_t dest_group_rank, ucc_tl_ucp_team_t *team,
                        ucc_tl_ucp_task_t *task, ucp_send_nbx_callback_t cb, void *user_data)
 {
-    ucc_coll_args_t    *args = &TASK_ARGS(task);
-    ucp_request_param_t req_param;
-    ucc_status_t        status;
-    ucp_ep_h            ep;
-    ucp_tag_t           ucp_tag;
+    ucc_coll_args_t                  *args = &TASK_ARGS(task);
+    ucc_tl_ucp_send_completion_arg_t *cb_arg;
+    ucp_request_param_t               req_param;
+    ucc_status_t                      status;
+    ucp_ep_h                          ep;
+    ucp_tag_t                         ucp_tag;
+    ucs_status_ptr_t                  ucp_status;
 
     status = ucc_tl_ucp_get_ep(team, dest_group_rank, &ep);
     if (ucc_unlikely(UCC_OK != status)) {
-        return UCS_STATUS_PTR(UCS_ERR_NO_MESSAGE);
+        if (status == UCC_ERR_COMM_FAILURE) {
+            ucc_tl_ucp_mark_peer_failed(team, dest_group_rank);
+        }
+        return UCS_STATUS_PTR(ucc_status_to_ucs_status(status));
     }
     ucp_tag = UCC_TL_UCP_MAKE_SEND_TAG((args->mask & UCC_COLL_ARGS_FIELD_TAG),
         task->tagged.tag, UCC_TL_TEAM_RANK(team), team->super.super.params.id,
@@ -102,8 +242,18 @@ ucc_tl_ucp_send_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
     req_param.cb.send     = cb;
     req_param.memory_type = ucc_memtype_to_ucs[mtype];
     req_param.user_data   = user_data;
+    status = ucc_tl_ucp_prepare_send_completion_arg(
+        team, dest_group_rank, task, &req_param.cb.send,
+        &req_param.user_data, &cb_arg);
+    if (ucc_unlikely(status != UCC_OK)) {
+        return UCS_STATUS_PTR(ucc_status_to_ucs_status(status));
+    }
     task->tagged.send_posted++;
-    return ucp_tag_send_nbx(ep, buffer, 1, ucp_tag, &req_param);
+    ucp_status = ucp_tag_send_nbx(ep, buffer, 1, ucp_tag, &req_param);
+    if (UCS_OK == ucp_status || UCS_PTR_IS_ERR(ucp_status)) {
+        ucc_free(cb_arg);
+    }
+    return ucp_status;
 }
 
 ucc_status_t ucc_tl_ucp_send_nbx(void *buffer, size_t msglen,
@@ -263,13 +413,28 @@ ucc_tl_ucp_recv_cb(void *buffer, size_t msglen, ucc_memory_type_t mtype,
                    ucc_tl_ucp_task_t *task, ucp_tag_recv_nbx_callback_t cb,
                    void *user_data)
 {
-    ucs_status_ptr_t ucp_status;
+    ucc_tl_ucp_recv_completion_arg_t *cb_arg;
+    ucp_tag_recv_nbx_callback_t       wrapped_cb = cb;
+    void                             *wrapped_user_data = user_data;
+    ucc_status_t                      status;
+    ucs_status_ptr_t                  ucp_status;
+
+    status = ucc_tl_ucp_prepare_recv_completion_arg(
+        dest_group_rank, task, &wrapped_cb, &wrapped_user_data, &cb_arg);
+    if (ucc_unlikely(status != UCC_OK)) {
+        return status;
+    }
 
     ucp_status = ucc_tl_ucp_recv_common(buffer, msglen, mtype, dest_group_rank,
-                                        team, task, cb, user_data);
+                                        team, task, wrapped_cb,
+                                        wrapped_user_data);
     if (UCS_OK != ucp_status) {
+        if (UCS_PTR_IS_ERR(ucp_status)) {
+            ucc_free(cb_arg);
+        }
         UCC_TL_UCP_CHECK_REQ_STATUS();
     } else {
+        ucc_free(cb_arg);
         cb(NULL, UCS_OK, NULL, user_data);
     }
 

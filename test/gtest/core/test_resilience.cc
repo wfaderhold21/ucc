@@ -123,6 +123,40 @@ protected:
             ASSERT_EQ(UCC_OK, ucc_context_recover(job->procs[i]->ctx_h));
         }
     }
+
+    void team_abort_all(UccTeam_h team)
+    {
+        for (int i = 0; i < n_procs; i++) {
+            ASSERT_EQ(UCC_OK, ucc_team_abort(team->procs[i].team));
+        }
+    }
+
+    void wait_team_abort_all(UccTeam_h team)
+    {
+        std::vector<bool> done(n_procs, false);
+        int               remaining = n_procs;
+
+        while (remaining > 0) {
+            progress_all();
+            for (int i = 0; i < n_procs; i++) {
+                if (done[i]) continue;
+                ucc_status_t st = ucc_team_abort_test(team->procs[i].team);
+                if (st == UCC_OK) {
+                    done[i] = true;
+                    --remaining;
+                } else {
+                    ASSERT_EQ(UCC_INPROGRESS, st);
+                }
+            }
+        }
+    }
+
+    void team_recover_all(UccTeam_h team)
+    {
+        for (int i = 0; i < n_procs; i++) {
+            ASSERT_EQ(UCC_OK, ucc_team_recover(team->procs[i].team));
+        }
+    }
 };
 
 /* Abort + recover with no injected failure: every process must see 0 failed
@@ -241,6 +275,109 @@ UCC_TEST_F(test_resilience_multi, simulated_failure_bor)
             << "process " << i << " expected 1 failed rank";
         EXPECT_EQ(failed_rank, attr.failed_ranks[0])
             << "process " << i << " wrong failed rank";
+    }
+}
+
+/* Team abort + recover with no injected failure. */
+UCC_TEST_F(test_resilience_multi, team_abort_recover_no_failure)
+{
+    auto team = job->create_team(n_procs);
+
+    team_abort_all(team);
+    wait_team_abort_all(team);
+    team_recover_all(team);
+
+    for (int i = 0; i < n_procs; i++) {
+        ucc_team_attr_t attr = {};
+        attr.mask = UCC_TEAM_ATTR_FIELD_FAILED_RANKS;
+        ASSERT_EQ(UCC_OK, ucc_team_get_attr(team->procs[i].team, &attr));
+        EXPECT_EQ(0u, attr.n_failed_ranks);
+    }
+}
+
+/* Team fault state must block new posts while team abort is in flight. */
+UCC_TEST_F(test_resilience_multi, post_after_team_abort)
+{
+    auto team = job->create_team(n_procs);
+
+    std::vector<ucc_coll_req_h> reqs(n_procs);
+    for (int i = 0; i < n_procs; i++) {
+        ucc_coll_args_t args = {};
+        args.coll_type       = UCC_COLL_TYPE_BARRIER;
+        ASSERT_EQ(UCC_OK,
+                  ucc_collective_init(&args, &reqs[i],
+                                      team->procs[i].team));
+    }
+
+    team_abort_all(team);
+
+    for (int i = 0; i < n_procs; i++) {
+        EXPECT_EQ(UCC_ERR_ABORTED, ucc_collective_post(reqs[i]));
+    }
+
+    for (int i = 0; i < n_procs; i++) {
+        ucc_collective_finalize(reqs[i]);
+    }
+
+    wait_team_abort_all(team);
+    team_recover_all(team);
+}
+
+/* Team abort uses filtered progress-queue drain. */
+UCC_TEST_F(test_resilience_multi, drain_inflight_on_team_abort)
+{
+    const int n_posted = n_procs - 1;
+    auto team = job->create_team(n_procs);
+
+    ucc_coll_args_t args = {};
+    args.coll_type = UCC_COLL_TYPE_BARRIER;
+
+    std::vector<ucc_coll_req_h> reqs(n_procs);
+    for (int i = 0; i < n_procs; i++) {
+        ASSERT_EQ(UCC_OK,
+                  ucc_collective_init(&args, &reqs[i], team->procs[i].team));
+    }
+
+    for (int i = 0; i < n_posted; i++) {
+        ASSERT_EQ(UCC_OK, ucc_collective_post(reqs[i]));
+    }
+
+    team_abort_all(team);
+
+    for (int i = 0; i < n_posted; i++) {
+        EXPECT_EQ(UCC_ERR_ABORTED, ucc_collective_test(reqs[i]))
+            << "posted team request for rank " << i
+            << " was not drained to UCC_ERR_ABORTED";
+    }
+    for (int i = 0; i < n_procs; i++) {
+        ucc_collective_finalize(reqs[i]);
+    }
+
+    wait_team_abort_all(team);
+    team_recover_all(team);
+}
+
+/* Team abort converts context-rank failure marks to team-rank output. */
+UCC_TEST_F(test_resilience_multi, team_simulated_failure_bor)
+{
+    const ucc_rank_t failed_rank = static_cast<ucc_rank_t>(n_procs - 1);
+    auto team = job->create_team(n_procs);
+
+    ucc_context_mark_rank_failed(
+        reinterpret_cast<ucc_context_t *>(job->procs[0]->ctx_h), failed_rank);
+
+    team_abort_all(team);
+    wait_team_abort_all(team);
+    team_recover_all(team);
+
+    for (int i = 0; i < n_procs; i++) {
+        ucc_team_attr_t attr = {};
+        attr.mask = UCC_TEAM_ATTR_FIELD_FAILED_RANKS;
+        ASSERT_EQ(UCC_OK, ucc_team_get_attr(team->procs[i].team, &attr));
+        ASSERT_EQ(1u, attr.n_failed_ranks)
+            << "process " << i << " expected 1 failed team rank";
+        EXPECT_EQ(failed_rank, attr.failed_ranks[0])
+            << "process " << i << " wrong failed team rank";
     }
 }
 

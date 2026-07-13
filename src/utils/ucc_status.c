@@ -34,6 +34,12 @@ const char *ucc_status_string(ucc_status_t status)
         return "Not found";
     case UCC_ERR_TIMED_OUT:
         return "Timeout expired";
+    case UCC_ERR_COMM_FAILURE:
+        return "Communication failure";
+    case UCC_ERR_ABORTED:
+        return "Collective aborted";
+    case UCC_ERR_INVALID_STATE:
+        return "Invalid state for operation";
     default:
         snprintf(error_str, sizeof(error_str) - 1, "Unknown error %d", status);
         return error_str;
