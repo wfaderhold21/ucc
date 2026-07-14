@@ -33,6 +33,8 @@ pkgconfig_DATA = ucc.pc
 
 DOCLIST = docs/doxygen/doxygen-doc/ucc.tag
 
+EXTRA_DIST = tools/striding/ucc_alltoall_order_sim.py
+
 FORMAT = pdf
 DOT_CLEANFILES =
 
