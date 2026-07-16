@@ -246,6 +246,73 @@ UCC_TEST_P(test_alltoall_0, single_onesided)
     data_fini_onesided(ctxs);
 }
 
+/* Onesided knob-sweep correctness: exercise every ORDER x ALG x NFRAGS
+ * combination on the onesided path and validate the result buffer for each.
+ * ucc_perftest measures these knobs but never checks correctness; the default
+ * onesided test above only ever runs seq/auto/no-frag. This closes that gap.
+ *
+ * dtype is pinned to a 1-byte type so per-peer bytes == count and the counts
+ * can be chosen relative to the fragmentation floor exactly:
+ *   count=8      -> below ALLTOALL_ONESIDED_MIN_FRAG_SZ (8192): non-frag path
+ *   count=16384  -> 16 KiB/peer, above the floor: exercises fragmentation
+ * The larger count still fits the 1 MiB onesided segment for the size-16 team
+ * (16 KiB * 16 = 256 KiB).
+ */
+using Param_os = std::tuple<int, const char *, const char *, int, int>;
+
+class test_alltoall_onesided : public test_alltoall,
+        public ::testing::WithParamInterface<Param_os> {};
+
+UCC_TEST_P(test_alltoall_onesided, knob_sweep)
+{
+    const int         team_id = std::get<0>(GetParam());
+    const char       *order   = std::get<1>(GetParam());
+    const char       *alg     = std::get<2>(GetParam());
+    const int         nfrags  = std::get<3>(GetParam());
+    const int         count   = std::get<4>(GetParam());
+    const std::string nfrags_str = std::to_string(nfrags);
+    UccTeam_h         reference_team = UccJob::getStaticTeams()[team_id];
+    int               size           = reference_team->procs.size();
+    ucc_job_env_t     env       = {
+        {"UCC_TL_UCP_TUNE", "alltoall:0-inf:@1"},
+        {"UCC_TL_UCP_ALLTOALL_ONESIDED_ORDER", order},
+        {"UCC_TL_UCP_ALLTOALL_ONESIDED_ALG", alg},
+        {"UCC_TL_UCP_ALLTOALL_ONESIDED_NFRAGS", nfrags_str.c_str()}};
+    bool              is_contig = true;
+    UccJob            job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+    UccTeam_h         team;
+    std::vector<int>  reference_ranks;
+    UccCollCtxVec     ctxs;
+
+    for (auto i = 0; i < reference_team->n_procs; i++) {
+        int rank = reference_team->procs[i].p->job_rank;
+        reference_ranks.push_back(rank);
+        if (is_contig && i > 0 &&
+            (rank - reference_ranks[i - 1] > 1 ||
+             reference_ranks[i - 1] - rank > 1)) {
+            is_contig = false;
+        }
+    }
+    team = job.create_team(reference_ranks, true, is_contig, true);
+    this->set_inplace(TEST_NO_INPLACE);
+    SET_MEM_TYPE(UCC_MEMORY_TYPE_HOST);
+    data_init(size, UCC_DT_UINT8, count, ctxs, team, false);
+    UccReq req(team, ctxs);
+    req.start();
+    req.wait();
+    EXPECT_EQ(true, data_validate(ctxs));
+    data_fini_onesided(ctxs);
+}
+
+INSTANTIATE_TEST_CASE_P(
+    , test_alltoall_onesided,
+    ::testing::Combine(
+        ::testing::Range(1, UccJob::nStaticTeams),           // team_ids
+        ::testing::Values("seq", "stride", "ilv", "full"),   // ORDER
+        ::testing::Values("get", "put", "auto", "mixed"),    // ALG
+        ::testing::Values(0, 1, 4),                          // NFRAGS
+        ::testing::Values(8, 16384)));                       // per-peer count
+
 UCC_TEST_P(test_alltoall_0, single_persistent)
 {
     const int            team_id  = std::get<0>(GetParam());
