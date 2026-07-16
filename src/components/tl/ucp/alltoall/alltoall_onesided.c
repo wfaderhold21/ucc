@@ -546,6 +546,8 @@ ucc_status_t ucc_tl_ucp_alltoall_onesided_init(ucc_base_coll_args_t *coll_args,
         UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_frag_size;
     ucc_tl_ucp_alltoall_onesided_alg_t alg   =
         UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_alg;
+    ucc_tl_ucp_alltoall_onesided_order_t order =
+        UCC_TL_UCP_TEAM_LIB(tl_team)->cfg.alltoall_onesided_order;
     ucc_tl_ucp_schedule_t       *tl_schedule = NULL;
     ucc_rank_t                   group_size  = 1;
     ucc_coll_task_t             *barrier_task;
