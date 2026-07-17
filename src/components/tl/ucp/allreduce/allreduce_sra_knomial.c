@@ -187,13 +187,22 @@ ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
          * one fragment overlaps the reduce-scatter (incl. CPU reduction) of
          * the next. Values are conservative defaults; override via
          * UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE. */
+        size_t total = args->dst.info.count *
+                       ucc_dt_size(args->dst.info.datatype);
+
         pp->threshold = 262144;     /* start pipelining above 256KB */
         pp->frag_size = 524288;     /* ~512KB fragments: fewer/larger frags beat
                                        256KB by 6-17% at >=1MB across 2-256 ranks
                                        (thor sweep), tie below, no regression */
         pp->n_frags   = 2;          /* floor: at least 2 frags once over threshold */
-        pp->pdepth    = 2;          /* 2 fragments in flight */
         pp->order     = UCC_PIPELINE_PARALLEL;
+        /* Pipeline depth scales with fragment count: 2 in flight is optimal up
+         * to 1MB (<=2 frags of 512KB), but once >=4 fragments exist (>=2MB) a
+         * 4-deep pipeline adds 6-23% across 8-64 ranks (thor hi-rank sweep,
+         * depths 2/3/4). Depth 3 was never uniquely best. At >=128 ranks the
+         * deeper pipeline regresses ~5-12% past 4MB (NIC contention at high
+         * PPN); we accept that to keep the rule size-only. */
+        pp->pdepth    = (total >= 4 * pp->frag_size) ? 4 : 2;
     }
 }
 
