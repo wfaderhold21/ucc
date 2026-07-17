@@ -47,7 +47,7 @@
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --error=slurm-%x-%j.err
 
-SRC_DIR=${HOME}/ucc-a2a-v3
+SRC_DIR=${SRC_DIR:-${HOME}/ucc-a2a-v3}
 JOB_ID=${SLURM_JOB_ID:-manual}
 BUILD_DIR=${SRC_DIR}
 INSTALL_DIR="$BUILD_DIR/install"
