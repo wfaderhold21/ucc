@@ -913,6 +913,21 @@ ucc_status_t ucc_context_create_proc_info(
         goto error_ctx_create_epilog;
     }
 
+    /* create_epilog above may have destroyed and removed TL contexts whose
+       epilog failed (e.g. sharp when its resources are unavailable), which
+       compacts ctx->tl_ctx and shrinks ctx->n_tl_ctx. ctx->all_tls was built
+       earlier from the pre-epilog TL set, so it is now stale: its count and
+       name ordering no longer match ctx->tl_ctx. Consumers such as
+       ucc_mem_map_import() match packed per-TL names against all_tls
+       positionally, so a stale all_tls silently fails to resolve the ucp
+       handle ("malformed mem map handle"). Rebuild all_tls to mirror the
+       final ctx->tl_ctx. */
+    ctx->all_tls.count = ctx->n_tl_ctx;
+    for (i = 0; i < ctx->n_tl_ctx; i++) {
+        ctx->all_tls.names[i] = (char *)ucc_derived_of(
+            ctx->tl_ctx[i]->super.lib, ucc_tl_lib_t)->iface->super.name;
+    }
+
     ucc_debug("created ucc context %p for lib %s: type %s, thread mode %s, oob %s, num eps %d, num ppn %d",
               ctx, lib->full_prefix,
               params->mask & UCC_CONTEXT_PARAM_FIELD_TYPE ? ucc_context_type_str(params->type) : "n/a",
