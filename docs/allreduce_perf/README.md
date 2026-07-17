@@ -29,3 +29,19 @@ Optimization plans for `allreduce` in the 512kB–4MB message-size range in
 
 **#1 -> #2** (which finalizes #1's constants and evaluates #5) -> then #3/#4
 only if profiling still shows headroom.
+
+## Status (2026-07-17)
+
+- **#1 — DONE & shipped** (`93a9f4ff`): host-side SRA pipelining enabled.
+- **#2 — DONE & shipped** (`33f4cbc9`): radix = non-factor (keep 4), frag = 512K,
+  size-only adaptive `pdepth = (total ≥ 2MB) ? 4 : 2`. Crossover reconfirmed over
+  64KB–64MB (job 10175). See plan-2.
+- **#3 — DEPRIORITIZED** (`d5904f78`): profiling shows reduce is only 6.6% of
+  cycles in the pipelined path (already hidden). See plan-3.
+- **#4 — ANALYZED, no hot-path target:** both written targets are off the ALLREDUCE
+  critical path (ring not selected in-window; proxy memcpy is REDUCE_SCATTER-only),
+  and the ALLREDUCE reduce-scatter already writes its final segment straight to
+  `dst` — no redundant full-buffer pass to trim. Consistent with #3 (network-bound).
+- **#5 — CLOSED (data):** ring never wins any (size, rank) cell → no selection-string
+  change. Residual scale headroom is PPN-driven, not a ring/selection matter. See
+  plan-5.

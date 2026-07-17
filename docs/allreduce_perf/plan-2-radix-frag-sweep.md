@@ -67,3 +67,29 @@ Size-only adaptive depth in `allreduce_sra_knomial.c` host branch:
 ≥2MB, else 2). Chosen over a size+rank rule for simplicity, accepting the
 ≥128-rank / ≥4MB regression. radix, frag_size, threshold and the selection
 string are left unchanged (all data-backed no-ops).
+
+### Crossover confirmation over the full size range (job 10175)
+
+Widened re-run to pin the exact crossovers: `mono` + sra `pdepth=2` (Plan #1
+known-good) + sra `pdepth=4` (the adaptive pick) + `ring`, radix 4 / frag 512K,
+**64KB–64MB** (vs. the earlier 8MB ceiling), 8 nodes × PPN{1,4,8,16,32} → ranks
+{8,32,64,128,256}. Data: `results/plan5-ring-crossover/summary.{csv,txt}`.
+Metric = bus BW GB/s.
+
+- **`d2 → d4` lower crossover = 2MB at every rank.** Below 2MB, d2/d4/mono tie
+  within ±1% (noise); at ≥2MB d4 pulls ahead. Confirms the shipped `≥2MB → 4`
+  threshold exactly.
+- **`d4 → d2` upper crossover is rank-gated at `(nranks ≥ 128 AND ≥4MB)`:**
+  - Ranks **8–64:** d4 wins **+7…+17%** for *all* sizes 2MB→64MB — no reversal.
+    The widened range shows the low/mid-rank advantage does **not** decay at large
+    sizes, so no upper size bound is needed there.
+  - Ranks **128–256:** d4 wins only at 2MB (+3.5% / +5.2%); at **≥4MB d2 wins
+    +6…12%** (flat 4MB→64MB). This is the accepted-tradeoff corner.
+- **Root cause is PPN, not rank count.** The sweep couples rank count with PPN
+  (8r=1ppn … 256r=32ppn); the reversal tracks NIC contention from many procs per
+  node sharing one NIC. A `nranks`-keyed guard would be a *proxy* for PPN that
+  holds only because the sweep bundles them, and would misfire on thin
+  (low-PPN/high-rank) layouts. `get_pipeline_params` has team size but not node
+  topology, so a correct guard would need PPN awareness. **Deferred** (see the
+  PPN-aware lever in plan-5); the ≥4MB corner is also beyond the 512KB–4MB charter
+  window, so the size-only rule stays.
