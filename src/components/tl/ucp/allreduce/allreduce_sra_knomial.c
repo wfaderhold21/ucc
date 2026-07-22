@@ -182,7 +182,11 @@ ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
         pp->frag_size = mc_attr.fast_alloc_size;
         pp->order     = UCC_PIPELINE_PARALLEL;
         pp->pdepth    = 2;
-    } else {
+    } else if (args->dst.info.mem_type == UCC_MEMORY_TYPE_HOST) {
+        /* Key off dst.info.mem_type: for in-place calls src.info is not the
+         * active buffer and is commonly UCC_MEMORY_TYPE_UNKNOWN, while dst is
+         * always the authoritative type (see CHECK_SAME_MEMTYPE, which only
+         * ties src==dst for out-of-place). */
         /* Host path: pipeline RS->AG across fragments so the allgather of
          * one fragment overlaps the reduce-scatter (incl. CPU reduction) of
          * the next. Values are conservative defaults; override via
@@ -203,6 +207,15 @@ ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
          * deeper pipeline regresses ~5-12% past 4MB (NIC contention at high
          * PPN); we accept that to keep the rule size-only. */
         pp->pdepth    = (total >= 4 * pp->frag_size) ? 4 : 2;
+    } else {
+        /* Non-host, non-CUDA-inplace (e.g. out-of-place CUDA): keep the
+         * pre-pipelining monolithic behavior -- host tuning does not apply
+         * to device buffers, and CUDA behavior must not change here. */
+        pp->threshold = SIZE_MAX;
+        pp->n_frags   = 0;
+        pp->frag_size = 0;
+        pp->pdepth    = 1;
+        pp->order     = UCC_PIPELINE_PARALLEL;
     }
 }
 
