@@ -167,6 +167,23 @@ ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
 {
     ucc_tl_ucp_lib_config_t *cfg = &team->cfg;
 
+    if (args->mask & UCC_COLL_ARGS_FIELD_TAG) {
+        /* User-tagged (ordered) collective: every internal RS/AG task inherits
+         * the caller's single tag (see ucc_tl_ucp_init_task), instead of the
+         * per-task seq_num that makes concurrent fragments distinguishable. A
+         * multi-fragment UCC_PIPELINE_PARALLEL schedule would then have several
+         * fragments' RS/AG p2p messages sharing (tag, sender, id, scope) in
+         * flight at once, so a receive could match the wrong stage/fragment and
+         * corrupt or hang the result. Force the monolithic (single-fragment)
+         * path in this case -- correctness over the pipeline speedup. */
+        pp->threshold = SIZE_MAX;
+        pp->n_frags   = 0;
+        pp->frag_size = 0;
+        pp->pdepth    = 1;
+        pp->order     = UCC_PIPELINE_PARALLEL;
+        return;
+    }
+
     if (!ucc_pipeline_params_is_auto(&cfg->allreduce_sra_kn_pipeline)) {
         *pp = cfg->allreduce_sra_kn_pipeline;
         return;

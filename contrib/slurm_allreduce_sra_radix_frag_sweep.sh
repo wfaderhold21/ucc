@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Plan #2 sweep: turn Plan #1's hard-coded pipeline constants and the fixed
-# REDUCE_SCATTER_KN_RADIX=4 into measured optima, and check whether `ring` owns a
+# Plan #2 sweep: turn Plan #1's hard-coded pipeline constants and the SRA
+# allreduce knomial radix into measured optima, and check whether `ring` owns a
 # contiguous sub-window of 256KB-4MB.
 #
 # Cross-product swept (all via runtime env -- NO rebuild needed once a build with
@@ -12,7 +12,11 @@
 # over MIN_COUNT..MAX_COUNT x {RANKS}.
 #
 # Knobs used per config:
-#   UCC_TL_UCP_REDUCE_SCATTER_KN_RADIX  -> radix (RS knomial radix; tl_ucp.c default 4)
+#   UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX   -> radix (SRA allreduce knomial radix; auto).
+#       NOTE: the SRA allreduce path reads this knob and passes the radix
+#       explicitly into reduce_scatter/allgather init_r; UCC_TL_UCP_REDUCE_
+#       SCATTER_KN_RADIX only affects the standalone reduce_scatter and is inert
+#       for @sra_knomial, so it must NOT be used for this sweep.
 #   UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE-> frag/pdepth pipeline string (or `n` = mono)
 #   UCC_TL_UCP_TUNE                     -> @sra_knomial vs @ring for the alg dimension
 #
@@ -148,9 +152,9 @@ echo "config,radix,alg,pipeline,nranks,size_bytes,count,time_avg_us,bw_avg_gbs,b
 run_one() {
     local label="$1" radix="$2" alg="$3" pipeline="$4" nranks="$5" ppn="$6" out="$7"
 
-    unset UCC_TL_UCP_REDUCE_SCATTER_KN_RADIX
+    unset UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX
     unset UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE
-    [[ "$radix"    != "-" ]] && export UCC_TL_UCP_REDUCE_SCATTER_KN_RADIX="$radix"
+    [[ "$radix"    != "-" ]] && export UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX="$radix"
     [[ "$pipeline" != "-" ]] && export UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE="$pipeline"
     export UCC_TL_UCP_TUNE="allreduce:0-inf:@${alg}"
 
@@ -165,7 +169,7 @@ run_one() {
         -x "UCX_TLS=${UCX_TLS}"
         -x "UCX_NET_DEVICES=${UCX_NET_DEVICES}"
     )
-    [[ "$radix"    != "-" ]] && cmd+=(-x UCC_TL_UCP_REDUCE_SCATTER_KN_RADIX)
+    [[ "$radix"    != "-" ]] && cmd+=(-x UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX)
     [[ "$pipeline" != "-" ]] && cmd+=(-x UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE)
     if [[ -n "$MPIRUN_ARGS" ]]; then
         read -r -a extra <<< "$MPIRUN_ARGS"; cmd+=("${extra[@]}")
