@@ -100,6 +100,20 @@ UCX_NET_DEVICES=${UCX_NET_DEVICES:-"mlx5_3:1"}
 # Override MODULES="" to skip, or set it to your cluster's module names.
 MODULES=${MODULES:-"gcc hpcx"}
 
+# Per-run wall-clock cap so one hung launch (onesided deadlock / malformed-handle
+# abort) can't consume the whole SBATCH --time allocation and starve the
+# remaining NFRAGS arms. timeout exits 124 on expiry; -k sends SIGKILL 30s after
+# the initial SIGTERM. Set RUN_TIMEOUT= (empty) to disable.
+RUN_TIMEOUT=${RUN_TIMEOUT:-10m}
+TIMEOUT_CMD=()
+if [[ -n "$RUN_TIMEOUT" ]]; then
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_CMD=(timeout -k 30s "$RUN_TIMEOUT")
+    else
+        echo "WARN: 'timeout' not found; per-run cap disabled" >&2
+    fi
+fi
+
 mkdir -p "$RESULT_DIR"
 
 if [[ -n "${MODULES:-}" ]]; then
@@ -178,7 +192,7 @@ run_perftest() {
     export UCC_TL_UCP_ALLTOALL_ONESIDED_NFRAGS="$nfrags"
     export UCC_TL_UCP_ALLTOALL_ONESIDED_FRAG_SIZE="$frag_size"
 
-    local cmd=(mpirun
+    local cmd=("${TIMEOUT_CMD[@]}" mpirun
         --np "$NTASKS"
         --map-by "ppr:${NTASKS_PER_NODE}:node"
         --bind-to core
@@ -230,6 +244,10 @@ run_perftest() {
     } | tee "$out"
 
     "${cmd[@]}" 2>&1 | tee -a "$out"
+    if [[ ${PIPESTATUS[0]} -eq 124 ]]; then
+        echo "!! order=$order arm=$label nfrags=$nfrags TIMED OUT after $RUN_TIMEOUT (killed); continuing" \
+            | tee -a "$out"
+    fi
 
     # Extract the data table rows (count size time_avg time_min time_max
     # bw_avg bw_max bw_min) into the combined CSV. Data rows begin with a

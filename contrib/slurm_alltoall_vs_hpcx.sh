@@ -74,6 +74,22 @@ UCX_TLS=${UCX_TLS:-"sm,rc"}
 UCX_NET_DEVICES=${UCX_NET_DEVICES:-"mlx5_3:1"}
 MODULES=${MODULES:-"gcc hpcx"}
 
+# Per-run wall-clock cap. A single hung launch (e.g. an onesided deadlock or the
+# malformed-handle abort this branch has hit) would otherwise block until the
+# whole SBATCH --time allocation expires, starving every remaining config. Wrap
+# each mpirun in `timeout` so one bad run is killed and the sweep continues.
+# timeout exits 124 on expiry; -k sends SIGKILL 30s after the initial SIGTERM if
+# mpirun ignores it. Set RUN_TIMEOUT= (empty) to disable.
+RUN_TIMEOUT=${RUN_TIMEOUT:-10m}
+TIMEOUT_CMD=()
+if [[ -n "$RUN_TIMEOUT" ]]; then
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_CMD=(timeout -k 30s "$RUN_TIMEOUT")
+    else
+        echo "WARN: 'timeout' not found; per-run cap disabled" >&2
+    fi
+fi
+
 mkdir -p "$RESULT_DIR"
 
 # ---------------------------------------------------------------------------
@@ -197,7 +213,7 @@ run_config() {
     fi
 
     local out="$RESULT_DIR/alltoall-${cfg}.log"
-    local cmd=(mpirun
+    local cmd=("${TIMEOUT_CMD[@]}" mpirun
         --np "$NTASKS"
         --map-by "ppr:${NTASKS_PER_NODE}:node"
         --bind-to core
@@ -240,6 +256,11 @@ run_config() {
     } | tee "$out"
 
     "${cmd[@]}" 2>&1 | tee -a "$out"
+    local rc=${PIPESTATUS[0]}
+    if [[ $rc -eq 124 ]]; then
+        echo "!! config=$cfg TIMED OUT after $RUN_TIMEOUT (killed); continuing" \
+            | tee -a "$out"
+    fi
 
     # ucc_perftest data rows: count size time_avg time_min time_max bw_avg bw_max bw_min
     awk -v cfg="$cfg" '
