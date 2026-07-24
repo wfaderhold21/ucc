@@ -16,6 +16,16 @@
  *  6. shrink_allreduce      — full lifecycle: simulated failure → abort →
  *                             recover → shrink (MPI_Comm_split sub-comm) →
  *                             new team → allreduce SUM with data verification.
+ *  7. shrink_multi_kill     — K>1 ranks fail; BOR reports K; shrink survivors
+ *                             and verify a full alltoall exchange (data check).
+ *  8. iterated_shrink       — shrink, then fail+shrink a SECOND time; proves a
+ *                             shrunken context is itself resilient. Final
+ *                             alltoall over the twice-shrunk team is verified.
+ *  9. shrink_to_single      — kill all but rank 0; barrier + allreduce on the
+ *                             degenerate single-survivor context.
+ * 10. shrink_repeated_colls — 20 rounds of barrier+alltoall+allreduce on the
+ *                             shrunken team; catches latent rebuild bugs that
+ *                             only surface under sustained reuse.
  *
  * Each test creates its own UCC context and team (if needed), runs the
  * scenario, and returns 0 on pass or 1 on fail.  The final exit code is the
@@ -157,6 +167,159 @@ static ucc_status_t poll_abort_test(ucc_context_h ctx)
         st = ucc_context_abort_test(ctx);
     } while (st == UCC_INPROGRESS);
     return st;
+}
+
+/* Drive an alltoall to completion on the given team/context and verify the
+   received data.  Rank i sends value (i*1000 + j) to rank j; after the
+   exchange rank j must hold (i*1000 + j) in slot i for every source i.
+   Returns 0 on success, non-zero on error/mismatch.  All ranks in `comm`
+   must call this collectively. */
+static int alltoall_verify(ucc_team_h team, ucc_context_h ctx, MPI_Comm comm)
+{
+    int rank, size;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    int64_t *sbuf = (int64_t *)malloc((size_t)size * sizeof(int64_t));
+    int64_t *rbuf = (int64_t *)malloc((size_t)size * sizeof(int64_t));
+    if (!sbuf || !rbuf) {
+        free(sbuf);
+        free(rbuf);
+        return 1;
+    }
+    for (int j = 0; j < size; j++) {
+        sbuf[j] = (int64_t)rank * 1000 + j;
+        rbuf[j] = -1;
+    }
+
+    ucc_coll_args_t args = {};
+    args.coll_type         = UCC_COLL_TYPE_ALLTOALL;
+    args.src.info.buffer   = sbuf;
+    args.src.info.count     = (uint64_t)size;
+    args.src.info.datatype  = UCC_DT_INT64;
+    args.src.info.mem_type  = UCC_MEMORY_TYPE_HOST;
+    args.dst.info.buffer   = rbuf;
+    args.dst.info.count     = (uint64_t)size;
+    args.dst.info.datatype  = UCC_DT_INT64;
+    args.dst.info.mem_type  = UCC_MEMORY_TYPE_HOST;
+
+    ucc_coll_req_h req;
+    int rc = 0;
+    if (UCC_OK != ucc_collective_init(&args, &req, team)) { rc = 1; goto out; }
+    if (UCC_OK != ucc_collective_post(req))               { rc = 1; goto out; }
+
+    ucc_status_t st;
+    do {
+        ucc_context_progress(ctx);
+        st = ucc_collective_test(req);
+    } while (st == UCC_INPROGRESS);
+    ucc_collective_finalize(req);
+    if (st != UCC_OK) { rc = 1; goto out; }
+
+    /* rbuf[i] came from rank i and should equal (i*1000 + rank). */
+    for (int i = 0; i < size; i++) {
+        int64_t exp = (int64_t)i * 1000 + rank;
+        if (rbuf[i] != exp) {
+            std::cerr << "[rank " << world_rank << "] alltoall mismatch: slot "
+                      << i << " got " << rbuf[i] << " expected " << exp << "\n";
+            rc = 1;
+        }
+    }
+out:
+    free(sbuf);
+    free(rbuf);
+    return rc;
+}
+
+/* Drive an allreduce SUM to completion and verify the result.  Rank i
+   contributes (i+1); the reduced value must be size*(size+1)/2 on every rank.
+   Returns 0 on success.  All ranks in `comm` must call this collectively. */
+static int allreduce_verify(ucc_team_h team, ucc_context_h ctx, MPI_Comm comm)
+{
+    int rank, size;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    int64_t sbuf     = (int64_t)rank + 1;
+    int64_t rbuf     = -1;
+    int64_t expected = (int64_t)size * (size + 1) / 2;
+
+    ucc_coll_args_t args = {};
+    args.coll_type        = UCC_COLL_TYPE_ALLREDUCE;
+    args.op               = UCC_OP_SUM;
+    args.src.info.buffer  = &sbuf;
+    args.src.info.count    = 1;
+    args.src.info.datatype = UCC_DT_INT64;
+    args.src.info.mem_type = UCC_MEMORY_TYPE_HOST;
+    args.dst.info.buffer  = &rbuf;
+    args.dst.info.count    = 1;
+    args.dst.info.datatype = UCC_DT_INT64;
+    args.dst.info.mem_type = UCC_MEMORY_TYPE_HOST;
+
+    ucc_coll_req_h req;
+    if (UCC_OK != ucc_collective_init(&args, &req, team)) return 1;
+    if (UCC_OK != ucc_collective_post(req))               return 1;
+    ucc_status_t st;
+    do {
+        ucc_context_progress(ctx);
+        st = ucc_collective_test(req);
+    } while (st == UCC_INPROGRESS);
+    ucc_collective_finalize(req);
+    if (st != UCC_OK)       return 1;
+    if (rbuf != expected) {
+        std::cerr << "[rank " << world_rank << "] allreduce mismatch: got "
+                  << rbuf << " expected " << expected << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+/* Drive a barrier to completion on the given team/context.  Returns 0 on
+   success.  All ranks in the team must call this collectively. */
+static int barrier_once(ucc_team_h team, ucc_context_h ctx)
+{
+    ucc_coll_args_t args = {};
+    args.coll_type = UCC_COLL_TYPE_BARRIER;
+    ucc_coll_req_h req;
+    if (UCC_OK != ucc_collective_init(&args, &req, team)) return 1;
+    if (UCC_OK != ucc_collective_post(req))               return 1;
+    ucc_status_t st;
+    do {
+        ucc_context_progress(ctx);
+        st = ucc_collective_test(req);
+    } while (st == UCC_INPROGRESS);
+    ucc_collective_finalize(req);
+    return (st == UCC_OK) ? 0 : 1;
+}
+
+/* Survivor-side shrink.  Precondition: `ctx` is already in RECOVERED state
+   (all ranks, including the simulated-failed ones, must have jointly driven
+   abort → abort_test → recover *before* the failed ranks dropped out, since
+   the abort BOR allreduce spans the full rank set).  Produces a new context
+   over `sub_comm`; on success *new_ctx_out holds it and the old ctx is
+   destroyed inside ucc_context_shrink.  Returns 0 on success. */
+static int survivor_shrink(ucc_lib_h lib, ucc_context_h ctx,
+                           MPI_Comm sub_comm, ucc_context_h *new_ctx_out)
+{
+    int sub_rank, sub_size;
+    MPI_Comm_rank(sub_comm, &sub_rank);
+    MPI_Comm_size(sub_comm, &sub_size);
+
+    ucc_context_config_h cfg;
+    if (UCC_OK != ucc_context_config_read(lib, nullptr, &cfg)) return 1;
+
+    ucc_context_params_t p = {};
+    p.mask            = UCC_CONTEXT_PARAM_FIELD_OOB;
+    p.oob.allgather   = oob_allgather;
+    p.oob.req_test    = oob_allgather_test;
+    p.oob.req_free    = oob_allgather_free;
+    p.oob.coll_info   = (void *)(uintptr_t)sub_comm;
+    p.oob.n_oob_eps   = sub_size;
+    p.oob.oob_ep      = sub_rank;
+
+    ucc_status_t st = ucc_context_shrink(ctx, &p, cfg, new_ctx_out);
+    ucc_context_config_release(cfg);
+    return (st == UCC_OK) ? 0 : 1;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -505,6 +668,311 @@ static int test_shrink_allreduce(ucc_lib_h lib, MPI_Comm comm)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Test 7: multi-rank failure → shrink → alltoall correctness.                */
+/*                                                                            */
+/* Marks the last K ranks failed (K = 2 when size >= 4, else 1), verifies the */
+/* BOR agreement reports exactly K failed ranks, shrinks the survivors, and   */
+/* checks a full alltoall exchange on the reduced team returns correct data.  */
+/* This is the multi-victim generalisation of test_shrink_allreduce and the   */
+/* only alltoall data-correctness check in the suite.                         */
+/* -------------------------------------------------------------------------- */
+static int test_shrink_multi_kill(ucc_lib_h lib, MPI_Comm comm)
+{
+    const char *label = "shrink_multi_kill";
+
+    if (world_size < 3) {
+        if (world_rank == 0)
+            std::cout << "[SKIP] " << label << " (requires at least 3 ranks)\n";
+        return 0;
+    }
+
+    const int  kill        = (world_size >= 4) ? 2 : 1;
+    const int  surviving   = world_size - kill;
+    const bool is_survivor = (world_rank < surviving);
+
+    ucc_context_h ctx = create_global_ctx(lib, comm);
+    RES_EXPECT(ctx != nullptr, label);
+
+    /* Rank 0 observes the last K ranks as unreachable. */
+    if (world_rank == 0) {
+        for (int r = surviving; r < world_size; r++) {
+            ucc_context_mark_rank_failed(reinterpret_cast<ucc_context_t *>(ctx),
+                                         static_cast<ucc_rank_t>(r));
+        }
+    }
+
+    /* All ranks (survivors + soon-to-be-failed) join the abort BOR. */
+    RES_CHECK(ucc_context_abort(ctx), label);
+    RES_CHECK(poll_abort_test(ctx), label);
+    RES_CHECK(ucc_context_recover(ctx), label);
+
+    ucc_context_attr_t attr;
+    attr.mask = UCC_CONTEXT_ATTR_FIELD_FAILED_RANKS;
+    RES_CHECK(ucc_context_get_attr(ctx, &attr), label);
+    RES_EXPECT(attr.n_failed_ranks == static_cast<uint32_t>(kill), label);
+
+    MPI_Comm sub_comm;
+    MPI_Comm_split(comm, is_survivor ? 0 : MPI_UNDEFINED, world_rank, &sub_comm);
+
+    if (!is_survivor) {
+        ucc_context_destroy(ctx);
+        MPI_Barrier(comm);
+        return 0;
+    }
+
+    ucc_context_h new_ctx;
+    RES_EXPECT(survivor_shrink(lib, ctx, sub_comm, &new_ctx) == 0, label);
+
+    ucc_team_h team = create_team(new_ctx, sub_comm);
+    RES_EXPECT(team != nullptr, label);
+
+    int vrc = alltoall_verify(team, new_ctx, sub_comm);
+    RES_EXPECT(vrc == 0, label);
+
+    destroy_team(team, new_ctx);
+    ucc_context_destroy(new_ctx);
+    MPI_Comm_free(&sub_comm);
+
+    MPI_Barrier(comm);
+    if (world_rank == 0) {
+        std::cout << "[PASS] " << label << " (killed " << kill
+                  << ", " << surviving << " survivors)\n";
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Test 8: iterated resilience — shrink, then fail + shrink AGAIN.            */
+/*                                                                            */
+/* Proves a shrunken context is itself a fully-functional resilient context: */
+/* it can be aborted, recovered and shrunk a second time.  Round 1 drops the */
+/* last world rank (size -> size-1); round 2 drops the last surviving rank    */
+/* (size-1 -> size-2).  A final alltoall over the twice-shrunk team verifies  */
+/* data correctness.  Requires >= 4 ranks so the final team has >= 2 members. */
+/* -------------------------------------------------------------------------- */
+static int test_iterated_shrink(ucc_lib_h lib, MPI_Comm comm)
+{
+    const char *label = "iterated_shrink";
+
+    if (world_size < 4) {
+        if (world_rank == 0)
+            std::cout << "[SKIP] " << label << " (requires at least 4 ranks)\n";
+        return 0;
+    }
+
+    /* ---- Round 1: full world, drop the last rank. ---- */
+    const int  r1_failed    = world_size - 1;
+    const bool r1_survivor  = (world_rank < r1_failed);
+
+    ucc_context_h ctx = create_global_ctx(lib, comm);
+    RES_EXPECT(ctx != nullptr, label);
+
+    if (world_rank == 0) {
+        ucc_context_mark_rank_failed(reinterpret_cast<ucc_context_t *>(ctx),
+                                     static_cast<ucc_rank_t>(r1_failed));
+    }
+    RES_CHECK(ucc_context_abort(ctx), label);
+    RES_CHECK(poll_abort_test(ctx), label);
+    RES_CHECK(ucc_context_recover(ctx), label);
+
+    MPI_Comm comm1;
+    MPI_Comm_split(comm, r1_survivor ? 0 : MPI_UNDEFINED, world_rank, &comm1);
+
+    if (!r1_survivor) {
+        /* Round-1 victim: drop out and wait at the single global barrier. */
+        ucc_context_destroy(ctx);
+        MPI_Barrier(comm);
+        return 0;
+    }
+
+    ucc_context_h ctx1;
+    RES_EXPECT(survivor_shrink(lib, ctx, comm1, &ctx1) == 0, label);
+
+    int r1_rank, r1_size;
+    MPI_Comm_rank(comm1, &r1_rank);
+    MPI_Comm_size(comm1, &r1_size);
+
+    /* ---- Round 2: on the shrunken context, drop its last rank. ---- */
+    const int  r2_failed   = r1_size - 1;
+    const bool r2_survivor = (r1_rank < r2_failed);
+
+    if (r1_rank == 0) {
+        ucc_context_mark_rank_failed(reinterpret_cast<ucc_context_t *>(ctx1),
+                                     static_cast<ucc_rank_t>(r2_failed));
+    }
+    RES_CHECK(ucc_context_abort(ctx1), label);
+    RES_CHECK(poll_abort_test(ctx1), label);
+    RES_CHECK(ucc_context_recover(ctx1), label);
+
+    MPI_Comm comm2;
+    MPI_Comm_split(comm1, r2_survivor ? 0 : MPI_UNDEFINED, r1_rank, &comm2);
+
+    if (!r2_survivor) {
+        ucc_context_destroy(ctx1);
+        MPI_Comm_free(&comm1);
+        MPI_Barrier(comm);
+        return 0;
+    }
+
+    ucc_context_h ctx2;
+    RES_EXPECT(survivor_shrink(lib, ctx1, comm2, &ctx2) == 0, label);
+
+    ucc_team_h team = create_team(ctx2, comm2);
+    RES_EXPECT(team != nullptr, label);
+
+    int vrc = alltoall_verify(team, ctx2, comm2);
+    RES_EXPECT(vrc == 0, label);
+
+    destroy_team(team, ctx2);
+    ucc_context_destroy(ctx2);
+    MPI_Comm_free(&comm2);
+    MPI_Comm_free(&comm1);
+
+    MPI_Barrier(comm);
+    if (world_rank == 0) {
+        std::cout << "[PASS] " << label << " (" << world_size << " -> "
+                  << (world_size - 1) << " -> " << (world_size - 2)
+                  << " ranks)\n";
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Test 9: shrink to a single survivor.                                       */
+/*                                                                            */
+/* Kills all but rank 0 (kill_count = size-1).  The lone survivor shrinks to  */
+/* a 1-rank context and must still run a barrier and an allreduce (which      */
+/* reduces to its own contribution).  This is the degenerate lower bound of   */
+/* the shrink path — the smallest possible surviving set.                     */
+/* -------------------------------------------------------------------------- */
+static int test_shrink_to_single(ucc_lib_h lib, MPI_Comm comm)
+{
+    const char *label = "shrink_to_single";
+
+    if (world_size < 2) {
+        if (world_rank == 0)
+            std::cout << "[SKIP] " << label << " (requires at least 2 ranks)\n";
+        return 0;
+    }
+
+    const bool is_survivor = (world_rank == 0);
+
+    ucc_context_h ctx = create_global_ctx(lib, comm);
+    RES_EXPECT(ctx != nullptr, label);
+
+    if (world_rank == 0) {
+        for (int r = 1; r < world_size; r++) {
+            ucc_context_mark_rank_failed(reinterpret_cast<ucc_context_t *>(ctx),
+                                         static_cast<ucc_rank_t>(r));
+        }
+    }
+
+    RES_CHECK(ucc_context_abort(ctx), label);
+    RES_CHECK(poll_abort_test(ctx), label);
+    RES_CHECK(ucc_context_recover(ctx), label);
+
+    ucc_context_attr_t attr;
+    attr.mask = UCC_CONTEXT_ATTR_FIELD_FAILED_RANKS;
+    RES_CHECK(ucc_context_get_attr(ctx, &attr), label);
+    RES_EXPECT(attr.n_failed_ranks == static_cast<uint32_t>(world_size - 1),
+               label);
+
+    MPI_Comm sub_comm;
+    MPI_Comm_split(comm, is_survivor ? 0 : MPI_UNDEFINED, world_rank, &sub_comm);
+
+    if (!is_survivor) {
+        ucc_context_destroy(ctx);
+        MPI_Barrier(comm);
+        return 0;
+    }
+
+    ucc_context_h new_ctx;
+    RES_EXPECT(survivor_shrink(lib, ctx, sub_comm, &new_ctx) == 0, label);
+
+    ucc_team_h team = create_team(new_ctx, sub_comm);
+    RES_EXPECT(team != nullptr, label);
+
+    RES_EXPECT(barrier_once(team, new_ctx) == 0, label);
+    RES_EXPECT(allreduce_verify(team, new_ctx, sub_comm) == 0, label);
+
+    destroy_team(team, new_ctx);
+    ucc_context_destroy(new_ctx);
+    MPI_Comm_free(&sub_comm);
+
+    MPI_Barrier(comm);
+    if (world_rank == 0) {
+        std::cout << "[PASS] " << label << " (1 survivor)\n";
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Test 10: sustained collectives on a shrunken context.                      */
+/*                                                                            */
+/* After a single-rank failure and shrink, run several rounds of a mixed      */
+/* collective workload (barrier + alltoall + allreduce) on the reduced team.  */
+/* A one-shot post-shrink collective can pass while a latent teardown/rebuild */
+/* bug only surfaces under repeated use; this exercises that path.            */
+/* -------------------------------------------------------------------------- */
+static int test_shrink_repeated_colls(ucc_lib_h lib, MPI_Comm comm)
+{
+    const char *label = "shrink_repeated_colls";
+    const int   ROUNDS = 20;
+
+    if (world_size < 2) {
+        if (world_rank == 0)
+            std::cout << "[SKIP] " << label << " (requires at least 2 ranks)\n";
+        return 0;
+    }
+
+    const int  failed_rank = world_size - 1;
+    const bool is_survivor = (world_rank < failed_rank);
+
+    ucc_context_h ctx = create_global_ctx(lib, comm);
+    RES_EXPECT(ctx != nullptr, label);
+
+    if (world_rank == 0) {
+        ucc_context_mark_rank_failed(reinterpret_cast<ucc_context_t *>(ctx),
+                                     static_cast<ucc_rank_t>(failed_rank));
+    }
+    RES_CHECK(ucc_context_abort(ctx), label);
+    RES_CHECK(poll_abort_test(ctx), label);
+    RES_CHECK(ucc_context_recover(ctx), label);
+
+    MPI_Comm sub_comm;
+    MPI_Comm_split(comm, is_survivor ? 0 : MPI_UNDEFINED, world_rank, &sub_comm);
+
+    if (!is_survivor) {
+        ucc_context_destroy(ctx);
+        MPI_Barrier(comm);
+        return 0;
+    }
+
+    ucc_context_h new_ctx;
+    RES_EXPECT(survivor_shrink(lib, ctx, sub_comm, &new_ctx) == 0, label);
+
+    ucc_team_h team = create_team(new_ctx, sub_comm);
+    RES_EXPECT(team != nullptr, label);
+
+    for (int r = 0; r < ROUNDS; r++) {
+        RES_EXPECT(barrier_once(team, new_ctx) == 0, label);
+        RES_EXPECT(alltoall_verify(team, new_ctx, sub_comm) == 0, label);
+        RES_EXPECT(allreduce_verify(team, new_ctx, sub_comm) == 0, label);
+    }
+
+    destroy_team(team, new_ctx);
+    ucc_context_destroy(new_ctx);
+    MPI_Comm_free(&sub_comm);
+
+    MPI_Barrier(comm);
+    if (world_rank == 0) {
+        std::cout << "[PASS] " << label << " (" << ROUNDS
+                  << " rounds on " << (world_size - 1) << "-rank team)\n";
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
 /* main                                                                        */
 /* -------------------------------------------------------------------------- */
 int main(int argc, char **argv)
@@ -542,6 +1010,10 @@ int main(int argc, char **argv)
     failed |= test_drain_inflight(lib, MPI_COMM_WORLD);
     failed |= test_simulated_failure(lib, MPI_COMM_WORLD);
     failed |= test_shrink_allreduce(lib, MPI_COMM_WORLD);
+    failed |= test_shrink_multi_kill(lib, MPI_COMM_WORLD);
+    failed |= test_iterated_shrink(lib, MPI_COMM_WORLD);
+    failed |= test_shrink_to_single(lib, MPI_COMM_WORLD);
+    failed |= test_shrink_repeated_colls(lib, MPI_COMM_WORLD);
 
     /* Aggregate: if any rank failed, all ranks report failure. */
     int global_failed;
