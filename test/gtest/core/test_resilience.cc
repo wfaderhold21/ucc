@@ -213,9 +213,10 @@ UCC_TEST_F(test_resilience_multi, post_after_abort)
    the post-guard.
 
    We post barriers for n_procs-1 ranks only (all but the last).  A barrier
-   requires ALL team members to post before any can complete, so those
-   (n_procs-1) requests are guaranteed to stay in the progress queues —
-   they cannot complete without the final rank.  The drain path inside
+   requires ALL team members before any can complete, so withholding one
+   participant guarantees that none of the (n_procs-1) posted requests can
+   advance past INPROGRESS — even though ucc_progress_queue_enqueue performs
+   an inline task->progress(task) call at enqueue time.  The drain path inside
    ucc_context_abort must mark every queued request UCC_ERR_ABORTED. */
 UCC_TEST_F(test_resilience_multi, drain_inflight_on_abort)
 {

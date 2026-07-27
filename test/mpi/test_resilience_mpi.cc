@@ -434,12 +434,32 @@ static int test_post_after_abort(ucc_lib_h lib, MPI_Comm comm)
 /* Test 4: request posted before abort is drained to UCC_ERR_ABORTED.        */
 /*                                                                            */
 /* This tests the progress-queue drain path, not just the post-guard.        */
-/* The barrier is posted but no progress is made before abort is called;     */
-/* ucc_context_abort must mark the queued request ABORTED synchronously.     */
+/*                                                                            */
+/* The barrier is initialized on every rank but only posted on               */
+/* world_size - 1 ranks.  A barrier requires ALL team members before any     */
+/* can complete, so withholding one participant guarantees that none of      */
+/* the (world_size - 1) posted requests can ever advance past INPROGRESS —   */
+/* even though ucc_progress_queue_enqueue performs an inline                 */
+/* task->progress(task) call at enqueue time.  The non-posting rank simply   */
+/* finalizes its initialized-but-never-posted request and proceeds to        */
+/* symmetric teardown alongside everyone else.                               */
+/*                                                                            */
+/* All ranks complete the full abort → abort_test → recover →               */
+/* destroy_team → destroy_context sequence without any early returns,        */
+/* ensuring that collective state is consistent across every rank before    */
+/* the test concludes.                                                      */
 /* -------------------------------------------------------------------------- */
 static int test_drain_inflight(ucc_lib_h lib, MPI_Comm comm)
 {
     const char *label = "drain_inflight";
+
+    if (world_size < 2) {
+        if (world_rank == 0) {
+            std::cout << "[SKIP] " << label
+                      << " (requires at least 2 ranks)\n";
+        }
+        return 0;
+    }
 
     ucc_context_h ctx = create_global_ctx(lib, comm);
     RES_EXPECT(ctx != nullptr, label);
@@ -452,21 +472,30 @@ static int test_drain_inflight(ucc_lib_h lib, MPI_Comm comm)
     ucc_coll_req_h req;
     RES_CHECK(ucc_collective_init(&args, &req, team), label);
 
-    /* Post the barrier — it enters the progress queue but cannot complete
-       because no ucc_context_progress is called before abort. */
-    RES_CHECK(ucc_collective_post(req), label);
+    /* Post the barrier on only world_size - 1 ranks.  The last rank
+       withholds its post so the barrier is provably incomplete: none of
+       the posted requests can complete without the missing participant. */
+    const bool do_post = (world_rank < world_size - 1);
+    if (do_post) {
+        RES_CHECK(ucc_collective_post(req), label);
+    }
 
-    /* Abort immediately; the drain inside ucc_context_abort must mark the
+    /* Abort immediately; the drain inside ucc_context_abort must mark every
        queued request UCC_ERR_ABORTED. */
     RES_CHECK(ucc_context_abort(ctx), label);
 
-    /* The posted request must now be ABORTED without requiring any further
-       progress.  This is the key correctness assertion. */
-    ucc_status_t req_st = ucc_collective_test(req);
-    RES_EXPECT(req_st == UCC_ERR_ABORTED, label);
+    if (do_post) {
+        /* The posted request must now be ABORTED without requiring any
+           further progress.  This is the key correctness assertion. */
+        ucc_status_t req_st = ucc_collective_test(req);
+        RES_EXPECT(req_st == UCC_ERR_ABORTED, label);
+    }
 
+    /* Every rank finalizes its request (posted or not). */
     ucc_collective_finalize(req);
 
+    /* Symmetric teardown on every rank — no early returns while collective
+       state has diverged. */
     RES_CHECK(poll_abort_test(ctx), label);
     RES_CHECK(ucc_context_recover(ctx), label);
 
