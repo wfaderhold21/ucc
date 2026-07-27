@@ -11,6 +11,7 @@ from ucc_tune_sweep import (
     SweepResult,
     SweepSpec,
     TuneRange,
+    _compute_team_bands,
     _fmt_bytes,
     _forced_alg_env,
     _mem_type_for_tune,
@@ -483,6 +484,59 @@ class TestSweepCell(unittest.TestCase):
                       sd.knob_overrides,
                       "Expected knob override to be set after knob sweep")
         self.assertEqual(sd.knob_overrides["UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX"], "4")
+
+
+# ---------------------------------------------------------------------------
+# _compute_team_bands (Task 1)
+# ---------------------------------------------------------------------------
+
+class TestComputeTeamBands(unittest.TestCase):
+    def test_single_size(self):
+        bands = _compute_team_bands([8])
+        self.assertEqual(bands, {8: (8, None)})
+
+    def test_three_sizes_non_overlapping(self):
+        bands = _compute_team_bands([8, 64, 512])
+        self.assertEqual(bands[8], (8, 63))
+        self.assertEqual(bands[64], (64, 511))
+        self.assertEqual(bands[512], (512, None))
+
+    def test_unsorted_duplicate_input(self):
+        bands = _compute_team_bands([512, 8, 8, 64])
+        self.assertEqual(len(bands), 3)
+        self.assertEqual(bands[8], (8, 63))
+        self.assertEqual(bands[64], (64, 511))
+        self.assertEqual(bands[512], (512, None))
+
+    def test_adjacent_sizes(self):
+        bands = _compute_team_bands([8, 9])
+        self.assertEqual(bands[8], (8, 8))
+        self.assertEqual(bands[9], (9, None))
+
+
+# ---------------------------------------------------------------------------
+# TuneRange.tune_token with bands (Task 1)
+# ---------------------------------------------------------------------------
+
+class TestTuneTokenBands(unittest.TestCase):
+    def _range(self, start, end, alg="sra_knomial", alg_id=1, knobs=None):
+        return TuneRange(
+            start_bytes=start, end_bytes=end,
+            alg_name=alg, alg_id=alg_id,
+            knob_overrides=knobs or {},
+        )
+
+    def test_single_band_inf(self):
+        tok = self._range(0, None).tune_token("allreduce", "host", 8, None)
+        self.assertEqual(tok, "allreduce:0-inf:host:[8-inf]:inf:@sra_knomial")
+
+    def test_finite_band(self):
+        tok = self._range(0, 4096).tune_token("allreduce", "host", 8, 63)
+        self.assertEqual(tok, "allreduce:0-4k:host:[8-63]:inf:@sra_knomial")
+
+    def test_middle_band(self):
+        tok = self._range(4096, 1 << 20).tune_token("allreduce", "host", 64, 511)
+        self.assertEqual(tok, "allreduce:4k-1M:host:[64-511]:inf:@sra_knomial")
 
 
 if __name__ == "__main__":

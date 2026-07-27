@@ -411,12 +411,8 @@ class TestValidate(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestRunTuning(unittest.TestCase):
-    @patch("ucc_offline_tune.run_ucc_info_algs")
     @patch("ucc_offline_tune.sweep_cell")
-    def test_returns_one_result_per_cell(self, mock_sweep, mock_info):
-        mock_info.return_value = {
-            "tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}
-        }
+    def test_returns_one_result_per_cell(self, mock_sweep):
         mock_sweep.return_value = _make_sweep_result()
 
         results, skipped = run_tuning(
@@ -424,6 +420,7 @@ class TestRunTuning(unittest.TestCase):
             mem_types=["host"],
             team_sizes=[8],
             msg_sizes_bytes=[1024, 65536],
+            alg_map={"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}},
             n_reps=3,
             n_iter=100,
             n_warmup=10,
@@ -432,15 +429,15 @@ class TestRunTuning(unittest.TestCase):
         self.assertEqual(len(results), 1)
         mock_sweep.assert_called_once()
 
-    @patch("ucc_offline_tune.run_ucc_info_algs")
     @patch("ucc_offline_tune.sweep_cell")
-    def test_skipped_when_no_algs(self, mock_sweep, mock_info):
-        mock_info.return_value = {}   # no components
+    def test_skipped_when_no_algs(self, mock_sweep):
+        # Component exists but collective not found → skipped gracefully.
         results, skipped = run_tuning(
             component_collective_pairs=[("tl/ucp", "allreduce")],
             mem_types=["host"],
             team_sizes=[8],
             msg_sizes_bytes=[1024],
+            alg_map={"tl/cuda": {"allreduce": [AlgInfo(0, "knomial", "")]}},
             n_reps=3,
             n_iter=100,
             n_warmup=10,
@@ -450,25 +447,24 @@ class TestRunTuning(unittest.TestCase):
         self.assertIn("no algorithms found", skipped[0])
         mock_sweep.assert_not_called()
 
-    @patch("ucc_offline_tune.run_ucc_info_algs")
     @patch("ucc_offline_tune.sweep_cell")
-    def test_multiple_cells_all_swept(self, mock_sweep, mock_info):
-        mock_info.return_value = {
-            "tl/ucp": {
-                "allreduce": [AlgInfo(0, "knomial", "")],
-                "bcast":     [AlgInfo(0, "knomial", "")],
-            }
-        }
+    def test_multiple_cells_all_swept(self, mock_sweep):
         mock_sweep.return_value = _make_sweep_result()
 
         results, _ = run_tuning(
             component_collective_pairs=[
                 ("tl/ucp", "allreduce"),
-                ("tl/ucp", "bcast"),
+                ("tl/ucp", "alltoall"),
             ],
             mem_types=["host", "cuda"],
             team_sizes=[8],
             msg_sizes_bytes=[1024],
+            alg_map={
+                "tl/ucp": {
+                    "allreduce": [AlgInfo(0, "knomial", "")],
+                    "alltoall":  [AlgInfo(0, "knomial", "")],
+                }
+            },
             n_reps=3,
             n_iter=100,
             n_warmup=10,
@@ -547,6 +543,154 @@ class TestWriteSummary(unittest.TestCase):
         )
         content = path.read_text()
         self.assertIn("Correctness was NOT validated", content)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — Knob scoping for multi-team-size runs
+# ---------------------------------------------------------------------------
+
+class TestKnobScoping(unittest.TestCase):
+    def _sr(self, team_size=8, knobs=None):
+        return _make_sweep_result(
+            team_size=team_size,
+            tune_ranges=[_tr(0, None, knobs=knobs or {})],
+        )
+
+    def test_single_team_size_conflict_emitted(self):
+        r = _make_sweep_result(tune_ranges=[
+            _tr(0,     65536, knobs={"K": "2"}),
+            _tr(65536, None,  knobs={"K": "4"}),
+        ])
+        knob_env, warnings = _collect_knob_overrides([r])
+        self.assertEqual(knob_env["K"], "4")
+
+    def test_two_team_sizes_same_value_emitted(self):
+        results = [
+            self._sr(team_size=8, knobs={"K": "4"}),
+            self._sr(team_size=64, knobs={"K": "4"}),
+        ]
+        knob_env, warnings = _collect_knob_overrides(results)
+        self.assertEqual(knob_env["K"], "4")
+
+    def test_two_team_sizes_divergent_omitted(self):
+        results = [
+            self._sr(team_size=8, knobs={"K": "2"}),
+            self._sr(team_size=64, knobs={"K": "4"}),
+        ]
+        knob_env, warnings = _collect_knob_overrides(results)
+        self.assertNotIn("K", knob_env)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("divergent", warnings[0].lower())
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — Skip asymmetric collectives
+# ---------------------------------------------------------------------------
+
+class TestAsymmetricSkip(unittest.TestCase):
+    @patch("ucc_offline_tune.sweep_cell")
+    def test_asymmetric_skipped_by_default(self, mock_sweep):
+        results, skipped = run_tuning(
+            component_collective_pairs=[("tl/ucp", "alltoallv")],
+            mem_types=["host"],
+            team_sizes=[8],
+            msg_sizes_bytes=[1024],
+            alg_map={"tl/ucp": {"alltoallv": [AlgInfo(0, "knomial", "")]}},
+            n_reps=3, n_iter=100, n_warmup=10,
+        )
+        self.assertEqual(results, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("skipped asymmetric", skipped[0].lower())
+        mock_sweep.assert_not_called()
+
+    @patch("ucc_offline_tune.sweep_cell")
+    def test_force_asymmetric_includes(self, mock_sweep):
+        mock_sweep.return_value = _make_sweep_result()
+        results, skipped = run_tuning(
+            component_collective_pairs=[("tl/ucp", "alltoallv")],
+            mem_types=["host"],
+            team_sizes=[8],
+            msg_sizes_bytes=[1024],
+            skip_asymmetric=False,
+            alg_map={"tl/ucp": {"alltoallv": [AlgInfo(0, "knomial", "")]}},
+            n_reps=3, n_iter=100, n_warmup=10,
+        )
+        self.assertEqual(len(results), 1)
+        mock_sweep.assert_called_once()
+
+    @patch("ucc_offline_tune.sweep_cell")
+    def test_symmetric_always_included(self, mock_sweep):
+        mock_sweep.return_value = _make_sweep_result()
+        for coll in ("allreduce", "alltoall"):
+            results, skipped = run_tuning(
+                component_collective_pairs=[("tl/ucp", coll)],
+                mem_types=["host"],
+                team_sizes=[8],
+                msg_sizes_bytes=[1024],
+                alg_map={"tl/ucp": {coll: [AlgInfo(0, "knomial", "")]}},
+                n_reps=3, n_iter=100, n_warmup=10,
+            )
+            self.assertEqual(len(results), 1, f"{coll} should be included")
+
+
+# ---------------------------------------------------------------------------
+# Task 4a — Empty alg_map raises RuntimeError
+# ---------------------------------------------------------------------------
+
+class TestEmptyAlgMap(unittest.TestCase):
+    def test_empty_alg_map_raises(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            run_tuning(
+                component_collective_pairs=[("tl/ucp", "allreduce")],
+                mem_types=["host"],
+                team_sizes=[8],
+                msg_sizes_bytes=[1024],
+                alg_map={},
+            )
+        self.assertIn("empty algorithm map", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# Task 4b — Deduplicated ucc_info call
+# ---------------------------------------------------------------------------
+
+class TestDedupUccInfo(unittest.TestCase):
+    @patch("ucc_offline_tune.run_ucc_info_raw")
+    @patch("ucc_offline_tune.sweep_cell")
+    def test_precomputed_alg_map_skips_subprocess(self, mock_sweep, mock_raw):
+        mock_sweep.return_value = _make_sweep_result()
+        run_tuning(
+            component_collective_pairs=[("tl/ucp", "allreduce")],
+            mem_types=["host"],
+            team_sizes=[8],
+            msg_sizes_bytes=[1024],
+            alg_map={"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}},
+            n_reps=3, n_iter=100, n_warmup=10,
+        )
+        mock_raw.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 4c — Version note in generated config
+# ---------------------------------------------------------------------------
+
+class TestVersionNote(unittest.TestCase):
+    def test_conf_contains_version_note(self):
+        fp = _fp()
+        tokens = {"UCC_TL_UCP_TUNE": ["tok"]}
+        knobs = {}
+        lines = _build_conf_lines(tokens, knobs, fp)
+        joined = "\n".join(lines)
+        self.assertIn("UCC_INI_MAX_LINE", joined)
+        self.assertIn("8192", joined)
+
+    def test_sh_contains_version_note(self):
+        fp = _fp()
+        tokens = {"UCC_TL_UCP_TUNE": ["tok"]}
+        knobs = {}
+        lines = _build_sh_lines(tokens, knobs, fp)
+        joined = "\n".join(lines)
+        self.assertIn("UCC_INI_MAX_LINE", joined)
 
 
 if __name__ == "__main__":

@@ -97,13 +97,13 @@ def parse_ucc_info_algs(output: str) -> ComponentAlgs:
     return result
 
 
-def run_ucc_info_algs(
+def run_ucc_info_raw(
     ucc_info_path: str = "ucc_info",
     extra_env: Optional[dict] = None,
     timeout_s: int = 30,
-) -> ComponentAlgs:
+) -> str:
     """
-    Run `ucc_info -A` and return parsed ComponentAlgs.
+    Run `ucc_info -A` and return raw stdout.
 
     Raises RuntimeError on non-zero exit or timeout.
     """
@@ -129,7 +129,20 @@ def run_ucc_info_algs(
             f"ucc_info -A exited {proc.returncode}:\n{proc.stderr[:500]}"
         )
 
-    return parse_ucc_info_algs(proc.stdout)
+    return proc.stdout
+
+
+def run_ucc_info_algs(
+    ucc_info_path: str = "ucc_info",
+    extra_env: Optional[dict] = None,
+    timeout_s: int = 30,
+) -> ComponentAlgs:
+    """
+    Run `ucc_info -A` and return parsed ComponentAlgs.
+
+    Raises RuntimeError on non-zero exit or timeout.
+    """
+    return parse_ucc_info_algs(run_ucc_info_raw(ucc_info_path, extra_env, timeout_s))
 
 
 # ---------------------------------------------------------------------------

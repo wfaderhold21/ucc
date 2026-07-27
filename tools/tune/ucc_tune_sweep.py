@@ -89,6 +89,7 @@ class SweepSpec:
     team_size: int              # actual team size, used in TUNE token [ts-inf]
     msg_sizes_bytes: list       # list[int] from msg_size_grid(); in bytes
     alg_list: list              # list[AlgInfo] from parse_ucc_info_algs()
+    all_team_sizes: list = ()   # full team-sizes list for band computation
 
     datatype: str = "float32"
     reduction_op: str = "sum"
@@ -131,18 +132,52 @@ class TuneRange:
     alg_id: int
     knob_overrides: dict       # env_var → str (companion env vars, not in token)
 
-    def tune_token(self, collective: str, mem_type_tune: str, team_size: int) -> str:
+    def tune_token(
+        self,
+        collective: str,
+        mem_type_tune: str,
+        team_low: int,
+        team_high: Optional[int] = None,
+    ) -> str:
         """
         Return the '#'-ready TUNE token for this range.
 
-        Example: "allreduce:0-128k:cuda:[8-inf]:inf:@sra_knomial"
+        team_high=None means inf (single team size or largest band).
+
+        Example: "allreduce:0-128k:cuda:[8-63]:inf:@sra_knomial"
         """
         start = _fmt_bytes(self.start_bytes)
         end = "inf" if self.end_bytes is None else _fmt_bytes(self.end_bytes)
+        high_str = "inf" if team_high is None else str(team_high)
         return (
             f"{collective}:{start}-{end}:{mem_type_tune}"
-            f":[{team_size}-inf]:inf:@{self.alg_name}"
+            f":[{team_low}-{high_str}]:inf:@{self.alg_name}"
         )
+
+
+def _compute_team_bands(
+    team_sizes: list,  # list[int]
+) -> dict[int, tuple[int, int | None]]:
+    """
+    Compute non-overlapping half-open band for each team size.
+
+    Returns a mapping {team_size: (low, high|None)} where `high` is the
+    exclusive upper bound (None means inf).  Input is sorted and deduped
+    before processing.
+
+    Examples:
+        [8]       → {8: (8, None)}           i.e. [8-inf]
+        [8, 64]  → {8: (8, 63), 64: (64, None)}  i.e. [8-63], [64-inf]
+        [8, 9]   → {8: (8, 8), 9: (9, None)}     i.e. [8-8], [9-inf]
+    """
+    sizes = sorted(set(team_sizes))
+    bands: dict[int, tuple[int, int | None]] = {}
+    for i, ts in enumerate(sizes):
+        if i + 1 < len(sizes):
+            bands[ts] = (ts, sizes[i + 1] - 1)
+        else:
+            bands[ts] = (ts, None)
+    return bands
 
 
 @dataclasses.dataclass

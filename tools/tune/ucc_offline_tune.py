@@ -44,18 +44,28 @@ from ucc_tune_space import (
     msg_size_grid,
     parse_ucc_info_algs,
     run_ucc_info_algs,
+    run_ucc_info_raw,
     tune_env_var,
 )
 from ucc_tune_sweep import (
     SweepResult,
     SweepSpec,
     TuneRange,
+    _compute_team_bands,
     _fmt_bytes,
     _mem_type_for_tune,
     sweep_cell,
 )
 
 logger = logging.getLogger(__name__)
+
+# Collectives to skip by default: *v variants and rooted collectives.
+# Rationale: size-0 lookup collapse makes message-range tuning dubious for these.
+_ASYMMETRIC_COLLS = frozenset({
+    "allgatherv", "alltoallv", "reduce_scatterv",
+    "gatherv", "scatterv",
+    "reduce", "gather", "scatter", "bcast",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +77,7 @@ def _collect_tune_tokens(
 ) -> dict:            # tune_var → list[str token]
     """
     Aggregate all TuneRange tokens across cells, grouped by component TUNE var.
+    Uses non-overlapping team-size bands when multiple team sizes are present.
     """
     tokens: dict[str, list[str]] = {}
     for result in results:
@@ -75,8 +86,10 @@ def _collect_tune_tokens(
         spec = result.spec
         tune_var = tune_env_var(spec.component)
         mt = _mem_type_for_tune(spec.mem_type)
+        bands = _compute_team_bands(spec.all_team_sizes or [spec.team_size])
+        team_low, team_high = bands.get(spec.team_size, (spec.team_size, None))
         for tr in result.tune_ranges:
-            tok = tr.tune_token(spec.collective, mt, spec.team_size)
+            tok = tr.tune_token(spec.collective, mt, team_low, team_high)
             tokens.setdefault(tune_var, []).append(tok)
     return tokens
 
@@ -91,11 +104,16 @@ def _collect_knob_overrides(
     can happen because knob env vars are global, not range-scoped), the value
     from the range covering the most bytes is kept and a warning is recorded.
 
+    For multi-team-size runs: if a knob's value differs across team sizes,
+    it is omitted entirely (since UINT_RANGED knobs cannot be team-size-scoped)
+    and the omission is recorded in warnings.
+
     Returns (knob_env: dict[env_var → value], warnings: list[str]).
     """
-    # Track: env_var → list of (span_bytes, value)
-    seen: dict[str, list[tuple[int, str]]] = {}
+    # Track: env_var → list of (span_bytes, value, team_size)
+    seen: dict[str, list[tuple[int, str, int]]] = {}
     for result in results:
+        ts = result.spec.team_size
         for tr in result.tune_ranges:
             span = (
                 (tr.end_bytes - tr.start_bytes)
@@ -103,16 +121,48 @@ def _collect_knob_overrides(
                 else (1 << 62)
             )
             for env_var, val in tr.knob_overrides.items():
-                seen.setdefault(env_var, []).append((span, val))
+                seen.setdefault(env_var, []).append((span, val, ts))
 
     knob_env: dict[str, str] = {}
     warnings: list[str] = []
     for env_var, entries in seen.items():
+        # Check if values differ across team sizes.
+        ts_to_vals: dict[int, set[str]] = {}
+        for _, v, ts in entries:
+            ts_to_vals.setdefault(ts, set()).add(v)
+        all_team_sizes = sorted(ts_to_vals.keys())
+
+        if len(all_team_sizes) > 1:
+            # Multi-team-size run — check divergence.
+            per_ts_values = {}
+            divergent = False
+            for ts in all_team_sizes:
+                vals = ts_to_vals[ts]
+                if len(vals) != 1:
+                    divergent = True
+                    break
+                per_ts_values[ts] = next(iter(vals))
+            else:
+                # Exactly one value per team size — check if they differ.
+                unique_vals = set(per_ts_values.values())
+                if len(unique_vals) > 1:
+                    divergent = True
+
+            if divergent:
+                w = (
+                    f"Knob {env_var} has divergent values across team sizes "
+                    f"{all_team_sizes}: omitted. Per-team-size knob tuning "
+                    "requires separate config files."
+                )
+                warnings.append(w)
+                logger.warning(w)
+                continue
+
         # Pick the value from the largest-span range.
         entries.sort(reverse=True)
         best_val = entries[0][1]
         knob_env[env_var] = best_val
-        distinct = {v for _, v in entries}
+        distinct = {v for _, v, _ in entries}
         if len(distinct) > 1:
             w = (
                 f"Knob conflict for {env_var}: values {sorted(distinct)} across ranges. "
@@ -183,6 +233,8 @@ def _build_conf_lines(
         "# Set UCC_CONFIG_FILE=/path/to/ucc_tuned.conf to apply.",
         "# Correctness note: validate buffer correctness separately —",
         "#   ucc_perftest does not check output buffers.",
+        "# Version note: long TUNE strings require UCC_INI_MAX_LINE >= 8192",
+        "#   (UCC commit 281a0eb5 or newer); older UCC silently truncates.",
         "",
     ]
     for tune_var, tokens in sorted(tune_tokens.items()):
@@ -208,6 +260,8 @@ def _build_sh_lines(
         f"# Hash      : {fingerprint.hash}",
         "#",
         "# Usage: source ucc_tuned_env.sh",
+        "# Version note: long TUNE strings require UCC_INI_MAX_LINE >= 8192",
+        "#   (UCC commit 281a0eb5 or newer); older UCC silently truncates.",
         "",
     ]
     for tune_var, tokens in sorted(tune_tokens.items()):
@@ -222,6 +276,8 @@ def _results_to_json(results: list) -> list:
     out = []
     for r in results:
         spec = r.spec
+        bands = _compute_team_bands(spec.all_team_sizes or [spec.team_size])
+        team_low, team_high = bands.get(spec.team_size, (spec.team_size, None))
         out.append({
             "component":  spec.component,
             "collective": spec.collective,
@@ -250,7 +306,7 @@ def _results_to_json(results: list) -> list:
                     "tune_token": tr.tune_token(
                         spec.collective,
                         _mem_type_for_tune(spec.mem_type),
-                        spec.team_size,
+                        team_low, team_high,
                     ),
                 }
                 for tr in r.tune_ranges
@@ -408,14 +464,16 @@ def write_summary(
     for result in results:
         spec = result.spec
         label = (f"{spec.component}/{spec.collective} "
-                 f"mem={spec.mem_type} team_size={spec.team_size}")
+                  f"mem={spec.mem_type} team_size={spec.team_size}")
         lines.append(f"\n{label}")
         if not result.tune_ranges:
             lines.append("  (no overrides needed — UCC default is within margin)")
             continue
+        bands = _compute_team_bands(spec.all_team_sizes or [spec.team_size])
+        team_low, team_high = bands.get(spec.team_size, (spec.team_size, None))
         for tr in result.tune_ranges:
             mt = _mem_type_for_tune(spec.mem_type)
-            tok = tr.tune_token(spec.collective, mt, spec.team_size)
+            tok = tr.tune_token(spec.collective, mt, team_low, team_high)
             lines.append(f"  {tok}")
             if tr.knob_overrides:
                 for k, v in sorted(tr.knob_overrides.items()):
@@ -465,6 +523,8 @@ def run_tuning(
     mem_types: list,                    # ["host", "cuda", ...]
     team_sizes: list,                   # [8, 64, ...]
     msg_sizes_bytes: list,
+    skip_asymmetric: bool = True,
+    alg_map: Optional[dict] = None,
     datatype: str = "float32",
     reduction_op: str = "sum",
     n_reps: int = 7,
@@ -488,7 +548,16 @@ def run_tuning(
         mpi_launcher = ["mpirun", "-np", "1"]
 
     logger.info("Stage 1: enumerating algorithms via ucc_info -A")
-    alg_map = run_ucc_info_algs(ucc_info_path, extra_ucc_info_env or {})
+    raw_output = ""
+    if alg_map is None:
+        raw_output = run_ucc_info_raw(ucc_info_path, extra_ucc_info_env or {})
+        alg_map = parse_ucc_info_algs(raw_output)
+    if not alg_map:
+        head = " ".join(raw_output.split("\n")[:5]) if raw_output else "(no output)"
+        raise RuntimeError(
+            f"ucc_info ({ucc_info_path}) returned empty algorithm map. "
+            f"Output preview: {head}"
+        )
 
     results: list[SweepResult] = []
     skipped: list[str] = []
@@ -497,6 +566,14 @@ def run_tuning(
     done = 0
 
     for comp, coll in component_collective_pairs:
+        if skip_asymmetric and coll in _ASYMMETRIC_COLLS:
+            msg = (f"{comp}/{coll}: skipped asymmetric collective "
+                   "(use --force-asymmetric to include)")
+            logger.warning(msg)
+            skipped.append(msg)
+            done += len(mem_types) * len(team_sizes)
+            continue
+
         alg_list = alg_map.get(comp, {}).get(coll, [])
         if not alg_list:
             msg = (f"{comp}/{coll}: no algorithms found in ucc_info -A "
@@ -519,6 +596,7 @@ def run_tuning(
                     mem_type=mem_type,
                     team_size=team_size,
                     msg_sizes_bytes=list(msg_sizes_bytes),
+                    all_team_sizes=team_sizes,
                     alg_list=list(alg_list),
                     datatype=datatype,
                     reduction_op=reduction_op,
@@ -595,7 +673,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", default="./ucc_tuning_output",
                    help="Directory to write output files.")
     p.add_argument("--no-validate", action="store_true",
-                   help="Skip Stage 4 validation runs.")
+                    help="Skip Stage 4 validation runs.")
+    p.add_argument("--force-asymmetric", action="store_true",
+                   help=("Include asymmetric/*v/rooted collectives in the sweep "
+                         "(default: skip them as tuning is dubious)."))
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -652,12 +733,14 @@ def main(argv=None) -> int:
         len(sizes),
     )
 
-    # Stages 1–3: sweep
+    # Stages 1–3: sweep (alg_map passed to avoid duplicate ucc_info call)
     results, skipped = run_tuning(
         component_collective_pairs=pairs,
         mem_types=mem_types,
         team_sizes=team_sizes,
         msg_sizes_bytes=sizes,
+        skip_asymmetric=not args.force_asymmetric,
+        alg_map=alg_map,
         datatype=args.datatype,
         reduction_op=args.reduction_op,
         n_reps=args.n_reps,
