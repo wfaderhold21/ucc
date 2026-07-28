@@ -243,7 +243,11 @@ run_perftest() {
 
 for nranks in $RANKS; do
     for arm in $ARMS; do
-        out="$RESULT_DIR/allreduce-np${nranks}-ppn${PPN}-arm-${arm}.log"
+        # $arm may be a raw install path (see arm_install); sanitize slashes and
+        # other unsafe chars for the on-disk filename while keeping $arm as-is
+        # for prefix resolution and the human-facing CSV/summary columns.
+        arm_label=${arm//[^A-Za-z0-9._-]/_}
+        out="$RESULT_DIR/allreduce-np${nranks}-ppn${PPN}-arm-${arm_label}.log"
         echo ">> run: np=$nranks ($PPN/node) arm=$arm pipeline=$PIPELINE (install=$(arm_install "$arm"))"
         run_perftest "$arm" "$nranks" "$out"
     done
