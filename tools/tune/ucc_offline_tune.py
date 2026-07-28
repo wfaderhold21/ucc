@@ -466,6 +466,17 @@ def write_summary(
         label = (f"{spec.component}/{spec.collective} "
                   f"mem={spec.mem_type} team_size={spec.team_size}")
         lines.append(f"\n{label}")
+        if not result.size_decisions:
+            # No size was measured at all — every algorithm failed at every
+            # size. That is a broken run, not a verdict about UCC's default.
+            # Reported on hpcac-internal job 10464, where a UCX transport
+            # fault made every perftest launch abort and all four cells still
+            # read "UCC default is within margin".
+            lines.append("  !! NO MEASUREMENTS — every algorithm failed at every "
+                         "size; this cell was NOT tuned")
+            for w in result.warnings:
+                lines.append(f"     {w}")
+            continue
         if not result.tune_ranges:
             lines.append("  (no overrides needed — UCC default is within margin)")
             continue
@@ -612,7 +623,16 @@ def run_tuning(
                 result = sweep_cell(spec)
                 results.append(result)
 
-                if not result.tune_ranges:
+                if not result.size_decisions:
+                    # Distinguish "measured, default was good enough" from
+                    # "nothing measured". Collapsing the two makes a totally
+                    # failed run look like a clean no-op result.
+                    msg = (f"{comp}/{coll} mem={mem_type} team_size={team_size}: "
+                           "NO MEASUREMENTS — every algorithm failed at every size; "
+                           "cell was not tuned")
+                    logger.error(msg)
+                    skipped.append(msg)
+                elif not result.tune_ranges:
                     msg = (f"{comp}/{coll} mem={mem_type} team_size={team_size}: "
                            "UCC default is within margin for all sizes — no override emitted")
                     skipped.append(msg)

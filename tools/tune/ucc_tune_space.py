@@ -78,7 +78,14 @@ def parse_ucc_info_algs(output: str) -> ComponentAlgs:
 
         m = _COLL_RE.match(line)
         if m:
-            current_coll = m.group(1)
+            # ucc_info -A prints capitalised collective names: ucc_info.c:62
+            # uses ucc_coll_type_str(), whose table (src/utils/ucc_log.h:26)
+            # yields "Allreduce", "Bcast", "Reduce_scatter", ... Every consumer
+            # here looks the key up with the lowercase perftest/TUNE spelling,
+            # so normalise at the parse boundary. Each of the 16 names in
+            # ucc_coll_type_str() lowercases exactly onto its ucc_pt_op_map
+            # spelling in tools/perf/ucc_pt_config.cc.
+            current_coll = m.group(1).lower()
             result[current_component].setdefault(current_coll, [])
             continue
 

@@ -21,29 +21,35 @@ from ucc_tune_space import (
 #   alg:      "    %u : %16s : %s\n"
 # ---------------------------------------------------------------------------
 
+# Collective names are CAPITALISED here on purpose: ucc_info.c:62 prints them
+# via ucc_coll_type_str() (src/utils/ucc_log.h:26). This block is copied
+# byte-for-byte from a real `ucc_info -A` on hpcac-internal (UCC 1.9.0,
+# 2026-07-28) so the fixture cannot re-encode the code's own assumptions.
 _SAMPLE_OUTPUT = """\
 tl/ucp algorithms:
-  allreduce
-     0 :          knomial : recursive knomial with arbitrary radix (optimized for latency)
-     1 :      sra_knomial : recursive knomial scatter-reduce followed by knomial allgather (optimized for BW)
-     2 :              dbt : double binary tree
-     3 :   sliding_window : sliding window allreduce (optimized for running on DPU)
-     4 :             ring : ring-based allreduce using reduce-scatter + allgather
-  bcast
-     0 :          knomial : recursive knomial bcast
-     1 :      sag_knomial : scatter-allgather knomial bcast
+  Allreduce
+    0 :          knomial : recursive knomial with arbitrary radix (optimized for latency)
+    1 :      sra_knomial : recursive knomial scatter-reduce followed by knomial allgather (optimized for BW)
+    2 :              dbt : double binary tree
+    3 :   sliding_window : sliding window allreduce (optimized for running on DPU)
+    4 :             ring : ring-based allreduce using reduce-scatter + allgather
+  Bcast
+    0 :          knomial : recursive knomial bcast
+    1 :      sag_knomial : scatter-allgather knomial bcast
+  Reduce_scatter
+    0 :          ring : O(N) ring reduce-scatter
 
 tl/cuda algorithms:
-  allgather
-     0 :             auto : choose allgather algorithm based on CUDA topology
-     1 :             ring : multiring allgather algorithm
-     2 :           linear : linear allgather algorithm
-  allreduce
-     0 :             nvls : NVLINK SHARP allreduce
+  Allgather
+    0 :             auto : choose allgather algorithm based on CUDA topology
+    1 :             ring : multiring allgather algorithm
+    2 :           linear : linear allgather algorithm
+  Allreduce
+    0 :             nvls : NVLINK SHARP allreduce
 
 cl/hier algorithms:
-  allreduce
-     0 :             2step : 2-step hierarchical allreduce
+  Allreduce
+    0 :            2step : 2-step hierarchical allreduce
 
 """
 
@@ -85,6 +91,18 @@ class TestParseUccInfoAlgs(unittest.TestCase):
         h = self.algs["cl/hier"]["allreduce"]
         self.assertEqual(len(h), 1)
         self.assertEqual(h[0].name, "2step")
+
+    def test_collective_keys_are_lowercased(self):
+        # Regression: ucc_info -A emits "Allreduce"/"Reduce_scatter", every
+        # consumer looks up the lowercase perftest/TUNE spelling. Reproduced on
+        # hpcac-internal 2026-07-28: without this, auto-discovery aborts with
+        # "No components found" and --component skips every cell silently.
+        for comp, colls in self.algs.items():
+            for coll in colls:
+                self.assertEqual(coll, coll.lower(),
+                                 f"{comp}: collective key {coll!r} is not lowercase")
+        self.assertNotIn("Allreduce", self.algs["tl/ucp"])
+        self.assertIn("reduce_scatter", self.algs["tl/ucp"])
 
     def test_empty_output(self):
         self.assertEqual(parse_ucc_info_algs(""), {})

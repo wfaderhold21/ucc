@@ -518,6 +518,33 @@ class TestWriteSummary(unittest.TestCase):
         content = path.read_text()
         self.assertIn("allreduce", content)
 
+    def test_summary_flags_cell_with_no_measurements(self):
+        # Regression (hpcac-internal job 10464): a UCX transport fault made
+        # every perftest launch abort, so no size was ever measured — yet the
+        # summary reported "UCC default is within margin", which reads as a
+        # successful tuning run that found nothing to change.
+        r = _make_sweep_result(
+            tune_ranges=[], size_decisions=[],
+            warnings=["All algorithms failed at 1k — size skipped"],
+        )
+        content = write_summary(Path(self.tmpdir), [r], [], _fp(), []).read_text()
+        self.assertIn("NO MEASUREMENTS", content)
+        self.assertNotIn("within margin", content)
+        self.assertIn("All algorithms failed at 1k", content)
+
+    def test_summary_within_margin_needs_a_measurement(self):
+        # The benign message is still emitted when sizes *were* measured and
+        # the default simply won.
+        r = _make_sweep_result(
+            tune_ranges=[],
+            size_decisions=[
+                SizeDecision(65536, False, "knomial", 0, 10.0, 10.1, 0.01, {})
+            ],
+        )
+        content = write_summary(Path(self.tmpdir), [r], [], _fp(), []).read_text()
+        self.assertIn("within margin", content)
+        self.assertNotIn("NO MEASUREMENTS", content)
+
     def test_summary_records_skipped(self):
         path = write_summary(Path(self.tmpdir), [], [], _fp(),
                              ["tl/ucp/allreduce: no algorithms found"])
