@@ -108,6 +108,8 @@ typedef struct ucc_context {
     ucc_rank_t              *failed_ranks;    /*!< Array of failed rank indices */
     ucc_rank_t               n_failed_ranks;  /*!< Length of failed_ranks array */
     uint64_t                *failure_map;     /*!< Bitset of failed ctx ranks   */
+    int                      discard_eps_on_destroy; /*!< Skip peer-flushing closes
+                                                          after real failure */
     /* abort-in-progress scratch buffers */
     uint64_t                *abort_sbuf;      /*!< Send buffer for abort BOR    */
     uint64_t                *abort_rbuf;      /*!< Recv buffer for abort BOR    */

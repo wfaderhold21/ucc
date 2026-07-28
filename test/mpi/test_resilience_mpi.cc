@@ -32,6 +32,8 @@
  * OR of all test results so that CI detects any single failure.
  */
 #include <mpi.h>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <ucc/api/ucc.h>
 
@@ -452,6 +454,7 @@ static int test_post_after_abort(ucc_lib_h lib, MPI_Comm comm)
 static int test_drain_inflight(ucc_lib_h lib, MPI_Comm comm)
 {
     const char *label = "drain_inflight";
+    int         local_failed = 0;
 
     if (world_size < 2) {
         if (world_rank == 0) {
@@ -476,37 +479,83 @@ static int test_drain_inflight(ucc_lib_h lib, MPI_Comm comm)
        withholds its post so the barrier is provably incomplete: none of
        the posted requests can complete without the missing participant. */
     const bool do_post = (world_rank < world_size - 1);
+    bool       posted  = false;
     if (do_post) {
-        RES_CHECK(ucc_collective_post(req), label);
+        ucc_status_t st = ucc_collective_post(req);
+        if (st != UCC_OK) {
+            std::cerr << "[rank " << world_rank << "] FAIL " << label
+                      << ": ucc_collective_post(req) returned "
+                      << ucc_status_string(st) << "\n";
+            local_failed = 1;
+        } else {
+            posted = true;
+        }
     }
 
     /* Abort immediately; the drain inside ucc_context_abort must mark every
        queued request UCC_ERR_ABORTED. */
-    RES_CHECK(ucc_context_abort(ctx), label);
+    ucc_status_t st = ucc_context_abort(ctx);
+    if (st != UCC_OK) {
+        std::cerr << "[rank " << world_rank << "] FAIL " << label
+                  << ": ucc_context_abort(ctx) returned "
+                  << ucc_status_string(st) << "\n";
+        local_failed = 1;
+    }
 
-    if (do_post) {
+    if (posted) {
         /* The posted request must now be ABORTED without requiring any
            further progress.  This is the key correctness assertion. */
         ucc_status_t req_st = ucc_collective_test(req);
-        RES_EXPECT(req_st == UCC_ERR_ABORTED, label);
+        if (req_st != UCC_ERR_ABORTED) {
+            std::cerr << "[rank " << world_rank << "] FAIL " << label
+                      << ": posted request has status "
+                      << ucc_status_string(req_st)
+                      << ", expected UCC_ERR_ABORTED\n";
+            local_failed = 1;
+        }
     }
 
     /* Every rank finalizes its request (posted or not). */
-    ucc_collective_finalize(req);
+    st = ucc_collective_finalize(req);
+    if (st != UCC_OK) {
+        std::cerr << "[rank " << world_rank << "] FAIL " << label
+                  << ": ucc_collective_finalize(req) returned "
+                  << ucc_status_string(st) << "\n";
+        local_failed = 1;
+    }
 
-    /* Symmetric teardown on every rank — no early returns while collective
-       state has diverged. */
-    RES_CHECK(poll_abort_test(ctx), label);
-    RES_CHECK(ucc_context_recover(ctx), label);
+    /* Symmetric teardown on every rank: record failures locally, but never
+       return while collective state differs between ranks. */
+    st = poll_abort_test(ctx);
+    if (st != UCC_OK) {
+        std::cerr << "[rank " << world_rank << "] FAIL " << label
+                  << ": poll_abort_test(ctx) returned "
+                  << ucc_status_string(st) << "\n";
+        local_failed = 1;
+    }
+    st = ucc_context_recover(ctx);
+    if (st != UCC_OK) {
+        std::cerr << "[rank " << world_rank << "] FAIL " << label
+                  << ": ucc_context_recover(ctx) returned "
+                  << ucc_status_string(st) << "\n";
+        local_failed = 1;
+    }
 
     destroy_team(team, ctx);
-    ucc_context_destroy(ctx);
-
-    MPI_Barrier(comm);
-    if (world_rank == 0) {
-        std::cout << "[PASS] " << label << "\n";
+    st = ucc_context_destroy(ctx);
+    if (st != UCC_OK) {
+        std::cerr << "[rank " << world_rank << "] FAIL " << label
+                  << ": ucc_context_destroy(ctx) returned "
+                  << ucc_status_string(st) << "\n";
+        local_failed = 1;
     }
-    return 0;
+
+    int global_failed;
+    MPI_Allreduce(&local_failed, &global_failed, 1, MPI_INT, MPI_MAX, comm);
+    if (world_rank == 0) {
+        std::cout << (global_failed ? "[FAIL] " : "[PASS] ") << label << "\n";
+    }
+    return global_failed;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1033,16 +1082,46 @@ int main(int argc, char **argv)
         std::cout << "=== UCC Resilience MPI Tests ===\n";
     }
 
-    failed |= test_guard_violations(lib);
-    failed |= test_abort_recover_no_fail(lib, MPI_COMM_WORLD);
-    failed |= test_post_after_abort(lib, MPI_COMM_WORLD);
-    failed |= test_drain_inflight(lib, MPI_COMM_WORLD);
-    failed |= test_simulated_failure(lib, MPI_COMM_WORLD);
-    failed |= test_shrink_allreduce(lib, MPI_COMM_WORLD);
-    failed |= test_shrink_multi_kill(lib, MPI_COMM_WORLD);
-    failed |= test_iterated_shrink(lib, MPI_COMM_WORLD);
-    failed |= test_shrink_to_single(lib, MPI_COMM_WORLD);
-    failed |= test_shrink_repeated_colls(lib, MPI_COMM_WORLD);
+    /* Run the full suite by default. A named scenario can be selected for
+       focused stress loops with UCC_TEST_RESILIENCE_SCENARIO. */
+    const char *scenario = std::getenv("UCC_TEST_RESILIENCE_SCENARIO");
+    bool        matched  = (scenario == nullptr);
+#define RUN_SCENARIO(_name, _call)                                             \
+    do {                                                                       \
+        if ((scenario == nullptr) || (std::strcmp(scenario, _name) == 0)) {    \
+            matched = true;                                                    \
+            failed |= (_call);                                                 \
+        }                                                                      \
+    } while (0)
+
+    RUN_SCENARIO("guard_violations", test_guard_violations(lib));
+    RUN_SCENARIO("abort_recover_no_fail",
+                 test_abort_recover_no_fail(lib, MPI_COMM_WORLD));
+    RUN_SCENARIO("post_after_abort",
+                 test_post_after_abort(lib, MPI_COMM_WORLD));
+    RUN_SCENARIO("drain_inflight",
+                 test_drain_inflight(lib, MPI_COMM_WORLD));
+    RUN_SCENARIO("simulated_failure",
+                 test_simulated_failure(lib, MPI_COMM_WORLD));
+    RUN_SCENARIO("shrink_allreduce",
+                 test_shrink_allreduce(lib, MPI_COMM_WORLD));
+    RUN_SCENARIO("shrink_multi_kill",
+                 test_shrink_multi_kill(lib, MPI_COMM_WORLD));
+    RUN_SCENARIO("iterated_shrink",
+                 test_iterated_shrink(lib, MPI_COMM_WORLD));
+    RUN_SCENARIO("shrink_to_single",
+                 test_shrink_to_single(lib, MPI_COMM_WORLD));
+    RUN_SCENARIO("shrink_repeated_colls",
+                 test_shrink_repeated_colls(lib, MPI_COMM_WORLD));
+
+#undef RUN_SCENARIO
+    if (!matched) {
+        if (world_rank == 0) {
+            std::cerr << "Unknown UCC_TEST_RESILIENCE_SCENARIO: "
+                      << scenario << "\n";
+        }
+        failed = 1;
+    }
 
     /* Aggregate: if any rank failed, all ranks report failure. */
     int global_failed;

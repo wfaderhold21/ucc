@@ -882,6 +882,7 @@ ucc_status_t ucc_context_create_proc_info(
     ctx->n_teams          = 0;
     ctx->failed_ranks     = NULL;
     ctx->n_failed_ranks   = 0;
+    ctx->discard_eps_on_destroy = 0;
     ctx->abort_sbuf       = NULL;
     ctx->abort_rbuf       = NULL;
     ctx->abort_req        = NULL;
@@ -1005,10 +1006,14 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     ucc_free(context->abort_map);
     context->abort_map = NULL;
 
-    /* Skip TL/UCP teardown barrier only after real failure.  With no failed
-     * rank, all original ranks still exist and normal OOB cleanup can run. */
-    if (context->state != UCC_CTX_STATE_ACTIVE &&
-        ucc_context_has_failed_ranks(context)) {
+    /* Skip TL/UCP peer-coordinated teardown only after real failure. With no
+     * failed rank, all original ranks still exist and normal OOB cleanup can
+     * run. Preserve the decision after clearing the OOB mask so TL cleanup
+     * uses the identical predicate for endpoint disposal. */
+    context->discard_eps_on_destroy =
+        (context->state != UCC_CTX_STATE_ACTIVE) &&
+        ucc_context_has_failed_ranks(context);
+    if (context->discard_eps_on_destroy) {
         context->params.mask &= ~UCC_CONTEXT_PARAM_FIELD_OOB;
     }
 

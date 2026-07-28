@@ -113,14 +113,19 @@ void ucc_tl_ucp_close_eps(ucc_tl_ucp_worker_t * worker,
      /* When the owning context has failed ranks (abort/recover/shrink path),
       * the collective teardown barrier is suppressed, so peers may already be
       * tearing down and freeing their transport resources (e.g. shared-memory
-      * receive segments).  A flushing close would then try to complete
-      * in-flight sends against a peer's freed mm segment and fault (SIGBUS).
-      * The context is being discarded anyway, so force-close (no flush) to
-      * drop endpoints without touching peer state. */
+      * receive segments). A flushing close could then touch a peer's freed mm
+      * segment and fault (SIGBUS). UCP force-close is not valid for endpoints
+      * created without UCP_ERR_HANDLING_MODE_PEER, as OOB endpoints normally
+      * are. Leave failed-context endpoints owned by the worker instead:
+      * ucp_worker_destroy, called immediately after endpoint-storage cleanup,
+      * purges and disconnects all remaining endpoints without a peer flush. */
+     if (core_ctx && core_ctx->discard_eps_on_destroy) {
+         return;
+     }
+
+     /* Healthy teardown retains the explicit flushing close. */
      param.op_attr_mask = UCP_OP_ATTR_FIELD_FLAGS;
-     param.flags        = (core_ctx && core_ctx->n_failed_ranks > 0)
-                              ? UCP_EP_CLOSE_FLAG_FORCE
-                              : 0; // 0 means FLUSH
+     param.flags        = 0; // 0 means FLUSH
      ep                 = get_next_ep_to_close(worker, ctx, &i);
      while (ep) {
          close_req = ucp_ep_close_nbx(ep, &param);
