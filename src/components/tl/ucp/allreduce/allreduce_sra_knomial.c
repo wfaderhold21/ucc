@@ -204,6 +204,19 @@ ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
          * active buffer and is commonly UCC_MEMORY_TYPE_UNKNOWN, while dst is
          * always the authoritative type (see CHECK_SAME_MEMTYPE, which only
          * ties src==dst for out-of-place). */
+        /* Multi-node guard: on a cross-node IB fabric the pipeline's concurrent
+         * fragments compete for NIC bandwidth; the fragmentation overhead
+         * outweighs the RS-AG overlap gain. Measured -15% to -59% at 8-112 PPN
+         * on gaia 4-node (DC transport, 1-16 MB). Disable auto-pipelining for
+         * multi-node; override explicitly with UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE. */
+        if (team->topo && ucc_topo_nnodes(team->topo) > 1) {
+            pp->threshold = SIZE_MAX;
+            pp->n_frags   = 0;
+            pp->frag_size = 0;
+            pp->pdepth    = 1;
+            pp->order     = UCC_PIPELINE_PARALLEL;
+            return;
+        }
         /* Host path: pipeline RS->AG across fragments so the allgather of
          * one fragment overlaps the reduce-scatter (incl. CPU reduction) of
          * the next. Values are conservative defaults; override via
@@ -220,9 +233,7 @@ ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
         /* Pipeline depth scales with fragment count: 2 in flight is optimal up
          * to 1MB (<=2 frags of 512KB), but once >=4 fragments exist (>=2MB) a
          * 4-deep pipeline adds 6-23% across 8-64 ranks (thor hi-rank sweep,
-         * depths 2/3/4). Depth 3 was never uniquely best. At >=128 ranks the
-         * deeper pipeline regresses ~5-12% past 4MB (NIC contention at high
-         * PPN); we accept that to keep the rule size-only. */
+         * depths 2/3/4). Depth 3 was never uniquely best. */
         pp->pdepth    = (total >= 4 * pp->frag_size) ? 4 : 2;
     } else {
         /* Non-host, non-CUDA-inplace (e.g. out-of-place CUDA): keep the
