@@ -209,11 +209,23 @@ ucc_status_t TestAlltoallv::check()
 {
     MPI_Request req;
     int         i, size, rank, completed;
+    int        *peer_sdispls;
+    ucc_status_t status;
 
     MPI_Comm_size(team.comm, &size);
     MPI_Comm_rank(team.comm, &rank);
 
-    MPI_Ialltoall(sdispls, 1, MPI_INT, scounts, 1, MPI_INT, team.comm, &req);
+    /* Receive each peer's send displacement into a separate scratch array so
+     * that scounts is never overwritten.  For persistent 32-bit requests,
+     * args.src.info_v.counts points directly at scounts; aliasing it as the
+     * MPI receive buffer corrupts the persistent request before its next post,
+     * causing truncated messages and a hang (issue #1334). */
+    peer_sdispls = (int*)malloc(sizeof(*peer_sdispls) * size);
+    if (!peer_sdispls) {
+        return UCC_ERR_NO_MEMORY;
+    }
+    MPI_Ialltoall(sdispls, 1, MPI_INT, peer_sdispls, 1, MPI_INT, team.comm,
+                  &req);
     do {
         MPI_Test(&req, &completed, MPI_STATUS_IGNORE);
         ucc_context_progress(team.ctx);
@@ -222,10 +234,12 @@ ucc_status_t TestAlltoallv::check()
     for (i = 0; i < size; i++) {
         init_buffer(PTR_OFFSET(check_buf, rdispls[i] * ucc_dt_size(dt)),
                     rcounts[i], dt, UCC_MEMORY_TYPE_HOST,
-                    i * (iter_persistent + 1), scounts[i]);
+                    i * (iter_persistent + 1), peer_sdispls[i]);
     }
 
-    return compare_buffers(rbuf, check_buf, rncounts, dt, mem_type);
+    free(peer_sdispls);
+    status = compare_buffers(rbuf, check_buf, rncounts, dt, mem_type);
+    return status;
 }
 
 std::string TestAlltoallv::str()
