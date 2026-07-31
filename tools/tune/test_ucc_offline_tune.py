@@ -496,6 +496,22 @@ class TestFingerprintParsing(unittest.TestCase):
             ver = _ucx_version("ucx_info")
         self.assertEqual(ver, "1.17.0")
 
+    def test_ucx_version_parsed_library_version_spelling(self):
+        # Byte-for-byte from `ucx_info -v`, UCX 1.18.0 on gaia (dgx-gaia-45).
+        # This spelling used to fall through to "unknown".
+        out = ("# Library version: 1.18.0\n"
+               "# Library path: /lib/libucs.so.0\n"
+               "# API headers version: 1.18.0\n"
+               "# Git branch '', revision 152bf42\n")
+        with patch("ucc_tune_fingerprint._run", return_value=out):
+            ver = _ucx_version("ucx_info")
+        self.assertEqual(ver, "1.18.0")
+
+    def test_ucx_version_unknown_on_bad_output(self):
+        with patch("ucc_tune_fingerprint._run", return_value="garbage"):
+            ver = _ucx_version("ucx_info")
+        self.assertEqual(ver, "unknown")
+
 
 # ---------------------------------------------------------------------------
 # write_summary

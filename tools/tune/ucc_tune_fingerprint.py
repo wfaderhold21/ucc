@@ -91,9 +91,17 @@ def _ucc_version(ucc_info_path: str) -> str:
 def _ucx_version(ucx_info_path: str) -> str:
     """Parse UCX version line from `ucx_info -v`."""
     out = _run([ucx_info_path, "-v"])
-    # UCX prints: "# UCX version=X.Y.Z ..."
-    m = re.search(r"UCX version[=:\s]+(\S+)", out, re.IGNORECASE)
-    return m.group(1) if m else _UNKNOWN
+    # Two spellings are in the wild:
+    #   "# UCX version=X.Y.Z ..."      (ucx_info from some packagings)
+    #   "# Library version: X.Y.Z"     (stock ucx_info, e.g. UCX 1.18 on gaia)
+    # Matching only the first left the fingerprint recording "unknown" on hosts
+    # where ucx_info was present and working.
+    for pat in (r"UCX version[=:\s]+(\S+)",
+                r"^#?\s*Library version[=:\s]+(\S+)"):
+        m = re.search(pat, out, re.IGNORECASE | re.MULTILINE)
+        if m:
+            return m.group(1)
+    return _UNKNOWN
 
 
 def _cpu_model() -> str:
