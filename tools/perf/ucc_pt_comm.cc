@@ -133,8 +133,12 @@ ucc_status_t ucc_pt_comm::init()
     ucc_context_params_t ctx_params;
     ucc_team_params_t team_params;
     ucc_status_t st;
+    ucc_status_t cleanup_st;
     std::string cfg_mod;
 
+    lib          = nullptr;
+    context      = nullptr;
+    team         = nullptr;
     ee           = nullptr;
     executor     = nullptr;
     stream       = nullptr;
@@ -203,6 +207,14 @@ ucc_status_t ucc_pt_comm::init()
     ucc_lib_config_release(lib_config);
     return UCC_OK;
 free_ctx:
+    if (team) {
+        do {
+            cleanup_st = ucc_team_destroy(team);
+        } while (cleanup_st == UCC_INPROGRESS);
+        if (cleanup_st == UCC_OK) {
+            team = nullptr;
+        }
+    }
     ucc_context_destroy(context);
 free_ctx_config:
     ucc_context_config_release(ctx_config);

@@ -36,6 +36,7 @@ typedef struct ucc_lib_info {
     int                 specific_cls_requested;
     ucc_cl_lib_attr_t  *cl_attrs;
     ucc_mpool_t         stub_tasks_mp;
+    uint32_t            context_count;
 } ucc_lib_info_t;
 
 int ucc_tl_is_required(ucc_lib_info_t *lib, ucc_tl_iface_t *tl_iface,

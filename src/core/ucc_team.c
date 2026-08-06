@@ -11,9 +11,11 @@
 #include "components/cl/ucc_cl.h"
 #include "components/tl/ucc_tl.h"
 #include "ucc_service_coll.h"
+#include "utils/ucc_atomic.h"
 
 static ucc_status_t ucc_team_alloc_id(ucc_team_t *team);
 static void ucc_team_release_id(ucc_team_t *team);
+static ucc_status_t ucc_team_destroy_single(ucc_team_h team);
 
 void ucc_copy_team_params(ucc_team_params_t *dst, const ucc_team_params_t *src)
 {
@@ -70,6 +72,7 @@ static ucc_status_t ucc_team_create_post_single(ucc_context_t *context,
         if (UCC_OK != status) {
             return status;
         }
+        team->internal_oob_initialized = 1;
         team->bp.params.mask |= UCC_TEAM_PARAM_FIELD_OOB;
     }
 
@@ -110,6 +113,13 @@ ucc_status_t ucc_team_create_post(ucc_context_h *contexts, uint32_t num_contexts
     uint64_t     team_rank = UINT64_MAX;
     ucc_team_t  *team;
     ucc_status_t status;
+
+    if (new_team) {
+        *new_team = NULL;
+    }
+    if (!new_team || !contexts || !params) {
+        return UCC_ERR_INVALID_PARAM;
+    }
 
     if (num_contexts < 1) {
         return UCC_ERR_INVALID_PARAM;
@@ -215,7 +225,15 @@ ucc_status_t ucc_team_create_post(ucc_context_h *contexts, uint32_t num_contexts
         (params->id <= UCC_TEAM_ID_MAX)) {
         team->id = ((uint16_t)params->id) | UCC_TEAM_ID_EXTERNAL_BIT;
     }
-    status    = ucc_team_create_post_single(contexts[0], team);
+    status = ucc_team_create_post_single(contexts[0], team);
+    if (status < 0) {
+        (void)ucc_team_destroy_single(team);
+        return status;
+    }
+    for (uint32_t i = 0; i < num_contexts; i++) {
+        ucc_atomic_add32(&team->contexts[i]->team_count, 1);
+    }
+    team->owns_contexts = 1;
     *new_team = team;
     return status;
 
@@ -254,6 +272,7 @@ static ucc_status_t ucc_team_create_service_team(ucc_context_t *context,
                      ->team.create_post(&context->service_ctx->super, &b_params,
                                         &b_team);
         if (UCC_OK != status) {
+            ucc_tl_context_put(context->service_ctx);
             ucc_error("tl ucp service team create post failed");
             return status;
         }
@@ -262,7 +281,6 @@ static ucc_status_t ucc_team_create_service_team(ucc_context_t *context,
     status = UCC_TL_CTX_IFACE(context->service_ctx)
         ->team.create_test(&team->service_team->super);
     if (status < 0) {
-        team->service_team = NULL;
         ucc_error("failed to create service tl ucp team");
     }
     return status;
@@ -368,12 +386,14 @@ static inline ucc_status_t ucc_team_exchange(ucc_context_t *context,
         status = oob.req_test(team->oob_req);
         if (status < 0) {
             oob.req_free(team->oob_req);
+            team->oob_req = NULL;
             ucc_error("oob req test failed during team proc info exchange");
             return status;
         } else if (UCC_INPROGRESS == status) {
             return status;
         }
         oob.req_free(team->oob_req);
+        team->oob_req = NULL;
         ucc_assert(team->size >= 2);
         team->ctx_map = ucc_ep_map_from_array(&team->ctx_ranks, team->size,
                                               context->addr_storage.size, 1);
@@ -470,6 +490,8 @@ ucc_status_t ucc_team_create_test_single(ucc_context_t *context,
         break;
     case UCC_TEAM_ACTIVE:
         return UCC_OK;
+    case UCC_TEAM_FAILED:
+        return UCC_ERR_INVALID_PARAM;
     }
 out:
     if (UCC_OK == status) {
@@ -493,6 +515,8 @@ out:
 
 ucc_status_t ucc_team_create_test(ucc_team_h team)
 {
+    ucc_status_t status;
+
     if (NULL == team) {
         ucc_error("ucc_team_create_test: invalid team handle: NULL");
         return UCC_ERR_INVALID_PARAM;
@@ -502,7 +526,14 @@ ucc_status_t ucc_team_create_test(ucc_team_h team)
     if (team->state == UCC_TEAM_ACTIVE) {
         return UCC_OK;
     }
-    return ucc_team_create_test_single(team->contexts[0], team);
+    if (team->state == UCC_TEAM_FAILED) {
+        return UCC_ERR_INVALID_PARAM;
+    }
+    status = ucc_team_create_test_single(team->contexts[0], team);
+    if (status < 0) {
+        team->state = UCC_TEAM_FAILED;
+    }
+    return status;
 }
 
 static ucc_status_t ucc_team_destroy_single(ucc_team_h team)
@@ -510,6 +541,24 @@ static ucc_status_t ucc_team_destroy_single(ucc_team_h team)
     ucc_cl_iface_t *cl_iface;
     int             i;
     ucc_status_t    status;
+
+    if (team->sreq) {
+        status = ucc_service_coll_finalize(team->sreq);
+        team->sreq = NULL;
+        if (status != UCC_OK) {
+            ucc_warn("failed to finalize team %p service request: %s", team,
+                     ucc_status_string(status));
+        }
+    }
+
+    if (team->addr_storage.oob_req) {
+        team->bp.params.oob.req_free(team->addr_storage.oob_req);
+        team->addr_storage.oob_req = NULL;
+    }
+    if (team->oob_req) {
+        team->bp.params.oob.req_free(team->oob_req);
+        team->oob_req = NULL;
+    }
 
     if (team->service_team) {
         if (UCC_OK != (status = UCC_TL_CTX_IFACE(team->contexts[0]->service_ctx)
@@ -532,8 +581,9 @@ static ucc_status_t ucc_team_destroy_single(ucc_team_h team)
 
     ucc_topo_cleanup(team->topo);
 
-    if (team->contexts[0]->service_team && team->size > 1) {
+    if (team->internal_oob_initialized) {
         ucc_internal_oob_finalize(&team->bp.params.oob);
+        team->internal_oob_initialized = 0;
     }
 
     if ((ucc_global_config.log_component.log_level >= UCC_LOG_LEVEL_INFO) &&
@@ -541,11 +591,19 @@ static ucc_status_t ucc_team_destroy_single(ucc_team_h team)
         ucc_info("team destroyed, team_id %d", team->id);
     }
 
-    ucc_coll_score_free_map(team->score_map);
+    if (team->score_map) {
+        ucc_coll_score_free_map(team->score_map);
+    }
     ucc_free(team->addr_storage.storage);
     ucc_free(team->ctx_ranks);
     ucc_team_release_id(team);
     ucc_free(team->cl_teams);
+    if (team->owns_contexts) {
+        for (i = 0; i < team->num_contexts; i++) {
+            ucc_atomic_sub32(&team->contexts[i]->team_count, 1);
+        }
+        team->owns_contexts = 0;
+    }
     ucc_free(team->contexts);
     ucc_free(team);
     return UCC_OK;
@@ -558,7 +616,7 @@ ucc_status_t ucc_team_destroy(ucc_team_h team)
         return UCC_ERR_INVALID_PARAM;
     }
 
-    if (team->state != UCC_TEAM_ACTIVE) {
+    if (team->state != UCC_TEAM_ACTIVE && team->state != UCC_TEAM_FAILED) {
         ucc_error("team %p is used before team_create is completed", team);
         return UCC_ERR_INVALID_PARAM;
     }

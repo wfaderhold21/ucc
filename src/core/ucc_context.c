@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "ucc_context.h"
+#include "utils/ucc_atomic.h"
 #include "utils/ucc_proc_info.h"
 #include "components/cl/ucc_cl.h"
 #include "components/tl/ucc_tl.h"
@@ -477,6 +478,7 @@ poll:
         status = oob->req_test(addr_storage->oob_req);
         if (status < 0) {
             oob->req_free(addr_storage->oob_req);
+            addr_storage->oob_req = NULL;
             ucc_error("oob req test failed during team addr exchange");
             return status;
         } else if (UCC_INPROGRESS == status) {
@@ -725,6 +727,7 @@ ucc_status_t ucc_context_create_proc_info(
     uint64_t                  i, j, n_tl_ctx;
     int                       num_cls;
 
+    *context = NULL;
     num_cls = config->n_cl_cfg;
     ctx     = ucc_calloc(1, sizeof(ucc_context_t), "ucc_context");
     if (!ctx) {
@@ -920,6 +923,7 @@ ucc_status_t ucc_context_create_proc_info(
               params->mask & UCC_CONTEXT_PARAM_FIELD_OOB ? "true" : "false",
               config->estimated_num_eps,
               config->estimated_num_ppn);
+    ucc_atomic_add32(&lib->context_count, 1);
     *context = ctx;
     return UCC_OK;
 
@@ -966,6 +970,17 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     ucc_tl_lib_t     *tl_lib;
     int               i;
     ucc_status_t      status;
+    uint32_t          team_count, memh_count;
+
+    team_count = ucc_atomic_fadd32(&context->team_count, 0);
+    memh_count = ucc_atomic_fadd32(&context->memh_count, 0);
+    if (team_count != 0 || memh_count != 0) {
+        ucc_error("ucc_context_destroy: context %p has %u live team handle(s) "
+                  "and %u live memory handle(s); destroy teams and unmap "
+                  "memory before destroying the context",
+                  context, team_count, memh_count);
+        return UCC_ERR_INVALID_PARAM;
+    }
 
     if (UCC_OK != ucc_context_free_attr(&context->attr)) {
         ucc_error("failed to free context attributes");
@@ -1017,6 +1032,7 @@ ucc_status_t ucc_context_destroy(ucc_context_t *context)
     ucc_free(context->all_tls.names);
     ucc_free(context->tl_ctx);
     ucc_free(context->ids.pool);
+    ucc_atomic_sub32(&context->lib->context_count, 1);
     ucc_free(context);
     return UCC_OK;
 }
@@ -1538,12 +1554,15 @@ ucc_status_t ucc_mem_map(ucc_context_h context, ucc_mem_map_mode_t mode,
                          const ucc_mem_map_params_t *params, size_t *memh_size,
                          ucc_mem_map_mem_h *memh)
 {
+    ucc_status_t status;
+
     if (mode >= UCC_MEM_MAP_MODE_LAST) {
         ucc_error("Invalid memory map mode: %d", mode);
         return UCC_ERR_INVALID_PARAM;
     }
     if (mode == UCC_MEM_MAP_MODE_IMPORT || mode == UCC_MEM_MAP_MODE_IMPORT_OFFLOAD) {
-        return ucc_mem_map_import(context, mode, params, memh_size, memh);
+        status = ucc_mem_map_import(context, mode, params, memh_size, memh);
+        goto out;
     }
     if (!params) {
         ucc_error("params cannot be NULL");
@@ -1553,7 +1572,12 @@ ucc_status_t ucc_mem_map(ucc_context_h context, ucc_mem_map_mode_t mode,
         ucc_error("UCC only supports one mapping per call");
         return UCC_ERR_INVALID_PARAM;
     }
-    return ucc_mem_map_export(context, mode, params, memh_size, memh);
+    status = ucc_mem_map_export(context, mode, params, memh_size, memh);
+out:
+    if (status == UCC_OK && memh && *memh) {
+        ucc_atomic_add32(&((ucc_context_t *)context)->memh_count, 1);
+    }
+    return status;
 }
 
 ucc_status_t ucc_mem_unmap(ucc_mem_map_mem_h *memh)
@@ -1604,6 +1628,7 @@ ucc_status_t ucc_mem_unmap(ucc_mem_map_mem_h *memh)
     /* Free the memory handle structure */
     ucc_free(lmemh);
     *memh = NULL;
+    ucc_atomic_sub32(&ctx->memh_count, 1);
 
     return UCC_OK;
 }

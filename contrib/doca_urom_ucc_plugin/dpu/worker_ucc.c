@@ -700,6 +700,8 @@ static doca_error_t ucc_worker_lib_destroy(struct urom_worker_ucc *ucc_worker)
                     DOCA_LOG_ERR("Failed to destroy UCC team of "
                                  "data index %lu and team index %ld", j, i);
                     result = DOCA_ERROR_DRIVER;
+                } else {
+                    ucc_ptr->ucc_team[i] = NULL;
                 }
                 free(ucc_ptr->pSync);
             }
@@ -709,8 +711,9 @@ static doca_error_t ucc_worker_lib_destroy(struct urom_worker_ucc *ucc_worker)
                     DOCA_LOG_ERR("Failed to destroy UCC context of "
                                  "UCC data index %lu", j);
                     result = DOCA_ERROR_DRIVER;
+                } else {
+                    ucc_ptr->ucc_context = NULL;
                 }
-                ucc_ptr->ucc_context = NULL;
             }
             if (ucc_ptr->ucc_lib) {
                 status = ucc_finalize(ucc_ptr->ucc_lib);
@@ -718,6 +721,8 @@ static doca_error_t ucc_worker_lib_destroy(struct urom_worker_ucc *ucc_worker)
                     DOCA_LOG_ERR("Failed to finalize UCC lib "
                                  "of UCC data index %lu", j);
                     result = DOCA_ERROR_DRIVER;
+                } else {
+                    ucc_ptr->ucc_lib = NULL;
                 }
             }
         }

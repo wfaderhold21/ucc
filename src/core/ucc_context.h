@@ -81,6 +81,8 @@ typedef struct ucc_context {
     uint64_t                 cl_flags;
     ucc_tl_team_t           *service_team;
     int32_t                  throttle_progress;
+    uint32_t                 team_count;
+    uint32_t                 memh_count;
 } ucc_context_t;
 
 typedef struct ucc_context_config {

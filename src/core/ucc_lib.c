@@ -8,6 +8,7 @@
 
 #include "ucc_global_opts.h"
 #include "ucc_lib.h"
+#include "utils/ucc_atomic.h"
 #include "components/topo/ucc_sysinfo.h"
 #include "utils/ucc_malloc.h"
 #include "utils/ucc_parser.h"
@@ -486,6 +487,15 @@ ucc_status_t ucc_finalize(ucc_lib_info_t *lib)
 {
     int          i;
     ucc_status_t status, gl_status;
+    uint32_t     context_count;
+
+    context_count = ucc_atomic_fadd32(&lib->context_count, 0);
+    if (context_count != 0) {
+        ucc_error("ucc_finalize: library %p has %u live context handle(s); "
+                  "destroy all contexts before finalizing the library",
+                  lib, context_count);
+        return UCC_ERR_INVALID_PARAM;
+    }
 
     gl_status = UCC_OK;
     ucc_assert(lib->n_cl_libs_opened > 0);

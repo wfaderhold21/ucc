@@ -72,6 +72,7 @@ ucc_status_t ucc_service_allreduce(ucc_team_t *team, void *sbuf, void *rbuf,
                                        subset, &(*req)->task);
     if (status < 0) {
         ucc_free(*req);
+        *req = NULL;
         ucc_error("failed to start service allreduce for team %p: %s", team,
                   ucc_status_string(status));
         return status;
@@ -98,6 +99,7 @@ ucc_status_t ucc_service_allgather(ucc_team_t *team, void *sbuf, void *rbuf,
                                        subset, &(*req)->task);
     if (status < 0) {
         ucc_free(*req);
+        *req = NULL;
         ucc_error("failed to start service allreduce for team %p: %s", team,
                   ucc_status_string(status));
         return status;
@@ -124,6 +126,7 @@ ucc_status_t ucc_service_bcast(ucc_team_t *team, void *buf, size_t msgsize,
                                    root, subset, &(*req)->task);
     if (status < 0) {
         ucc_free(*req);
+        *req = NULL;
         ucc_error("failed to start service bcast for team %p: %s", team,
                   ucc_status_string(status));
         return status;

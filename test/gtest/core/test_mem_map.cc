@@ -124,6 +124,24 @@ UCC_TEST_F(test_mem_map_export, basic_export)
     /* Note: ucc_mem_unmap doesn't set memh to nullptr, it only frees the memory */
 }
 
+UCC_TEST_F(test_mem_map_export, context_refuses_live_mapping_then_retries)
+{
+    ucc_mem_map_mem_h memh = nullptr;
+    size_t            memh_size = 0;
+
+    ASSERT_EQ(UCC_OK, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
+                                  &map_params, &memh_size, &memh));
+    if (memh == nullptr) {
+        GTEST_SKIP() << "No enabled TL produced a memory-map handle";
+    }
+    EXPECT_EQ(UCC_ERR_INVALID_PARAM, ucc_context_destroy(ctx_h));
+    EXPECT_EQ(UCC_OK, ucc_context_progress(ctx_h));
+    EXPECT_EQ(UCC_OK, ucc_mem_unmap(&memh));
+    EXPECT_EQ(nullptr, memh);
+    EXPECT_EQ(UCC_OK, ucc_context_destroy(ctx_h));
+    ctx_h = nullptr;
+}
+
 /* Test memory map export with different buffer sizes */
 UCC_TEST_F(test_mem_map_export, different_sizes)
 {

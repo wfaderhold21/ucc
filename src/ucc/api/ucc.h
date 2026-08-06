@@ -799,7 +799,9 @@ static inline ucc_status_t ucc_init(const ucc_lib_params_t *params,
  *
  *  A local operation to release the resources and
  *  cleanup. All participants that invoked @ref ucc_init should call this
- *  routine.
+ *  routine. All contexts created from this library must be destroyed first.
+ *  If a live context remains, this routine returns UCC_ERR_INVALID_PARAM and
+ *  leaves the library usable so that the caller can destroy it and retry.
  *
  *  @endparblock
  *
@@ -1150,9 +1152,12 @@ ucc_status_t ucc_context_progress(ucc_context_h context);
  *  @b Description
  *
  *  @ref ucc_context_destroy routine releases the resources associated
- *  with the handle @e context. All teams associated with the context should be
- *  released before this. It is invalid to associate any team with this handle
- *  after the routine is called.
+ *  with the handle @e context. All teams associated with the context must be
+ *  destroyed and all mapped memory must be unmapped first. Otherwise this
+ *  routine returns UCC_ERR_INVALID_PARAM without destroying the context. A
+ *  refused context remains usable so that the caller can release its children
+ *  and retry. It is invalid to associate any team with this handle after a
+ *  successful call.
  *
  *  @endparblock
  *
@@ -1539,7 +1544,8 @@ typedef struct ucc_team_attr {
  *  the collective operation. ucc_team_create_test operation is used to learn
  *  the status of the new team handle. On error, the team handle will not
  *  be created and corresponding error code as defined by @ref ucc_status_t is
- *  returned.
+ *  returned. A synchronous hard error returns a NULL team handle and UCC
+ *  releases any partially allocated resources.
  *
  *  @endparblock
  *
@@ -1565,7 +1571,9 @@ ucc_status_t ucc_team_create_post(ucc_context_h *contexts,
  *  @ref ucc_team_create_test routines tests the status of team handle.
  *  If required it can progress the communication but cannot block on the
  *  communications. On error, the team handle becomes invalid, user is responsible
- *  to call ucc_team_destroy to destroy team and free allocated resources.
+ *  to call ucc_team_destroy to destroy the failed team and free allocated
+ *  resources. The failed team retains its context ownership until destroy
+ *  completes successfully.
  *
  *  @endparblock
  *
@@ -2284,8 +2292,9 @@ typedef enum {
  *
  * This local routine maps a user-specified memory segment with a
  * ucc_context_h. The segment is considered "mapped" with the context until
- * the user calls ucc_mem_unmap. It is the user's responsibility to unmap all
- * mapped segments prior to calling ucc_context_destroy(). A handle to the
+ * the user calls ucc_mem_unmap. The user must unmap all mapped segments prior
+ * to calling ucc_context_destroy(); otherwise context destruction returns
+ * UCC_ERR_INVALID_PARAM without tearing down the context. A handle to the
  * mapped memory is provided in memh. If the mode UCC_MEM_MAP_MODE_EXPORT is used,
  * the memory will be mapped and memory handles from TLs will be generated and
  * stored in the memh. If the mode UCC_MEM_MAP_MODE_IMPORT is used, the user must
