@@ -200,6 +200,12 @@ class Knob:
     description: str
     default: str                 # UCC default value (string form)
     candidates: tuple            # tuple of string values to sweep
+    config_type: str = "SCALAR"
+    scopes: tuple = ("component",)
+
+    @property
+    def range_scoped(self) -> bool:
+        return self.config_type == "UINT_RANGED"
 
 
 # Keys are (component, collective, alg_name).  A missing key means the
@@ -436,9 +442,35 @@ _KNOBS: dict[tuple[str, str, str], list[Knob]] = {
 }
 
 
+_UINT_RANGED_KNOBS = frozenset({
+    "UCC_TL_UCP_ALLREDUCE_KN_RADIX",
+    "UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX",
+    "UCC_TL_UCP_ALLGATHER_KN_RADIX",
+    "UCC_TL_UCP_BCAST_SAG_KN_RADIX",
+    "UCC_TL_UCP_REDUCE_SRG_KN_RADIX",
+})
+
+
 def knobs_for(component: str, collective: str, alg_name: str) -> list[Knob]:
     """Return secondary knobs for a (component, collective, alg_name) triple."""
-    return list(_KNOBS.get((component, collective, alg_name), []))
+    result = []
+    for knob in _KNOBS.get((component, collective, alg_name), []):
+        if knob.env_var in _UINT_RANGED_KNOBS:
+            knob = dataclasses.replace(
+                knob, config_type="UINT_RANGED",
+                scopes=("message", "memory"),
+            )
+        result.append(knob)
+    return result
+
+
+def knob_metadata(env_var: str) -> Optional[Knob]:
+    """Return config type/scope metadata for a known knob environment name."""
+    for (component, collective, alg_name) in _KNOBS:
+        for knob in knobs_for(component, collective, alg_name):
+            if knob.env_var == env_var:
+                return knob
+    return None
 
 
 # ---------------------------------------------------------------------------

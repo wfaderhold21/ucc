@@ -31,22 +31,27 @@ import dataclasses
 import json
 import logging
 import os
+import shlex
+import statistics
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from ucc_tune_fingerprint import Fingerprint, collect as collect_fingerprint
-from ucc_tune_runner import RunSpec, measure
+from ucc_tune_runner import RunSpec, bind_launcher_team_size, measure_paired
 from ucc_tune_space import (
     bytes_to_count,
     competition_env,
+    dtype_size,
+    knob_metadata,
     msg_size_grid,
     parse_ucc_info_algs,
     run_ucc_info_algs,
     run_ucc_info_raw,
     tune_env_var,
 )
+from ucc_tune_stats import Decision, PairedEvidence
 from ucc_tune_sweep import (
     SweepResult,
     SweepSpec,
@@ -68,6 +73,46 @@ _ASYMMETRIC_COLLS = frozenset({
 })
 
 
+@dataclasses.dataclass(frozen=True, order=True)
+class CellKey:
+    """Complete identity of one independently swept and validated cell."""
+
+    component: str
+    collective: str
+    mem_type: str
+    team_size: int
+    datatype: str
+    reduction_op: str
+
+
+def _spec_cell_key(spec: SweepSpec) -> CellKey:
+    return CellKey(spec.component, spec.collective, spec.mem_type,
+                   spec.team_size, spec.datatype, spec.reduction_op)
+
+
+def _point_cell_key(point: "ValidationPoint") -> Optional[CellKey]:
+    """Return a key only for evidence executed at its requested team size."""
+    requested = point.requested_team_size
+    if (requested is None or requested != point.executed_team_size
+            or point.component is None):
+        return None
+    return CellKey(point.component, point.collective, point.mem_type, requested,
+                   point.datatype, point.reduction_op)
+
+
+def _assert_emission_identity_compatible(results: list) -> None:
+    """Reject mixed cells whose datatype/op cannot be encoded in UCC TUNE."""
+    scopes: dict[tuple[str, str, str, int], CellKey] = {}
+    for result in results:
+        key = _spec_cell_key(result.spec)
+        scope = (key.component, key.collective, key.mem_type, key.team_size)
+        previous = scopes.setdefault(scope, key)
+        if previous != key:
+            raise ValueError(
+                "cannot emit datatype/reduction-op variants into the same "
+                f"UCC TUNE scope: {previous} and {key}")
+
+
 # ---------------------------------------------------------------------------
 # Emission helpers
 # ---------------------------------------------------------------------------
@@ -79,6 +124,7 @@ def _collect_tune_tokens(
     Aggregate all TuneRange tokens across cells, grouped by component TUNE var.
     Uses non-overlapping team-size bands when multiple team sizes are present.
     """
+    _assert_emission_identity_compatible(results)
     tokens: dict[str, list[str]] = {}
     for result in results:
         if not result.tune_ranges:
@@ -97,80 +143,59 @@ def _collect_tune_tokens(
 def _collect_knob_overrides(
     results: list,     # list[SweepResult]
 ) -> tuple[dict, list[str]]:
-    """
-    Collect companion knob env var overrides from all TuneRanges.
-
-    When the same env var appears with different values across ranges (which
-    can happen because knob env vars are global, not range-scoped), the value
-    from the range covering the most bytes is kept and a warning is recorded.
-
-    For multi-team-size runs: if a knob's value differs across team sizes,
-    it is omitted entirely (since UINT_RANGED knobs cannot be team-size-scoped)
-    and the omission is recorded in warnings.
-
-    Returns (knob_env: dict[env_var → value], warnings: list[str]).
-    """
-    # Track: env_var → list of (span_bytes, value, team_size)
-    seen: dict[str, list[tuple[int, str, int]]] = {}
+    """Emit range-safe knobs and omit every conflict or unscopable scalar."""
+    _assert_emission_identity_compatible(results)
+    artifact_cells = {_spec_cell_key(result.spec) for result in results}
+    # env_var -> (start, end, mem, value, team, requested_min, requested_max)
+    seen: dict[str, list[tuple[int, int, str, str, int, int, int]]] = {}
     for result in results:
         ts = result.spec.team_size
+        domain = sorted(set(result.spec.msg_sizes_bytes))
+        if not domain:
+            continue
         for tr in result.tune_ranges:
-            span = (
-                (tr.end_bytes - tr.start_bytes)
-                if tr.end_bytes is not None
-                else (1 << 62)
-            )
             for env_var, val in tr.knob_overrides.items():
-                seen.setdefault(env_var, []).append((span, val, ts))
+                seen.setdefault(env_var, []).append((
+                    tr.start_bytes, tr.end_bytes,
+                    _mem_type_for_tune(result.spec.mem_type), val, ts,
+                    domain[0], domain[-1],
+                ))
 
     knob_env: dict[str, str] = {}
     warnings: list[str] = []
-    for env_var, entries in seen.items():
-        # Check if values differ across team sizes.
-        ts_to_vals: dict[int, set[str]] = {}
-        for _, v, ts in entries:
-            ts_to_vals.setdefault(ts, set()).add(v)
-        all_team_sizes = sorted(ts_to_vals.keys())
-
-        if len(all_team_sizes) > 1:
-            # Multi-team-size run — check divergence.
-            per_ts_values = {}
-            divergent = False
-            for ts in all_team_sizes:
-                vals = ts_to_vals[ts]
-                if len(vals) != 1:
-                    divergent = True
-                    break
-                per_ts_values[ts] = next(iter(vals))
-            else:
-                # Exactly one value per team size — check if they differ.
-                unique_vals = set(per_ts_values.values())
-                if len(unique_vals) > 1:
-                    divergent = True
-
-            if divergent:
-                w = (
-                    f"Knob {env_var} has divergent values across team sizes "
-                    f"{all_team_sizes}: omitted. Per-team-size knob tuning "
-                    "requires separate config files."
-                )
-                warnings.append(w)
-                logger.warning(w)
+    for env_var, entries in sorted(seen.items()):
+        metadata = knob_metadata(env_var)
+        teams = {entry[4] for entry in entries}
+        if len(teams) != 1:
+            warning = f"Knob {env_var} cannot be team-scoped; omitted"
+            warnings.append(warning)
+            continue
+        if metadata is not None and metadata.range_scoped:
+            # Message/memory entries are explicit. Overlap with different
+            # values is a conflict, not an invitation to pick a larger span.
+            conflict = False
+            for i, left in enumerate(entries):
+                for right in entries[i + 1:]:
+                    if (left[2] == right[2]
+                            and max(left[0], right[0]) <= min(left[1], right[1])
+                            and left[3] != right[3]):
+                        conflict = True
+            if conflict:
+                warnings.append(f"Knob conflict for {env_var}; omitted")
                 continue
-
-        # Pick the value from the largest-span range.
-        entries.sort(reverse=True)
-        best_val = entries[0][1]
-        knob_env[env_var] = best_val
-        distinct = {v for _, v, _ in entries}
-        if len(distinct) > 1:
-            w = (
-                f"Knob conflict for {env_var}: values {sorted(distinct)} across ranges. "
-                f"Using {best_val!r} (largest span). "
-                "Consider per-range tuning for this knob."
-            )
-            warnings.append(w)
-            logger.warning(w)
+            fields = [f"{_fmt_bytes(start)}-{_fmt_bytes(end)}:{mem}:{value}"
+                      for start, end, mem, value, _, _, _ in sorted(set(entries))]
+            knob_env[env_var] = f"[{','.join(fields)}]{metadata.default}"
+            continue
+        # A scalar is eligible only for one cell and full measured domain;
+        # otherwise setting it globally leaks into an unsupported regime.
+        values = {entry[3] for entry in entries}
+        if (len(artifact_cells) == 1 and len(entries) == 1 and len(values) == 1
+                and entries[0][0] == entries[0][5]
+                and entries[0][1] == entries[0][6]):
+            knob_env[env_var] = entries[0][3]
+        else:
+            warnings.append(f"Scalar knob {env_var} is not fully cell-scoped; omitted")
 
     return knob_env, warnings
 
@@ -179,28 +204,57 @@ def emit_conf(
     output_dir: Path,
     results: list,   # list[SweepResult]
     fingerprint: Fingerprint,
+    *,
+    accepted: bool = False,
+    correctness: Optional[dict] = None,
+    validation_points: Optional[list] = None,
 ) -> dict:           # output paths
     """
-    Write ucc_tuned.conf, ucc_tuned_env.sh, fingerprint.json, results.json.
+    Write a clearly labelled provisional artifact unless all acceptance gates
+    and explicit default/tuned correctness evidence have passed.
     Returns a dict of {name: Path} for each output file.
     """
+    correctness_ok = bool(
+        correctness
+        and correctness.get("default_complete")
+        and correctness.get("tuned_complete")
+        and not correctness.get("default_failures")
+        and not correctness.get("new_tuned_failures")
+    )
+    validation_ok = _validation_covers_results(results, validation_points or [])
+    if accepted and (not correctness_ok or not validation_ok):
+        raise ValueError("accepted config requires passing paired validation and correctness evidence")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tune_tokens = _collect_tune_tokens(results)
     knob_env, knob_warnings = _collect_knob_overrides(results)
 
-    conf_lines = _build_conf_lines(tune_tokens, knob_env, fingerprint)
-    sh_lines = _build_sh_lines(tune_tokens, knob_env, fingerprint)
+    label = "accepted" if accepted else "provisional-not-for-deployment"
+    conf_lines = [f"# Status: {label}"] + _build_conf_lines(tune_tokens, knob_env, fingerprint)
+    sh_lines = [f"# Status: {label}"] + _build_sh_lines(tune_tokens, knob_env, fingerprint)
 
-    conf_path = output_dir / "ucc_tuned.conf"
-    sh_path   = output_dir / "ucc_tuned_env.sh"
+    stem = "ucc_tuned" if accepted else "ucc_tuned_provisional"
+    conf_path = output_dir / f"{stem}.conf"
+    sh_path   = output_dir / f"{stem}_env.sh"
     fp_path   = output_dir / "fingerprint.json"
     res_path  = output_dir / "results.json"
 
     conf_path.write_text("\n".join(conf_lines) + "\n")
     sh_path.write_text("\n".join(sh_lines) + "\n")
     fp_path.write_text(json.dumps(dataclasses.asdict(fingerprint), indent=2))
-    res_path.write_text(json.dumps(_results_to_json(results), indent=2))
+    res_path.write_text(json.dumps({
+        "status": label,
+        "correctness": correctness,
+        "validation": [
+            {**{field.name: getattr(point, field.name)
+                for field in dataclasses.fields(point) if field.name != "evidence"},
+             "cell_key": (dataclasses.asdict(_point_cell_key(point))
+                          if _point_cell_key(point) is not None else None),
+             "evidence": point.evidence.to_dict() if point.evidence else None}
+            for point in validation_points or []
+        ],
+        "results": _results_to_json(results),
+    }, indent=2, sort_keys=True))
 
     if knob_warnings:
         (output_dir / "knob_conflicts.txt").write_text(
@@ -279,10 +333,14 @@ def _results_to_json(results: list) -> list:
         bands = _compute_team_bands(spec.all_team_sizes or [spec.team_size])
         team_low, team_high = bands.get(spec.team_size, (spec.team_size, None))
         out.append({
+            "cell_key": dataclasses.asdict(_spec_cell_key(spec)),
             "component":  spec.component,
             "collective": spec.collective,
             "mem_type":   spec.mem_type,
             "team_size":  spec.team_size,
+            "requested_team_size": spec.team_size,
+            "executed_team_size": spec.executed_team_size,
+            "launcher": list(spec.mpi_launcher),
             "size_decisions": [
                 {
                     "size_bytes":        d.size_bytes,
@@ -293,6 +351,11 @@ def _results_to_json(results: list) -> list:
                     "default_median_us": d.default_median_us,
                     "margin":            d.margin,
                     "knob_overrides":    d.knob_overrides,
+                    "policy":            d.policy.value,
+                    "actual_size_bytes": d.actual_size_bytes,
+                    "source":            d.source,
+                    "paired_evidence":   d.evidence.to_dict() if d.evidence else None,
+                    "knob_hypotheses":   [h.to_dict() for h in d.knob_hypotheses],
                 }
                 for d in r.size_decisions
             ],
@@ -303,6 +366,8 @@ def _results_to_json(results: list) -> list:
                     "alg_name":       tr.alg_name,
                     "alg_id":         tr.alg_id,
                     "knob_overrides": tr.knob_overrides,
+                    "inclusive": True,
+                    "resolution_bytes": tr.resolution_bytes,
                     "tune_token": tr.tune_token(
                         spec.collective,
                         _mem_type_for_tune(spec.mem_type),
@@ -312,6 +377,8 @@ def _results_to_json(results: list) -> list:
                 for tr in r.tune_ranges
             ],
             "warnings": r.warnings,
+            "proof_budget": dataclasses.asdict(r.proof_budget) if r.proof_budget else None,
+            "unsupported_regimes": list(r.unsupported_regimes),
         })
     return out
 
@@ -320,15 +387,32 @@ def _results_to_json(results: list) -> list:
 # Stage 4 — validation
 # ---------------------------------------------------------------------------
 
+@dataclasses.dataclass(frozen=True)
+class ValidationProbe:
+    size_bytes: int
+    inside: bool
+    reasons: tuple[str, ...]
+
+
 @dataclasses.dataclass
 class ValidationPoint:
     collective: str
     mem_type: str
     size_bytes: int
-    tuned_median_us: float
-    default_median_us: float
-    speedup: float         # (default - tuned) / default
-    passed: bool           # True if speedup > margin_threshold
+    tuned_median_us: Optional[float]
+    default_median_us: Optional[float]
+    speedup: Optional[float]
+    passed: bool
+    inside: bool = True
+    policy_selected: bool = True
+    evidence: Optional[PairedEvidence] = None
+    reason: str = ""
+    component: Optional[str] = None
+    team_size: Optional[int] = None
+    requested_team_size: Optional[int] = None
+    executed_team_size: Optional[int] = None
+    datatype: str = "float32"
+    reduction_op: str = "sum"
 
 
 def validate(
@@ -336,17 +420,13 @@ def validate(
     tune_tokens: dict,      # tune_var → list[token] from _collect_tune_tokens()
     knob_env: dict,         # env_var → val from _collect_knob_overrides()
     margin_threshold: float = 0.05,
-    n_reps: int = 5,
+    n_reps: int = 10,
     n_iter: int = 200,
     n_warmup: int = 20,
 ) -> list:    # list[ValidationPoint]
     """
-    Stage 4: run a few representative (collective, mem_type, size) points with
-    and without the generated config.  Returns one ValidationPoint per point.
-
-    The tuned env is: competition_env(component) + full TUNE string for that
-    component + companion knob overrides.
-    Correctness is NOT checked here — run MPI/gtest coverage separately.
+    Compare the exact provisional configuration with default using fresh pairs.
+    This performance gate does not substitute for the separate correctness gate.
     """
     # Build the full tuned env: all tune vars + knob vars.
     tuned_env_base: dict = {}
@@ -361,10 +441,14 @@ def validate(
             continue
         spec = result.spec
 
-        # Pick representative sizes: midpoint of each range, capped at 3 per cell.
-        rep_sizes = _representative_sizes(result.tune_ranges, spec.msg_sizes_bytes)[:3]
+        probes = _validation_probe_sizes(
+            result.tune_ranges, spec.msg_sizes_bytes,
+            datatype=spec.datatype,
+            resolution_bytes=spec.boundary_resolution_bytes,
+        )
 
-        for size in rep_sizes:
+        for probe in probes:
+            size = probe.size_bytes
             count = bytes_to_count(size, spec.datatype)
             comp_env = competition_env(spec.component)
 
@@ -383,31 +467,62 @@ def validate(
                 persistent=spec.persistent,
                 extra_env=tuned_env,
                 mpi_launcher=list(spec.mpi_launcher),
+                requested_team_size=spec.team_size,
+                executed_team_size=spec.executed_team_size,
                 perftest_path=spec.perftest_path,
                 timeout_s=spec.timeout_s,
             )
             rs_default = dataclasses.replace(rs_tuned, extra_env=default_env)
 
-            try:
-                r_tuned = measure(rs_tuned)
-                r_default = measure(rs_default)
-            except RuntimeError as exc:
-                logger.warning(
-                    "Validation failed at %s/%s size=%s: %s",
-                    spec.component, spec.collective, _fmt_bytes(size), exc,
+            paired = measure_paired(
+                rs_default, rs_tuned, seed=spec.confirmation_seed + 100000 + size,
+                min_pairs=spec.min_pairs, max_pairs=spec.max_pairs,
+                min_speedup=margin_threshold,
+            )
+            evidence = paired.evidence
+            default_times = [s.latency_us for s in evidence.samples
+                             if s.arm == "D" and s.ok and s.latency_us is not None]
+            tuned_times = [s.latency_us for s in evidence.samples
+                           if s.arm == "A" and s.ok and s.latency_us is not None]
+            default_median = statistics.median(default_times) if default_times else None
+            tuned_median = statistics.median(tuned_times) if tuned_times else None
+            speedup = ((default_median - tuned_median) / default_median
+                       if default_median and tuned_median is not None else None)
+            selected = any(tr.contains(size) for tr in result.tune_ranges)
+            if probe.inside:
+                passed = bool(evidence.ci_high is not None and evidence.ci_high <= 1.0
+                              and evidence.decision != Decision.REGRESSION and selected)
+                reason = "inside upper confidence bound <= 1.0" if passed else "inside point unresolved or slower"
+            else:
+                # The exact inclusive range model must select no algorithm at
+                # an outside probe. Ranged knobs are checked by the same bounds
+                # during construction in _collect_knob_overrides.
+                statistically_identical = bool(
+                    evidence.decision == Decision.DEFAULT
+                    and evidence.ci_low is not None and evidence.ci_high is not None
+                    and evidence.ci_low <= 1.0 <= evidence.ci_high
                 )
-                continue
-
-            speedup = (r_default.median_us - r_tuned.median_us) / r_default.median_us
-            passed = speedup > margin_threshold
+                passed = not selected and statistically_identical
+                reason = ("outside policy absent and behavior indistinguishable"
+                          if passed else "outside behavior differs or policy leaked")
             vp = ValidationPoint(
                 collective=spec.collective,
                 mem_type=spec.mem_type,
                 size_bytes=size,
-                tuned_median_us=r_tuned.median_us,
-                default_median_us=r_default.median_us,
+                tuned_median_us=tuned_median,
+                default_median_us=default_median,
                 speedup=speedup,
                 passed=passed,
+                inside=probe.inside,
+                policy_selected=selected,
+                evidence=evidence,
+                reason=reason,
+                component=spec.component,
+                team_size=spec.team_size,
+                requested_team_size=spec.team_size,
+                executed_team_size=spec.executed_team_size,
+                datatype=spec.datatype,
+                reduction_op=spec.reduction_op,
             )
             points.append(vp)
 
@@ -415,26 +530,166 @@ def validate(
             logger.info(
                 "Validation [%s] %s/%s size=%s: tuned=%.2f us  default=%.2f us  speedup=%.1f%%",
                 status, spec.collective, spec.mem_type, _fmt_bytes(size),
-                r_tuned.median_us, r_default.median_us, speedup * 100,
+                tuned_median or float("nan"), default_median or float("nan"),
+                (speedup or 0.0) * 100,
             )
 
     return points
 
 
-def _representative_sizes(
-    tune_ranges: list,      # list[TuneRange]
-    all_sizes: list,        # list[int] from spec.msg_sizes_bytes
-) -> list:                  # list[int]
-    """Pick one measured size from the middle of each TuneRange."""
-    sizes = []
-    for tr in tune_ranges:
-        candidates = [
-            s for s in all_sizes
-            if s >= tr.start_bytes and (tr.end_bytes is None or s < tr.end_bytes)
-        ]
-        if candidates:
-            sizes.append(candidates[len(candidates) // 2])
-    return sizes
+def _validation_probe_sizes(
+    tune_ranges: list, all_sizes: list, *, datatype: str = "float32",
+    resolution_bytes: int = 1024,
+) -> list[ValidationProbe]:
+    """Return aligned inside/outside boundary, anchor, midpoint, and quartile probes."""
+    if not all_sizes:
+        return []
+    alignment = dtype_size(datatype)
+    domain_low = bytes_to_count(min(all_sizes), datatype) * alignment
+    domain_high = bytes_to_count(max(all_sizes), datatype) * alignment
+    collected: dict[tuple[int, bool], set[str]] = {}
+
+    def add(size: int, inside: bool, reason: str) -> None:
+        aligned = max(alignment, (size // alignment) * alignment)
+        if domain_low <= aligned <= domain_high:
+            collected.setdefault((aligned, inside), set()).add(reason)
+
+    for tune_range in tune_ranges:
+        start, end = tune_range.start_bytes, tune_range.end_bytes
+        add(start, True, "start")
+        add(end, True, "inclusive-end")
+        if start + alignment <= end:
+            add(start + alignment, True, "just-inside-start")
+            add(end - alignment, True, "just-inside-end")
+        add(start - alignment, False, "just-outside-start")
+        add(end + alignment, False, "just-outside-end")
+        width = end - start
+        if width > 2 * resolution_bytes:
+            add(start + width // 2, True, "midpoint")
+            add(start + width // 4, True, "quartile-25")
+            add(start + (3 * width) // 4, True, "quartile-75")
+        for anchor in all_sizes:
+            aligned = bytes_to_count(anchor, datatype) * alignment
+            if start <= aligned <= end:
+                add(aligned, True, "original-anchor")
+        for decision in tune_range.evidence_points:
+            anchor = getattr(decision, "actual_size_bytes", None)
+            if anchor is not None:
+                add(anchor, True, "refined-anchor")
+    # At a boundary shared by adjacent ranges, the exact config legitimately
+    # selects the neighboring policy. Validate it as an inside point once,
+    # rather than also demanding that the whole config be default there.
+    for key in list(collected):
+        size, inside = key
+        if not inside and any(tune_range.contains(size) for tune_range in tune_ranges):
+            del collected[key]
+    return [ValidationProbe(size, inside, tuple(sorted(reasons)))
+            for (size, inside), reasons in sorted(collected.items())]
+
+
+def _representative_sizes(tune_ranges: list, all_sizes: list) -> list:
+    """Compatibility alias: all deterministic validation probe byte sizes."""
+    return [probe.size_bytes for probe in _validation_probe_sizes(tune_ranges, all_sizes)]
+
+
+def trim_failed_ranges(results: list, validation_points: list,
+                       trim_round: int) -> list:
+    """Trim to passing confirmed neighbors; after two rounds remove failures."""
+    if trim_round < 1 or trim_round > 2:
+        raise ValueError("at most two trim/regenerate rounds are permitted")
+    by_cell: dict[CellKey, list[ValidationPoint]] = {}
+    for point in validation_points:
+        key = _point_cell_key(point)
+        if key is not None:
+            by_cell.setdefault(key, []).append(point)
+    for result in results:
+        points = by_cell.get(_spec_cell_key(result.spec), [])
+        retained = []
+        for tune_range in result.tune_ranges:
+            inside = [p for p in points if p.inside and tune_range.contains(p.size_bytes)]
+            passed = sorted(p.size_bytes for p in inside if p.passed)
+            if inside and len(passed) != len(inside):
+                if trim_round == 2 or not passed:
+                    continue
+                tune_range.start_bytes = min(passed)
+                tune_range.end_bytes = max(passed)
+            retained.append(tune_range)
+        result.tune_ranges = retained
+    return results
+
+
+def _validation_covers_results(results: list, points: list) -> bool:
+    """Require a passing final-config result for every deterministic probe."""
+    if not results or not points:
+        return False
+    for result in results:
+        if not result.tune_ranges:
+            continue
+        expected = _validation_probe_sizes(
+            result.tune_ranges, result.spec.msg_sizes_bytes,
+            datatype=result.spec.datatype,
+            resolution_bytes=result.spec.boundary_resolution_bytes,
+        )
+        for probe in expected:
+            matches = [
+                point for point in points
+                if _point_cell_key(point) == _spec_cell_key(result.spec)
+                and point.size_bytes == probe.size_bytes
+                and point.inside == probe.inside
+            ]
+            if not matches or not all(point.passed for point in matches):
+                return False
+    return True
+
+
+def validate_with_trimming(
+    results: list,
+    *,
+    margin_threshold: float = 0.05,
+    n_reps: int = 10,
+    n_iter: int = 200,
+    n_warmup: int = 20,
+    max_confirmation_points: int = 40,
+    used_confirmation_points: int = 0,
+) -> list:
+    """Validate, then trim/regenerate at most twice without relaxing a gate."""
+    points: list[ValidationPoint] = []
+    used_points = used_confirmation_points
+    for round_number in range(3):
+        required_points = sum(
+            len(_validation_probe_sizes(
+                result.tune_ranges, result.spec.msg_sizes_bytes,
+                datatype=result.spec.datatype,
+                resolution_bytes=result.spec.boundary_resolution_bytes,
+            ))
+            for result in results
+        )
+        if used_points + required_points > max_confirmation_points:
+            for result in results:
+                if result.tune_ranges:
+                    result.warnings.append(
+                        "final validation point budget exhausted; ranges omitted")
+                    result.tune_ranges = []
+            return []
+        tune_tokens = _collect_tune_tokens(results)
+        knob_env, _ = _collect_knob_overrides(results)
+        points = validate(
+            results, tune_tokens, knob_env,
+            margin_threshold=margin_threshold, n_reps=n_reps,
+            n_iter=n_iter, n_warmup=n_warmup,
+        )
+        used_points += len(points)
+        if points and all(point.passed for point in points):
+            break
+        if round_number == 2:
+            # No third trim/regenerate cycle is permitted.
+            for result in results:
+                result.tune_ranges = []
+            break
+        trim_failed_ranges(results, points, round_number + 1)
+        if not any(result.tune_ranges for result in results):
+            break
+    return points
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +719,8 @@ def write_summary(
     for result in results:
         spec = result.spec
         label = (f"{spec.component}/{spec.collective} "
-                  f"mem={spec.mem_type} team_size={spec.team_size}")
+                  f"mem={spec.mem_type} team_size={spec.team_size} "
+                  f"datatype={spec.datatype} op={spec.reduction_op}")
         lines.append(f"\n{label}")
         if not result.size_decisions:
             # No size was measured at all — every algorithm failed at every
@@ -489,9 +745,25 @@ def write_summary(
             if tr.knob_overrides:
                 for k, v in sorted(tr.knob_overrides.items()):
                     lines.append(f"    {k}={v}")
+            lines.append(
+                f"    inclusive coverage [{tr.start_bytes}, {tr.end_bytes}], "
+                f"sampled resolution={tr.resolution_bytes} B"
+            )
         overridden = sum(1 for d in result.size_decisions if d.should_override)
         total = len(result.size_decisions)
         lines.append(f"  ({overridden}/{total} size points overridden)")
+        if result.proof_budget:
+            budget = result.proof_budget
+            lines.append(
+                f"  proof budget: points={budget.used_points}/{budget.max_points}, "
+                f"pairs={budget.used_pairs} (per-point max={budget.max_pairs})"
+            )
+        for decision in result.size_decisions:
+            reason = decision.evidence.reason if decision.evidence else decision.source
+            lines.append(
+                f"  evidence size={decision.actual_size_bytes}: "
+                f"{decision.policy.value} ({reason})"
+            )
         if result.warnings:
             for w in result.warnings:
                 lines.append(f"  WARNING: {w}")
@@ -508,16 +780,19 @@ def write_summary(
         for vp in validation_points:
             status = "PASS" if vp.passed else "FAIL"
             lines.append(
-                f"  [{status}] {vp.collective}/{vp.mem_type} "
+                f"  [{status}] {vp.component}/{vp.collective}/{vp.mem_type} "
+                f"team={vp.requested_team_size} datatype={vp.datatype} "
+                f"op={vp.reduction_op} "
                 f"size={_fmt_bytes(vp.size_bytes)}: "
-                f"speedup={vp.speedup*100:.1f}% "
-                f"(tuned={vp.tuned_median_us:.1f}us "
-                f"default={vp.default_median_us:.1f}us)"
+                f"speedup={(vp.speedup or 0.0)*100:.1f}% "
+                f"(tuned={(vp.tuned_median_us or float('nan')):.1f}us "
+                f"default={(vp.default_median_us or float('nan')):.1f}us; "
+                f"{vp.reason})"
             )
         lines.append("")
         lines.append(
-            "NOTE: Correctness was NOT validated here. Run MPI/gtest "
-            "coverage separately before deploying this config."
+            "STATUS: PROVISIONAL. Correctness evidence is unavailable; no "
+            "accepted/deployable config may be written."
         )
 
     summary_path = output_dir / "tuning_summary.txt"
@@ -543,6 +818,12 @@ def run_tuning(
     n_warmup: int = 100,
     persistent: bool = True,
     margin_threshold: float = 0.05,
+    min_pairs: int = 10,
+    max_pairs: int = 20,
+    boundary_resolution_bytes: int = 1024,
+    max_boundary_probes: int = 4,
+    max_confirmation_points: int = 40,
+    confirmation_seed: int = 0,
     mpi_launcher: Optional[list] = None,
     perftest_path: str = "ucc_perftest",
     ucc_info_path: str = "ucc_info",
@@ -572,6 +853,7 @@ def run_tuning(
 
     results: list[SweepResult] = []
     skipped: list[str] = []
+    confirmation_points_used = 0
 
     total = len(component_collective_pairs) * len(mem_types) * len(team_sizes)
     done = 0
@@ -596,6 +878,8 @@ def run_tuning(
 
         for mem_type in mem_types:
             for team_size in team_sizes:
+                bound_launcher, executed_team_size = bind_launcher_team_size(
+                    mpi_launcher, team_size)
                 done += 1
                 logger.info(
                     "Stage 2/3 [%d/%d]: %s/%s mem=%s team_size=%d",
@@ -616,12 +900,22 @@ def run_tuning(
                     n_warmup=n_warmup,
                     persistent=persistent,
                     margin_threshold=margin_threshold,
-                    mpi_launcher=list(mpi_launcher),
+                    min_pairs=min_pairs,
+                    max_pairs=max_pairs,
+                    boundary_resolution_bytes=boundary_resolution_bytes,
+                    max_boundary_probes=max_boundary_probes,
+                    max_confirmation_points=max(
+                        0, max_confirmation_points - confirmation_points_used),
+                    confirmation_seed=confirmation_seed,
+                    mpi_launcher=bound_launcher,
+                    executed_team_size=executed_team_size,
                     perftest_path=perftest_path,
                     timeout_s=timeout_s,
                 )
                 result = sweep_cell(spec)
                 results.append(result)
+                if result.proof_budget:
+                    confirmation_points_used += result.proof_budget.used_points
 
                 if not result.size_decisions:
                     # Distinguish "measured, default was good enough" from
@@ -683,10 +977,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Perftest -w warmup iterations per rep.")
     p.add_argument("--no-persistent", action="store_true",
                    help="Disable persistent mode (includes init/finalize overhead).")
-    p.add_argument("--margin", type=float, default=0.05,
-                   help="Override UCC default only when speedup > this fraction.")
-    p.add_argument("--launcher", default="mpirun -np 1",
-                   help="MPI launcher prefix.")
+    p.add_argument("--min-speedup", "--margin", type=float, default=0.05,
+                   dest="min_speedup",
+                   help="Paired upper bound must prove at least this speedup.")
+    p.add_argument("--min-pairs", type=int, default=10)
+    p.add_argument("--max-pairs", type=int, default=20)
+    p.add_argument("--boundary-resolution-bytes", type=int, default=1024)
+    p.add_argument("--max-boundary-probes", type=int, default=4)
+    p.add_argument("--max-confirmation-points", type=int, default=40)
+    p.add_argument("--proof-mode", action="store_true",
+                   help="Use 256-byte boundary resolution and 12 probes.")
+    p.add_argument("--seed", type=int, default=0,
+                   help="Recorded seed for balanced paired order.")
+    p.add_argument("--launcher", default="mpirun -np {team_size}",
+                   help=("Launcher prefix with exactly one rank option. Its integer "
+                         "value is rebound per cell; {team_size} is recommended."))
     p.add_argument("--perftest", default="ucc_perftest")
     p.add_argument("--ucc-info", default="ucc_info")
     p.add_argument("--ucx-info", default="ucx_info")
@@ -705,13 +1010,38 @@ def main(argv=None) -> int:
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
 
+    if not 0 < args.min_speedup < 1:
+        parser.error("--min-speedup must be between 0 and 1")
+    if args.min_pairs < 10 or args.max_pairs < args.min_pairs or args.max_pairs > 20:
+        parser.error("pair limits must satisfy 10 <= min-pairs <= max-pairs <= 20")
+    if args.boundary_resolution_bytes <= 0:
+        parser.error("--boundary-resolution-bytes must be positive")
+    if not 0 <= args.max_boundary_probes <= 12:
+        parser.error("--max-boundary-probes must be between 0 and 12")
+    if args.max_confirmation_points <= 0:
+        parser.error("--max-confirmation-points must be positive")
+    boundary_resolution = 256 if args.proof_mode else args.boundary_resolution_bytes
+    boundary_probes = 12 if args.proof_mode else args.max_boundary_probes
+    confirmation_points = (
+        max(80, args.max_confirmation_points)
+        if args.proof_mode else args.max_confirmation_points
+    )
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
     output_dir = Path(args.output_dir)
-    mpi_launcher = args.launcher.split()
+    try:
+        mpi_launcher = shlex.split(args.launcher)
+        team_sizes = [int(t.strip()) for t in args.team_sizes.split(",")]
+        if not team_sizes or any(size <= 0 for size in team_sizes):
+            raise ValueError("team sizes must be positive")
+        for team_size in team_sizes:
+            bind_launcher_team_size(mpi_launcher, team_size)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Stage 0: fingerprint
     logger.info("Stage 0: collecting platform fingerprint")
@@ -721,7 +1051,6 @@ def main(argv=None) -> int:
     # Build search space from CLI args
     collectives = [c.strip() for c in args.collective.split(",")]
     mem_types   = [m.strip() for m in args.mem_type.split(",")]
-    team_sizes  = [int(t.strip()) for t in args.team_sizes.split(",")]
     sizes       = msg_size_grid(args.min_bytes, args.max_bytes, args.factor)
 
     # Resolve component/collective pairs
@@ -767,7 +1096,13 @@ def main(argv=None) -> int:
         n_iter=args.n_iter,
         n_warmup=args.n_warmup,
         persistent=not args.no_persistent,
-        margin_threshold=args.margin,
+        margin_threshold=args.min_speedup,
+        min_pairs=args.min_pairs,
+        max_pairs=args.max_pairs,
+        boundary_resolution_bytes=boundary_resolution,
+        max_boundary_probes=boundary_probes,
+        max_confirmation_points=confirmation_points,
+        confirmation_seed=args.seed,
         mpi_launcher=mpi_launcher,
         perftest_path=args.perftest,
         ucc_info_path=args.ucc_info,
@@ -778,16 +1113,17 @@ def main(argv=None) -> int:
     validation_points: list = []
     if not args.no_validate:
         logger.info("Stage 4: validating generated config")
-        tune_tokens = _collect_tune_tokens(results)
-        knob_env, _ = _collect_knob_overrides(results)
-        validation_points = validate(
+        validation_points = validate_with_trimming(
             results,
-            tune_tokens,
-            knob_env,
-            margin_threshold=args.margin,
-            n_reps=min(args.n_reps, 5),
+            margin_threshold=args.min_speedup,
+            n_reps=max(args.min_pairs, args.n_reps),
             n_iter=args.n_iter // 5,
             n_warmup=args.n_warmup // 5,
+            max_confirmation_points=confirmation_points,
+            used_confirmation_points=sum(
+                result.proof_budget.used_points
+                for result in results if result.proof_budget
+            ),
         )
         fail_count = sum(1 for v in validation_points if not v.passed)
         if fail_count:
@@ -809,16 +1145,13 @@ def main(argv=None) -> int:
     logger.info("  Shell   : %s", paths["sh"])
     logger.info("  Summary : %s", paths["summary"])
     logger.info("")
-    logger.info("To apply:  source %s", paths["sh"])
-    logger.info("       or: export UCC_CONFIG_FILE=%s", paths["conf"])
-    logger.info("")
     logger.info(
-        "IMPORTANT: Run MPI/gtest correctness checks separately before "
-        "deploying — ucc_perftest does not validate output buffers."
+        "PROVISIONAL ONLY: no accepted config was written because this local "
+        "run has no supplied default/tuned correctness evidence."
     )
 
     fail_validation = any(not v.passed for v in validation_points)
-    return 1 if fail_validation else 0
+    return 1 if fail_validation or results else 0
 
 
 if __name__ == "__main__":

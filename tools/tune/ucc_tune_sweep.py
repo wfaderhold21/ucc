@@ -1,538 +1,496 @@
 #!/usr/bin/env python3
-"""
-ucc_tune_sweep.py — coordinate-descent algorithm sweep and range coalescing.
-
-Implements Stages 2 and 3 of the offline tuner for one (component, collective,
-mem_type, team_size) cell:
-
-  Stage 2.1  Per msg-size: sweep all candidate algorithms with default knobs.
-             Pick winner per size.  Measure UCC default for margin comparison.
-  Stage 2.2  Per coalesced algorithm range: sweep secondary knobs (radix /
-             pipeline / posts) one dimension at a time using the first size in
-             the range as the representative.  Only for sizes where the winner
-             exceeds the margin threshold vs. the default.
-  Stage 3    Coalesce adjacent same-(alg, knobs) decisions into byte ranges.
-             Adjacent sizes with the same algorithm but separated by a
-             no-override gap are kept in separate ranges.
-
-Output is a SweepResult containing a list of TuneRange objects whose
-tune_token() method emits the TUNE string token for that range.
-"""
+"""Conservative screening, paired confirmation, and inclusive UCC ranges."""
 
 from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
-from ucc_tune_runner import RunResult, RunSpec, measure
+from ucc_tune_runner import RunResult, RunSpec, measure, measure_paired
 from ucc_tune_space import (
-    AlgInfo,
-    Knob,
-    bytes_to_count,
-    competition_env,
-    knobs_for,
+    AlgInfo, Knob, bytes_to_count, competition_env, dtype_size, knobs_for,
     tune_env_var,
 )
+from ucc_tune_stats import (CellKey, Decision, PairedEvidence, ProofBudget,
+                            classify_cell)
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Mem-type string mapping
-# Perftest CLI strings → UCC TUNE grammar strings (from ucc_mc_base.c)
-# ---------------------------------------------------------------------------
-
-_PERFTEST_TO_TUNE_MEM: dict[str, str] = {
-    "host":     "host",
-    "cuda":     "cuda",
-    "cuda-mng": "cuda-managed",
-    "rocm":     "rocm",
+_PERFTEST_TO_TUNE_MEM = {
+    "host": "host", "cuda": "cuda", "cuda-mng": "cuda-managed", "rocm": "rocm",
 }
 
 
 def _mem_type_for_tune(perftest_mem_type: str) -> str:
-    """Convert a perftest CLI mem_type string to the form used in TUNE tokens."""
-    mt = _PERFTEST_TO_TUNE_MEM.get(perftest_mem_type)
-    if mt is None:
-        raise ValueError(
-            f"Unknown perftest mem_type {perftest_mem_type!r}. "
-            f"Valid: {sorted(_PERFTEST_TO_TUNE_MEM)}"
-        )
-    return mt
+    try:
+        return _PERFTEST_TO_TUNE_MEM[perftest_mem_type]
+    except KeyError as exc:
+        raise ValueError(f"Unknown perftest mem_type {perftest_mem_type!r}") from exc
 
-
-# ---------------------------------------------------------------------------
-# Byte-size formatter for TUNE msg_range
-# ---------------------------------------------------------------------------
 
 def _fmt_bytes(n: int) -> str:
-    """Format a byte count as a compact memunits string (k/M/G or plain)."""
     for suffix, factor in (("G", 1 << 30), ("M", 1 << 20), ("k", 1 << 10)):
         if n >= factor and n % factor == 0:
             return f"{n // factor}{suffix}"
     return str(n)
 
 
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
 @dataclasses.dataclass
 class SweepSpec:
-    """
-    Parameters for sweeping one (component, collective, mem_type, team_size) cell.
-    """
-    component: str              # e.g. "tl/ucp"
-    collective: str             # e.g. "allreduce"
-    mem_type: str               # perftest CLI form: "host", "cuda", "cuda-mng"
-    team_size: int              # actual team size, used in TUNE token [ts-inf]
-    msg_sizes_bytes: list       # list[int] from msg_size_grid(); in bytes
-    alg_list: list              # list[AlgInfo] from parse_ucc_info_algs()
-    all_team_sizes: list = ()   # full team-sizes list for band computation
-
+    component: str
+    collective: str
+    mem_type: str
+    team_size: int
+    msg_sizes_bytes: list
+    alg_list: list
+    all_team_sizes: list = ()
     datatype: str = "float32"
     reduction_op: str = "sum"
     n_reps: int = 7
     n_iter: int = 1000
     n_warmup: int = 100
     persistent: bool = True
-    margin_threshold: float = 0.05   # only override when speedup > 5%
-    mpi_launcher: list = dataclasses.field(
-        default_factory=lambda: ["mpirun", "-np", "1"]
-    )
+    margin_threshold: float = 0.05
+    min_pairs: int = 10
+    max_pairs: int = 20
+    boundary_resolution_bytes: int = 1024
+    max_boundary_probes: int = 4
+    max_confirmation_points: int = 40
+    confirmation_seed: int = 0
+    mpi_launcher: list = dataclasses.field(default_factory=lambda: ["mpirun", "-np", "1"])
+    executed_team_size: Optional[int] = None
     perftest_path: str = "ucc_perftest"
     timeout_s: int = 120
+
+    def __post_init__(self) -> None:
+        if self.executed_team_size is None:
+            self.executed_team_size = self.team_size
+        if self.executed_team_size != self.team_size:
+            raise ValueError(
+                f"team-size mismatch: requested {self.team_size}, launcher "
+                f"bound to {self.executed_team_size}")
+        if self.min_pairs < 10 or self.max_pairs < self.min_pairs or self.max_pairs > 20:
+            raise ValueError("pair limits must satisfy 10 <= min_pairs <= max_pairs <= 20")
+        if self.boundary_resolution_bytes <= 0:
+            raise ValueError("boundary resolution must be positive")
+        if not 0 <= self.max_boundary_probes <= 12:
+            raise ValueError("max boundary probes must be between 0 and 12")
+        if self.max_confirmation_points < 0:
+            raise ValueError("max confirmation points must be non-negative")
 
 
 @dataclasses.dataclass
 class SizeDecision:
-    """
-    Tuning decision for one msg-size point within a cell.
-
-    should_override=False means the UCC default is within margin_threshold of
-    the best measured algorithm; no TUNE token is needed for this size.
-    """
     size_bytes: int
     should_override: bool
     winner_name: str
     winner_id: int
     winner_median_us: float
-    default_median_us: Optional[float]   # None if default measurement failed
-    margin: float                        # (default - winner) / default
-    knob_overrides: dict                 # env_var → str; filled in pass 2
+    default_median_us: Optional[float]
+    margin: float
+    knob_overrides: dict
+    policy: Decision = Decision.DEFAULT
+    evidence: Optional[PairedEvidence] = None
+    actual_size_bytes: Optional[int] = None
+    source: str = "screening"
+    knob_hypotheses: list = dataclasses.field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.actual_size_bytes is None:
+            self.actual_size_bytes = self.size_bytes
+        if self.should_override and self.policy == Decision.DEFAULT:
+            # Compatibility for explicitly constructed decisions; sweep_cell
+            # itself sets this only from paired WIN evidence.
+            self.policy = Decision.WIN
 
 
 @dataclasses.dataclass
 class TuneRange:
-    """A coalesced msg-size range with a fixed algorithm and knob configuration."""
+    """Finite inclusive byte range; open tails are intentionally unsupported."""
     start_bytes: int
-    end_bytes: Optional[int]   # None → "inf"
+    end_bytes: int
     alg_name: str
     alg_id: int
-    knob_overrides: dict       # env_var → str (companion env vars, not in token)
+    knob_overrides: dict
+    evidence_points: tuple = ()
+    resolution_bytes: int = 1024
 
-    def tune_token(
-        self,
-        collective: str,
-        mem_type_tune: str,
-        team_low: int,
-        team_high: Optional[int] = None,
-    ) -> str:
-        """
-        Return the '#'-ready TUNE token for this range.
+    def __post_init__(self) -> None:
+        if self.end_bytes is None:
+            raise ValueError("routine ranges require a finite inclusive end")
+        if self.start_bytes < 0 or self.end_bytes < self.start_bytes:
+            raise ValueError("invalid inclusive range")
 
-        team_high=None means inf (single team size or largest band).
+    def contains(self, size_bytes: int) -> bool:
+        return self.start_bytes <= size_bytes <= self.end_bytes
 
-        Example: "allreduce:0-128k:cuda:[8-63]:inf:@sra_knomial"
-        """
-        start = _fmt_bytes(self.start_bytes)
-        end = "inf" if self.end_bytes is None else _fmt_bytes(self.end_bytes)
-        high_str = "inf" if team_high is None else str(team_high)
-        return (
-            f"{collective}:{start}-{end}:{mem_type_tune}"
-            f":[{team_low}-{high_str}]:inf:@{self.alg_name}"
-        )
+    def tune_token(self, collective: str, mem_type_tune: str,
+                   team_low: int, team_high: Optional[int] = None) -> str:
+        # An unqualified team observation is a singleton, never an open tail.
+        high = team_low if team_high is None else team_high
+        return (f"{collective}:{_fmt_bytes(self.start_bytes)}-"
+                f"{_fmt_bytes(self.end_bytes)}:{mem_type_tune}:"
+                f"[{team_low}-{high}]:inf:@{self.alg_name}")
 
 
-def _compute_team_bands(
-    team_sizes: list,  # list[int]
-) -> dict[int, tuple[int, int | None]]:
-    """
-    Compute non-overlapping half-open band for each team size.
-
-    Returns a mapping {team_size: (low, high|None)} where `high` is the
-    exclusive upper bound (None means inf).  Input is sorted and deduped
-    before processing.
-
-    Examples:
-        [8]       → {8: (8, None)}           i.e. [8-inf]
-        [8, 64]  → {8: (8, 63), 64: (64, None)}  i.e. [8-63], [64-inf]
-        [8, 9]   → {8: (8, 8), 9: (9, None)}     i.e. [8-8], [9-inf]
-    """
-    sizes = sorted(set(team_sizes))
-    bands: dict[int, tuple[int, int | None]] = {}
-    for i, ts in enumerate(sizes):
-        if i + 1 < len(sizes):
-            bands[ts] = (ts, sizes[i + 1] - 1)
-        else:
-            bands[ts] = (ts, None)
-    return bands
+def _compute_team_bands(team_sizes: list) -> dict[int, tuple[int, int]]:
+    """Return exact measured team-size scopes; no interpolation or tail."""
+    return {size: (size, size) for size in sorted(set(team_sizes))}
 
 
 @dataclasses.dataclass
 class SweepResult:
-    """Complete tuning result for one (component, collective, mem_type, team_size) cell."""
     spec: SweepSpec
-    size_decisions: list       # list[SizeDecision]
-    tune_ranges: list          # list[TuneRange]
-    warnings: list             # list[str] (variance, failed algs, etc.)
+    size_decisions: list
+    tune_ranges: list
+    warnings: list
+    proof_budget: Optional[ProofBudget] = None
+    unsupported_regimes: tuple[str, ...] = ()
 
 
-# ---------------------------------------------------------------------------
-# Environment builders
-# ---------------------------------------------------------------------------
+@dataclasses.dataclass
+class KnobHypothesis:
+    """Auditable member of the cell-wide Holm family for knob attribution."""
+    hypothesis_id: str
+    env_var: str
+    candidate: str
+    gate: str
+    evidence: PairedEvidence
+
+    def to_dict(self) -> dict:
+        return {
+            "hypothesis_id": self.hypothesis_id,
+            "env_var": self.env_var,
+            "candidate": self.candidate,
+            "gate": self.gate,
+            "raw_p_value": self.evidence.p_win,
+            "adjusted_threshold": self.evidence.adjusted_alpha,
+            "decision": self.evidence.decision.value,
+            "reason": self.evidence.reason,
+            "evidence": self.evidence.to_dict(),
+        }
+
 
 def _forced_alg_env(spec: SweepSpec, alg_name: str) -> dict:
-    """
-    Build extra_env that forces a specific algorithm for all sizes and mem_types
-    while isolating the target component (competition_env).
-    """
-    comp_env = competition_env(spec.component)
-    tune_var = tune_env_var(spec.component)
-    mt = _mem_type_for_tune(spec.mem_type)
-    tune_val = f"{spec.collective}:0-inf:{mt}:[1-inf]:inf:@{alg_name}"
-    return {**comp_env, tune_var: tune_val}
+    env = competition_env(spec.component)
+    env[tune_env_var(spec.component)] = (
+        f"{spec.collective}:0-inf:{_mem_type_for_tune(spec.mem_type)}:"
+        f"[1-inf]:inf:@{alg_name}"
+    )
+    return env
 
 
 def _default_env(spec: SweepSpec) -> dict:
-    """
-    Build extra_env for measuring UCC's own default selection (no TUNE override).
-    Only competition_env is applied so no competing component wins.
-    """
     return competition_env(spec.component)
 
 
-# ---------------------------------------------------------------------------
-# RunSpec factory
-# ---------------------------------------------------------------------------
-
 def _run_spec_for(spec: SweepSpec, size_bytes: int, extra_env: dict) -> RunSpec:
     return RunSpec(
-        collective=spec.collective,
-        mem_type=spec.mem_type,
-        count=bytes_to_count(size_bytes, spec.datatype),
-        datatype=spec.datatype,
-        reduction_op=spec.reduction_op,
-        n_reps=spec.n_reps,
-        n_iter=spec.n_iter,
-        n_warmup=spec.n_warmup,
-        persistent=spec.persistent,
-        extra_env=extra_env,
-        mpi_launcher=list(spec.mpi_launcher),
-        perftest_path=spec.perftest_path,
+        collective=spec.collective, mem_type=spec.mem_type,
+        count=bytes_to_count(size_bytes, spec.datatype), datatype=spec.datatype,
+        reduction_op=spec.reduction_op, n_reps=spec.n_reps,
+        n_iter=spec.n_iter, n_warmup=spec.n_warmup,
+        persistent=spec.persistent, extra_env=extra_env,
+        mpi_launcher=list(spec.mpi_launcher), perftest_path=spec.perftest_path,
+        requested_team_size=spec.team_size,
+        executed_team_size=spec.executed_team_size,
         timeout_s=spec.timeout_s,
     )
 
 
-def _measure_safe(
-    spec: SweepSpec, size_bytes: int, extra_env: dict, label: str
-) -> Optional[RunResult]:
-    """Run measure() and return None (logging a warning) on failure."""
-    rs = _run_spec_for(spec, size_bytes, extra_env)
+def _measure_safe(spec: SweepSpec, size_bytes: int, extra_env: dict,
+                  label: str) -> Optional[RunResult]:
     try:
-        return measure(rs)
+        return measure(_run_spec_for(spec, size_bytes, extra_env))
     except RuntimeError as exc:
         logger.warning("Measurement failed [%s size=%d]: %s", label, size_bytes, exc)
         return None
 
 
-# ---------------------------------------------------------------------------
-# Stage 2.1 — algorithm sweep at one size
-# ---------------------------------------------------------------------------
-
-def _sweep_algs_at_size(
-    spec: SweepSpec, size_bytes: int
-) -> dict:   # alg_name → RunResult
-    """
-    Measure every algorithm in spec.alg_list at a single message size.
-    Failed algorithms are omitted from the returned dict.
-    """
-    results: dict = {}
+def _sweep_algs_at_size(spec: SweepSpec, size_bytes: int) -> dict:
+    results = {}
     for alg in spec.alg_list:
-        env = _forced_alg_env(spec, alg.name)
-        label = f"{spec.component}/{spec.collective}/@{alg.name}"
-        result = _measure_safe(spec, size_bytes, env, label)
+        result = _measure_safe(spec, size_bytes, _forced_alg_env(spec, alg.name),
+                               f"{spec.component}/{spec.collective}/@{alg.name}")
         if result is not None:
             results[alg.name] = result
     return results
 
 
-# ---------------------------------------------------------------------------
-# Stage 2.2 — knob sweep for one (algorithm, size)
-# ---------------------------------------------------------------------------
-
-def _sweep_knobs_at_size(
-    spec: SweepSpec,
-    size_bytes: int,
-    alg_name: str,
-    ks: list,  # list[Knob]
-) -> dict:  # env_var → best_value str
-    """
-    Coordinate-descent knob sweep: sweep each knob dimension in order,
-    locking in the best value before moving to the next.
-
-    Returns a dict of env_var overrides (only knobs that improve over default).
-    Already-optimal (default) knobs are omitted to keep configs minimal.
-    """
-    current_knob_overrides: dict = {}
-
-    for knob in ks:
-        env = {**_forced_alg_env(spec, alg_name), **current_knob_overrides}
-        label = f"knob={knob.env_var} baseline"
-        baseline = _measure_safe(spec, size_bytes, env, label)
-        baseline_us = baseline.median_us if baseline is not None else None
-
-        best_val: Optional[str] = None
-        best_us = baseline_us
-
-        for candidate in knob.candidates:
-            test_env = {**env, knob.env_var: candidate}
-            result = _measure_safe(spec, size_bytes, test_env,
-                                   f"knob={knob.env_var}={candidate}")
-            if result is None:
-                continue
-            if best_us is None or result.median_us < best_us:
-                best_us = result.median_us
-                best_val = candidate
-
-        if best_val is not None and best_val != knob.default:
-            logger.info(
-                "Knob %s: best=%r (%.2f us) vs default=%r (%.2f us)",
-                knob.env_var, best_val, best_us,
-                knob.default, baseline_us if baseline_us else float("nan"),
-            )
-            current_knob_overrides[knob.env_var] = best_val
-
-    return current_knob_overrides
+def _paired_compare(spec: SweepSpec, size_bytes: int, default_env: dict,
+                    candidate_env: dict, seed: int, *, default_arm="D",
+                    candidate_arm="A") -> PairedEvidence:
+    default_spec = _run_spec_for(spec, size_bytes, default_env)
+    candidate_spec = _run_spec_for(spec, size_bytes, candidate_env)
+    return measure_paired(
+        default_spec, candidate_spec, seed=seed, min_pairs=spec.min_pairs,
+        max_pairs=spec.max_pairs, min_speedup=spec.margin_threshold,
+        default_arm=default_arm, candidate_arm=candidate_arm,
+    ).evidence
 
 
-# ---------------------------------------------------------------------------
-# Stage 3 — coalescing
-# ---------------------------------------------------------------------------
+def confirm_knob(spec: SweepSpec, size_bytes: int, alg_name: str,
+                 knob: Knob, candidate: str, seed: int = 0
+                 ) -> tuple[Optional[str], tuple[PairedEvidence, ...]]:
+    """Apply the D/A0, A1/A0, and joint A1/D attribution gates."""
+    d_env = _default_env(spec)
+    a0_env = _forced_alg_env(spec, alg_name)
+    a1_env = {**a0_env, knob.env_var: candidate}
+    alg = _paired_compare(spec, size_bytes, d_env, a0_env, seed)
+    knob_effect = _paired_compare(
+        spec, size_bytes, a0_env, a1_env, seed + 1,
+        default_arm="A0", candidate_arm="A1",
+    )
+    joint = _paired_compare(spec, size_bytes, d_env, a1_env, seed + 2)
+    if all(e.decision == Decision.WIN for e in (alg, knob_effect, joint)):
+        return candidate, (alg, knob_effect, joint)
+    return None, (alg, knob_effect, joint)
 
-def _decision_key(d: SizeDecision) -> tuple:
-    """Stable key for merging adjacent same-policy decisions."""
-    return (d.winner_name, d.winner_id, tuple(sorted(d.knob_overrides.items())))
+
+def _decision_key(decision: SizeDecision) -> tuple:
+    return (decision.winner_name, decision.winner_id,
+            tuple(sorted(decision.knob_overrides.items())))
 
 
-def coalesce_ranges(
-    size_decisions: list,  # list[SizeDecision]; must be sorted ascending by size_bytes
-    all_sizes: list,       # list[int]; the full original grid (sorted ascending)
-) -> list:  # list[TuneRange]
-    """
-    Merge adjacent override decisions into TuneRange objects.
-
-    Rules:
-    - Only should_override=True decisions contribute to ranges.
-    - A no-override size between two override-same-alg sizes breaks the merge;
-      they become separate ranges because the gap means we assert nothing there.
-    - start_bytes: 0 if the range opens at the first element of all_sizes,
-      otherwise the first measured size in the group.
-    - end_bytes: the first measured size of the next group/gap, or None (inf)
-      if the range extends to the last element of all_sizes.
-    """
+def coalesce_ranges(size_decisions: list, all_sizes: list,
+                    resolution_bytes: int = 1024) -> list:
+    """Build finite inclusive ranges from contiguous confirmed WIN points."""
     if not all_sizes:
         return []
-
-    size_to_dec: dict[int, SizeDecision] = {d.size_bytes: d for d in size_decisions}
+    by_size = {d.actual_size_bytes: d for d in size_decisions}
+    ordered_sizes = sorted(set(by_size))
     ranges: list[TuneRange] = []
-    current_group: list[SizeDecision] = []
+    group: list[SizeDecision] = []
 
-    for i, sz in enumerate(all_sizes):
-        dec = size_to_dec.get(sz)
-        is_override = dec is not None and dec.should_override
+    def flush() -> None:
+        nonlocal group
+        if not group:
+            return
+        ranges.append(TuneRange(
+            group[0].actual_size_bytes, group[-1].actual_size_bytes,
+            group[0].winner_name, group[0].winner_id,
+            dict(group[0].knob_overrides), tuple(group), resolution_bytes,
+        ))
+        group = []
 
-        if not is_override:
-            if current_group:
-                ranges.append(_group_to_range(current_group, all_sizes))
-                current_group = []
+    for size in ordered_sizes:
+        decision = by_size[size]
+        is_win = decision.should_override and decision.policy == Decision.WIN
+        if not is_win:
+            flush()
             continue
-
-        # is_override=True from here
-        if current_group:
-            if _decision_key(dec) == _decision_key(current_group[-1]):
-                current_group.append(dec)
-            else:
-                ranges.append(_group_to_range(current_group, all_sizes))
-                current_group = [dec]
-        else:
-            current_group = [dec]
-
-    if current_group:
-        ranges.append(_group_to_range(current_group, all_sizes))
-
+        if group and (_decision_key(group[-1]) != _decision_key(decision)
+                      or size - group[-1].actual_size_bytes > resolution_bytes):
+            flush()
+        group.append(decision)
+    flush()
     return ranges
 
 
-def _group_to_range(group: list, all_sizes: list) -> TuneRange:
-    """Build a TuneRange from a non-empty group of same-policy SizeDecisions."""
-    first, last = group[0], group[-1]
+def refine_boundaries(
+    decisions: list[SizeDecision],
+    confirm: Callable[[int, str, int], SizeDecision],
+    *, datatype: str = "float32", resolution_bytes: int = 1024,
+    max_probes: int = 4, budget: Optional[ProofBudget] = None,
+) -> tuple[list[SizeDecision], ProofBudget]:
+    """Fixed-resolution refinement of unlike adjacent policy brackets.
 
-    # start_bytes: 0 when this group opens at the first measured size overall.
-    start_bytes = 0 if first.size_bytes == all_sizes[0] else first.size_bytes
+    ``confirm(actual_bytes, candidate_name, candidate_id)`` must return fresh
+    paired evidence.  Aligned duplicate byte counts are not re-measured.
+    """
+    if budget is None:
+        budget = ProofBudget()
+    align = dtype_size(datatype)
+    by_size = {d.actual_size_bytes or d.size_bytes: d for d in decisions}
+    original = sorted(by_size)
+    transitions = [(original[i], original[i + 1]) for i in range(len(original) - 1)
+                   if _decision_key(by_size[original[i]]) != _decision_key(by_size[original[i + 1]])
+                   or by_size[original[i]].policy != by_size[original[i + 1]].policy]
+    for left0, right0 in transitions:
+        queue = [(left0, right0)]
+        used = 0
+        while queue and used < max_probes:
+            left, right = queue.pop(0)
+            if right - left <= resolution_bytes:
+                continue
+            midpoint = ((left + right) // 2 // align) * align
+            if midpoint <= left:
+                midpoint = left + align
+            if midpoint >= right or midpoint in by_size:
+                continue
+            if budget.used_points >= budget.max_points:
+                break
+            side = by_size[left] if by_size[left].policy == Decision.WIN else by_size[right]
+            candidate = side.winner_name
+            candidate_id = side.winner_id
+            decision = confirm(midpoint, candidate, candidate_id)
+            decision.actual_size_bytes = midpoint
+            decision.size_bytes = midpoint
+            by_size[midpoint] = decision
+            pairs = decision.evidence.complete_pairs if decision.evidence else 0
+            budget = budget.consume(pairs)
+            used += 1
+            if (_decision_key(by_size[left]) != _decision_key(decision)
+                    or by_size[left].policy != decision.policy):
+                queue.append((left, midpoint))
+            if (_decision_key(decision) != _decision_key(by_size[right])
+                    or decision.policy != by_size[right].policy):
+                queue.append((midpoint, right))
+    return [by_size[size] for size in sorted(by_size)], budget
 
-    # end_bytes: first size in all_sizes after last, or None (inf).
-    last_idx = all_sizes.index(last.size_bytes)
-    end_bytes: Optional[int] = (
-        all_sizes[last_idx + 1] if last_idx + 1 < len(all_sizes) else None
-    )
-
-    return TuneRange(
-        start_bytes=start_bytes,
-        end_bytes=end_bytes,
-        alg_name=first.winner_name,
-        alg_id=first.winner_id,
-        knob_overrides=dict(first.knob_overrides),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
 
 def sweep_cell(spec: SweepSpec) -> SweepResult:
-    """
-    Sweep one (component, collective, mem_type, team_size) cell.
-
-    Returns a SweepResult with the coalesced TuneRanges and all intermediate
-    data needed for logging and validation.
-    """
     if not spec.alg_list:
-        logger.warning(
-            "No algorithms for %s/%s — returning empty result",
-            spec.component, spec.collective,
-        )
-        return SweepResult(spec=spec, size_decisions=[], tune_ranges=[], warnings=[])
-
+        return SweepResult(spec, [], [], [], ProofBudget(spec.max_confirmation_points,
+                                                         spec.max_pairs))
     warnings: list[str] = []
-    size_decisions: list[SizeDecision] = []
+    decisions: list[SizeDecision] = []
+    budget = ProofBudget(spec.max_confirmation_points, spec.max_pairs)
+    actual_seen: set[int] = set()
 
-    # ------------------------------------------------------------------
-    # Pass 1: algorithm sweep per size (default knobs)
-    # ------------------------------------------------------------------
-    for size in spec.msg_sizes_bytes:
-        logger.info(
-            "[%s/%s mem=%s ts=%d] sweeping algs at size=%s",
-            spec.component, spec.collective, spec.mem_type,
-            spec.team_size, _fmt_bytes(size),
-        )
-
-        alg_results = _sweep_algs_at_size(spec, size)
+    for requested_size in spec.msg_sizes_bytes:
+        actual_size = bytes_to_count(requested_size, spec.datatype) * dtype_size(spec.datatype)
+        if actual_size in actual_seen:
+            warnings.append(f"aligned duplicate {requested_size} -> {actual_size} deduplicated")
+            continue
+        actual_seen.add(actual_size)
+        alg_results = _sweep_algs_at_size(spec, actual_size)
         if not alg_results:
-            w = (f"All algorithms failed at {_fmt_bytes(size)} — "
-                 f"size skipped for {spec.component}/{spec.collective}")
-            logger.warning(w)
-            warnings.append(w)
+            warnings.append(f"All algorithms failed at {_fmt_bytes(actual_size)}")
             continue
-
-        default_result = _measure_safe(
-            spec, size, _default_env(spec),
-            f"{spec.component}/{spec.collective}/default",
-        )
-        default_us: Optional[float] = (
-            default_result.median_us if default_result is not None else None
-        )
-
-        # Record variance warnings for noisy measurements.
-        for alg_name, res in alg_results.items():
-            if res.variance_warning:
-                w = (f"High CV ({res.cv * 100:.1f}%) for {alg_name} at "
-                     f"{_fmt_bytes(size)} — result may be unreliable")
-                warnings.append(w)
-
-        winner_name, winner_result = min(
-            alg_results.items(), key=lambda kv: kv[1].median_us
-        )
-        winner_alg = next(a for a in spec.alg_list if a.name == winner_name)
-
-        if default_us is not None:
-            margin = (default_us - winner_result.median_us) / default_us
-            should_override = margin > spec.margin_threshold
+        default_result = _measure_safe(spec, actual_size, _default_env(spec), "default screening")
+        winner_name, winner_result = min(alg_results.items(), key=lambda item: item[1].median_us)
+        winner = next(alg for alg in spec.alg_list if alg.name == winner_name)
+        default_us = default_result.median_us if default_result else None
+        margin = ((default_us - winner_result.median_us) / default_us
+                  if default_us and default_us > 0 else 0.0)
+        partial = len(alg_results) != len(spec.alg_list)
+        evidence: Optional[PairedEvidence] = None
+        policy = Decision.DEFAULT
+        source = "screening-only"
+        if partial:
+            warnings.append(f"partial algorithm sweep at {_fmt_bytes(actual_size)}")
+        elif default_result is None:
+            warnings.append(f"missing default at {_fmt_bytes(actual_size)}")
+        elif budget.used_points >= budget.max_points:
+            warnings.append(f"confirmation budget exhausted at {_fmt_bytes(actual_size)}")
         else:
-            # Cannot compare — treat as needing override to be conservative.
-            margin = 0.0
-            should_override = True
-
-        size_decisions.append(SizeDecision(
-            size_bytes=size,
-            should_override=should_override,
-            winner_name=winner_name,
-            winner_id=winner_alg.id,
-            winner_median_us=winner_result.median_us,
-            default_median_us=default_us,
-            margin=margin,
-            knob_overrides={},  # filled in pass 2
+            evidence = _paired_compare(
+                spec, actual_size, _default_env(spec),
+                _forced_alg_env(spec, winner_name),
+                spec.confirmation_seed + budget.used_points,
+            )
+            budget = budget.consume(evidence.complete_pairs)
+            policy = evidence.decision
+            source = "fresh-paired-confirmation"
+        decisions.append(SizeDecision(
+            actual_size, policy == Decision.WIN, winner_name, winner.id,
+            winner_result.median_us, default_us, margin, {}, policy, evidence,
+            actual_size, source,
         ))
+        for name, result in alg_results.items():
+            if result.variance_warning:
+                warnings.append(f"High CV ({result.cv * 100:.1f}%) for {name} at {_fmt_bytes(actual_size)}")
 
-        logger.info(
-            "  winner=@%s (%.2f us)  default=%.2f us  margin=%.1f%%  override=%s",
-            winner_name,
-            winner_result.median_us,
-            default_us if default_us else float("nan"),
-            margin * 100,
-            should_override,
+    def confirm_boundary(size: int, candidate: str, candidate_id: int) -> SizeDecision:
+        evidence = _paired_compare(
+            spec, size, _default_env(spec), _forced_alg_env(spec, candidate),
+            spec.confirmation_seed + 100 + size,
+        )
+        return SizeDecision(
+            size, evidence.decision == Decision.WIN, candidate, candidate_id,
+            float("nan"), None, 0.0, {}, evidence.decision, evidence, size,
+            "boundary-paired-confirmation",
         )
 
-    # ------------------------------------------------------------------
-    # Preliminary coalesce (algorithm only, no knobs yet).
-    # ------------------------------------------------------------------
-    prelim_ranges = coalesce_ranges(size_decisions, spec.msg_sizes_bytes)
-
-    # ------------------------------------------------------------------
-    # Pass 2: knob sweep per preliminary range.
-    # ------------------------------------------------------------------
-    for prange in prelim_ranges:
-        ks = knobs_for(spec.component, spec.collective, prange.alg_name)
-        if not ks:
-            continue
-
-        # Representative size: first measured size in this range.
-        rep_size = next(
-            (d.size_bytes for d in size_decisions
-             if d.should_override and d.winner_name == prange.alg_name
-             and d.size_bytes >= prange.start_bytes
-             and (prange.end_bytes is None or d.size_bytes < prange.end_bytes)),
-            None,
-        )
-        if rep_size is None:
-            continue
-
-        logger.info(
-            "[%s/%s] sweeping knobs for @%s at %s",
-            spec.component, spec.collective,
-            prange.alg_name, _fmt_bytes(rep_size),
-        )
-        best_knobs = _sweep_knobs_at_size(spec, rep_size, prange.alg_name, ks)
-
-        # Propagate best knobs to every SizeDecision in this range.
-        if best_knobs:
-            for dec in size_decisions:
-                if (dec.should_override
-                        and dec.winner_name == prange.alg_name
-                        and dec.size_bytes >= prange.start_bytes
-                        and (prange.end_bytes is None
-                             or dec.size_bytes < prange.end_bytes)):
-                    dec.knob_overrides = dict(best_knobs)
-
-    # ------------------------------------------------------------------
-    # Final coalesce (with knob overrides now set).
-    # ------------------------------------------------------------------
-    tune_ranges = coalesce_ranges(size_decisions, spec.msg_sizes_bytes)
-
-    return SweepResult(
-        spec=spec,
-        size_decisions=size_decisions,
-        tune_ranges=tune_ranges,
-        warnings=warnings,
+    decisions, budget = refine_boundaries(
+        decisions, confirm_boundary, datatype=spec.datatype,
+        resolution_bytes=spec.boundary_resolution_bytes,
+        max_probes=spec.max_boundary_probes, budget=budget,
     )
+
+    # Freeze all evidence before making any emitted decision.  The complete
+    # per-cell family consists of every collected algorithm anchor, refined
+    # boundary, and D/A0, A1/A0, A1/D knob-attribution hypothesis.
+    family: list[tuple[str, PairedEvidence, SizeDecision, Optional[KnobHypothesis]]] = []
+    for decision in decisions:
+        if decision.evidence is not None:
+            hypothesis_id = (
+                f"algorithm:{decision.source}:{decision.actual_size_bytes}:"
+                f"{decision.winner_name}"
+            )
+            family.append((hypothesis_id, decision.evidence, decision, None))
+
+    # Knob evidence is collected only at raw-WIN algorithm points, but no knob
+    # or final algorithm decision is mutated until the one cell-wide Holm pass.
+    for decision in sorted(decisions, key=lambda item: item.actual_size_bytes):
+        if decision.policy != Decision.WIN:
+            continue
+        knobs = sorted(knobs_for(spec.component, spec.collective, decision.winner_name),
+                       key=lambda item: item.env_var)
+        for knob_index, knob in enumerate(knobs):
+            required_points = 3 * len(knob.candidates)
+            if budget.used_points + required_points > budget.max_points:
+                warnings.append(f"confirmation budget prevents complete knob sweep for {knob.env_var}; omitted")
+                continue
+            for candidate_index, candidate in enumerate(sorted(knob.candidates)):
+                _, evidence_set = confirm_knob(
+                    spec, decision.actual_size_bytes, decision.winner_name,
+                    knob, candidate,
+                    spec.confirmation_seed + 1000 + knob_index * 100 + candidate_index * 3,
+                )
+                for gate, evidence in zip(("algorithm", "knob-effect", "joint"),
+                                          evidence_set):
+                    budget = budget.consume(evidence.complete_pairs)
+                    hypothesis_id = (
+                        f"knob:{decision.actual_size_bytes}:{knob.env_var}:"
+                        f"{candidate}:{gate}"
+                    )
+                    audit = KnobHypothesis(hypothesis_id, knob.env_var,
+                                           candidate, gate, evidence)
+                    decision.knob_hypotheses.append(audit)
+                    family.append((hypothesis_id, evidence, decision, audit))
+
+    if family:
+        adjusted = classify_cell(
+            [item[1].samples for item in family],
+            hypothesis_ids=[item[0] for item in family],
+            min_pairs=spec.min_pairs, min_speedup=spec.margin_threshold,
+        )
+        for (_, _, decision, audit), evidence in zip(family, adjusted):
+            if audit is None:
+                decision.evidence = evidence
+                decision.policy = evidence.decision
+                decision.should_override = evidence.decision == Decision.WIN
+            else:
+                audit.evidence = evidence
+
+    # Retain exactly one candidate only if its complete three-gate attribution
+    # set survives Holm and the point's algorithm hypothesis also survives.
+    for decision in decisions:
+        if decision.policy != Decision.WIN:
+            decision.knob_overrides.clear()
+            continue
+        by_knob: dict[str, dict[str, list[KnobHypothesis]]] = {}
+        for audit in decision.knob_hypotheses:
+            by_knob.setdefault(audit.env_var, {}).setdefault(audit.candidate, []).append(audit)
+        for env_var, candidates in sorted(by_knob.items()):
+            accepted = [candidate for candidate, gates in sorted(candidates.items())
+                        if len(gates) == 3
+                        and {gate.gate for gate in gates} == {"algorithm", "knob-effect", "joint"}
+                        and all(gate.evidence.decision == Decision.WIN for gate in gates)]
+            if len(accepted) == 1:
+                decision.knob_overrides[env_var] = accepted[0]
+            elif len(accepted) > 1:
+                warnings.append(f"conflicting proven values for {env_var}; omitted")
+
+    ranges = coalesce_ranges(decisions, spec.msg_sizes_bytes,
+                             spec.boundary_resolution_bytes)
+    unsupported = tuple(
+        f"{spec.component}/{spec.collective} mem={spec.mem_type} "
+        f"team={spec.team_size} size={decision.actual_size_bytes}: "
+        f"{decision.policy.value} ({decision.evidence.reason if decision.evidence else decision.source})"
+        for decision in decisions if decision.policy != Decision.WIN
+    )
+    return SweepResult(spec, decisions, ranges, warnings, budget, unsupported)

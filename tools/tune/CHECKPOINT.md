@@ -166,7 +166,7 @@ python3 ucc_offline_tune.py \
   --collective allreduce \
   --mem-type host \
   --team-sizes 8 \
-  --launcher "mpirun -np 8" \
+  --launcher "mpirun -np {team_size}" \
   --perftest /path/to/ucc_perftest \
   --ucc-info /path/to/ucc_info \
   --output-dir ./out/
@@ -187,11 +187,18 @@ python3 ucc_offline_tune.py \
   --factor 2 \
   --n-reps 7 \
   --n-iter 1000 \
-  --launcher "srun -n 512 --gpus-per-task=1" \
+  --launcher "srun -n {team_size} --gpus-per-task=1" \
   --output-dir ./out_h100_512gpu/
 
 # Skip validation (faster, useful during development)
 python3 ucc_offline_tune.py ... --no-validate
+
+`--team-sizes` is bound independently for every cell. `--launcher` must name
+`mpirun`/`mpiexec` with one `-np` or `-n` option, or `srun` with one `-n` or
+`--ntasks` option. Use `{team_size}` as the option value in reusable examples;
+an integer value is accepted but is deliberately rebound for each cell. Missing,
+duplicate, non-numeric, and unknown launcher rank syntax fails before Stage 0,
+so no measurement or configuration can be attributed to a guessed rank count.
 ```
 
 ---

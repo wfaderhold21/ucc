@@ -161,6 +161,17 @@ class TestCompetitionEnv(unittest.TestCase):
 
 
 class TestKnobsFor(unittest.TestCase):
+    def test_uint_ranged_metadata(self):
+        knob = knobs_for("tl/ucp", "allreduce", "knomial")[0]
+        self.assertEqual(knob.config_type, "UINT_RANGED")
+        self.assertEqual(knob.scopes, ("message", "memory"))
+        self.assertTrue(knob.range_scoped)
+
+    def test_scalar_metadata(self):
+        knob = knobs_for("tl/ucp", "alltoall", "pairwise")[0]
+        self.assertEqual(knob.config_type, "SCALAR")
+        self.assertFalse(knob.range_scoped)
+
     def test_allreduce_knomial_has_radix_knob(self):
         ks = knobs_for("tl/ucp", "allreduce", "knomial")
         self.assertEqual(len(ks), 1)

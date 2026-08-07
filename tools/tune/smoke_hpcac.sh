@@ -63,7 +63,7 @@ python3 ucc_offline_tune.py \
     --collective allreduce --component tl/ucp --mem-type host --team-sizes 8 \
     --min-bytes 1024 --max-bytes 16384 --factor 4 \
     --n-reps 3 --n-iter 200 --n-warmup 20 \
-    --launcher "mpirun -np 8" --perftest $PT --ucc-info $UI \
+    --launcher "mpirun -np {team_size}" --perftest $PT --ucc-info $UI \
     --output-dir $A/step4 --no-validate 2>&1 | tail -25
 echo "exit=${PIPESTATUS[0]}"
 echo "--- emitted config ---"
@@ -86,7 +86,7 @@ python3 ucc_offline_tune.py \
     --collective allreduce,allgather --mem-type host --team-sizes 8,16 \
     --min-bytes 1024 --max-bytes 16384 --factor 4 \
     --n-reps 3 --n-iter 200 --n-warmup 20 \
-    --launcher "mpirun -np 16" --perftest $PT --ucc-info $UI \
+    --launcher "mpirun -np {team_size}" --perftest $PT --ucc-info $UI \
     --output-dir $A/step5 --no-validate 2>&1 | tail -30
 echo "exit=${PIPESTATUS[0]}"
 echo "--- emitted config ---"

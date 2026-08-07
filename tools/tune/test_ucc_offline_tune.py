@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Unit tests for ucc_offline_tune emission, validation, and orchestration.
-No real binaries or hardware required — measure() and sweep_cell() are mocked.
-"""
+"""Tests for scoped emission and exact-config validation."""
 
 import json
 import tempfile
@@ -10,730 +7,339 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from ucc_tune_fingerprint import Fingerprint, _ucc_version, _ucx_version
-from ucc_tune_runner import RunResult, RunSpec, SingleRunSample
-from ucc_tune_space import AlgInfo
-from ucc_tune_sweep import SizeDecision, SweepResult, SweepSpec, TuneRange
 from ucc_offline_tune import (
-    ValidationPoint,
-    _build_conf_lines,
-    _build_sh_lines,
-    _collect_knob_overrides,
-    _collect_tune_tokens,
-    _representative_sizes,
-    emit_conf,
-    run_tuning,
-    validate,
-    write_summary,
+    ValidationPoint, _build_arg_parser, _collect_knob_overrides,
+    _collect_tune_tokens, _results_to_json, _validation_probe_sizes,
+    _validation_covers_results, emit_conf, trim_failed_ranges, validate,
+    validate_with_trimming, run_tuning,
 )
+from ucc_tune_fingerprint import Fingerprint
+from ucc_tune_runner import PairedRunResult
+from ucc_tune_space import AlgInfo
+from ucc_tune_stats import ArmSample, classify_evidence
+from ucc_tune_sweep import SweepResult, SweepSpec, TuneRange
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _fp(**kw) -> Fingerprint:
-    defaults = dict(
-        ucc_version="1.4.0",
-        ucx_version="1.17.0",
-        cpu_model="AMD EPYC 9654",
-        gpu_model="NVIDIA H100 80GB HBM3",
-        gpu_driver="535.104.05",
-        cuda_version="12.2",
-        hostname="node01",
-        timestamp="2026-06-23T00:00:00+00:00",
-        hash="abc123",
-    )
-    defaults.update(kw)
-    return Fingerprint(**defaults)
+def fingerprint():
+    return Fingerprint("1.4", "1.17", "cpu", "gpu", "driver", "cuda",
+                       "host", "2026-08-05T00:00:00Z", "abc")
 
 
-def _make_run_result(median_us: float) -> RunResult:
-    s = SingleRunSample(count=1024, size_bytes=4096,
-                        avg_us=median_us, min_us=median_us * 0.95,
-                        max_us=median_us * 1.05)
-    return RunResult(
-        spec=MagicMock(),
-        samples=[s],
-        median_us=median_us,
-        iqr_us=0.0,
-        cv=0.01,
-        clean_count=1,
-        dropped_count=0,
-        failed_count=0,
-        variance_warning=False,
-    )
+def tune_range(start=4096, end=4100, knobs=None, alg="knomial"):
+    return TuneRange(start, end, alg, 0, knobs or {})
 
 
-def _make_sweep_result(
-    component="tl/ucp",
-    collective="allreduce",
-    mem_type="host",
-    team_size=8,
-    tune_ranges=None,
-    size_decisions=None,
-    warnings=None,
-) -> SweepResult:
-    algs = [AlgInfo(0, "knomial", ""), AlgInfo(1, "sra_knomial", "")]
+def sweep_result(*, ranges=None, mem="host", team=8, all_teams=None,
+                 sizes=None, collective="allreduce", component="tl/ucp",
+                 datatype="float32", reduction_op="sum"):
     spec = SweepSpec(
-        component=component,
-        collective=collective,
-        mem_type=mem_type,
-        team_size=team_size,
-        msg_sizes_bytes=[1024, 65536, 1 << 20],
-        alg_list=algs,
-        datatype="float32",
-        n_reps=3,
-        n_iter=100,
-        n_warmup=10,
-        mpi_launcher=["mpirun", "-np", str(team_size)],
+        component, collective, mem, team, sizes or [4096, 4100, 16384],
+        [AlgInfo(0, "knomial", "")], all_team_sizes=all_teams or [team],
+        datatype=datatype, reduction_op=reduction_op,
     )
-    return SweepResult(
-        spec=spec,
-        size_decisions=size_decisions or [],
-        tune_ranges=tune_ranges or [],
-        warnings=warnings or [],
-    )
+    return SweepResult(spec, [], ranges or [], [])
 
 
-def _tr(start, end, alg="sra_knomial", alg_id=1, knobs=None) -> TuneRange:
-    return TuneRange(
-        start_bytes=start, end_bytes=end,
-        alg_name=alg, alg_id=alg_id,
-        knob_overrides=knobs or {},
-    )
+def paired(ratio=.8):
+    arm_samples = []
+    for i in range(10):
+        order = "AB" if i % 2 == 0 else "BA"
+        arm_samples.extend((ArmSample(i, order, "D", 100),
+                            ArmSample(i, order, "A", 100 * ratio)))
+    evidence = classify_evidence(arm_samples)
+    return PairedRunResult(tuple(arm_samples), 10, 10, 0, evidence)
 
 
-# ---------------------------------------------------------------------------
-# _collect_tune_tokens
-# ---------------------------------------------------------------------------
+class TestTuneTokens(unittest.TestCase):
+    def test_exact_inclusive_token_and_team(self):
+        tokens = _collect_tune_tokens([sweep_result(ranges=[tune_range()])])
+        self.assertEqual(tokens["UCC_TL_UCP_TUNE"],
+                         ["allreduce:4k-4100:host:[8-8]:inf:@knomial"])
 
-class TestCollectTuneTokens(unittest.TestCase):
-    def test_single_range(self):
-        r = _make_sweep_result(tune_ranges=[_tr(0, None)])
-        tokens = _collect_tune_tokens([r])
-        self.assertIn("UCC_TL_UCP_TUNE", tokens)
-        self.assertEqual(len(tokens["UCC_TL_UCP_TUNE"]), 1)
-        self.assertIn("@sra_knomial", tokens["UCC_TL_UCP_TUNE"][0])
+    def test_unmeasured_team_sizes_are_not_covered(self):
+        results = [sweep_result(team=8, all_teams=[8, 64], ranges=[tune_range()]),
+                   sweep_result(team=64, all_teams=[8, 64], ranges=[tune_range()])]
+        tokens = _collect_tune_tokens(results)["UCC_TL_UCP_TUNE"]
+        self.assertIn("[8-8]", tokens[0])
+        self.assertIn("[64-64]", tokens[1])
+        self.assertNotIn("inf", tokens[0].split(":")[3])
 
-    def test_multiple_ranges_same_component(self):
-        ranges = [_tr(0, 65536, "knomial", 0), _tr(65536, None, "sra_knomial", 1)]
-        r = _make_sweep_result(tune_ranges=ranges)
-        tokens = _collect_tune_tokens([r])
-        self.assertEqual(len(tokens["UCC_TL_UCP_TUNE"]), 2)
-
-    def test_empty_tune_ranges_excluded(self):
-        r = _make_sweep_result(tune_ranges=[])
-        tokens = _collect_tune_tokens([r])
-        self.assertNotIn("UCC_TL_UCP_TUNE", tokens)
-
-    def test_different_components_separate_vars(self):
-        r1 = _make_sweep_result(component="tl/ucp", tune_ranges=[_tr(0, None)])
-        r2 = _make_sweep_result(component="tl/cuda",  tune_ranges=[_tr(0, None)])
-        tokens = _collect_tune_tokens([r1, r2])
-        self.assertIn("UCC_TL_UCP_TUNE", tokens)
-        self.assertIn("UCC_TL_CUDA_TUNE", tokens)
-
-    def test_token_contains_mem_type(self):
-        r = _make_sweep_result(mem_type="cuda", tune_ranges=[_tr(0, None)])
-        tokens = _collect_tune_tokens([r])
-        tok = tokens["UCC_TL_UCP_TUNE"][0]
-        self.assertIn(":cuda:", tok)
-
-    def test_token_contains_team_size(self):
-        r = _make_sweep_result(team_size=16, tune_ranges=[_tr(0, None)])
-        tokens = _collect_tune_tokens([r])
-        tok = tokens["UCC_TL_UCP_TUNE"][0]
-        self.assertIn("[16-inf]", tok)
+    def test_unencodable_mixed_datatype_or_operation_is_rejected(self):
+        for variant in (sweep_result(datatype="float64"),
+                        sweep_result(reduction_op="max")):
+            with self.assertRaisesRegex(ValueError, "cannot emit"):
+                _collect_tune_tokens([
+                    sweep_result(ranges=[tune_range()]),
+                    variant,
+                ])
 
 
-# ---------------------------------------------------------------------------
-# _collect_knob_overrides
-# ---------------------------------------------------------------------------
+class TestKnobEmission(unittest.TestCase):
+    RADIX = "UCC_TL_UCP_ALLREDUCE_KN_RADIX"
 
-class TestCollectKnobOverrides(unittest.TestCase):
-    def test_single_knob(self):
-        r = _make_sweep_result(tune_ranges=[
-            _tr(0, None, knobs={"UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX": "4"})
-        ])
-        knob_env, warnings = _collect_knob_overrides([r])
-        self.assertEqual(knob_env["UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX"], "4")
+    def test_uint_ranged_keeps_message_and_memory_scope(self):
+        results = [sweep_result(ranges=[tune_range(knobs={self.RADIX: "2"})]),
+                   sweep_result(mem="cuda", ranges=[tune_range(8192, 8196,
+                                                               {self.RADIX: "4"})])]
+        env, warnings = _collect_knob_overrides(results)
         self.assertEqual(warnings, [])
+        self.assertEqual(env[self.RADIX], "[4k-4100:host:2,8k-8196:cuda:4]auto")
 
-    def test_conflict_picks_largest_span(self):
-        # Range 1: [0, 65536) → radix=2  (span 65536)
-        # Range 2: [65536, ∞) → radix=4  (span ≈ 2^62)
-        # Largest span is range 2, so radix=4 should win.
-        r = _make_sweep_result(tune_ranges=[
-            _tr(0,     65536, knobs={"UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX": "2"}),
-            _tr(65536, None,  knobs={"UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX": "4"}),
+    def test_ranged_knob_is_omitted_across_teams(self):
+        results = [sweep_result(team=8, ranges=[tune_range(knobs={self.RADIX: "4"})]),
+                   sweep_result(team=64, ranges=[tune_range(knobs={self.RADIX: "4"})])]
+        env, warnings = _collect_knob_overrides(results)
+        self.assertNotIn(self.RADIX, env)
+        self.assertTrue(any("team-scoped" in warning for warning in warnings))
+
+    def test_overlapping_conflict_is_omitted(self):
+        result = sweep_result(ranges=[
+            tune_range(4096, 8192, {self.RADIX: "2"}),
+            tune_range(8192, 16380, {self.RADIX: "4"}),
         ])
-        knob_env, warnings = _collect_knob_overrides([r])
-        self.assertEqual(knob_env["UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX"], "4")
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("conflict", warnings[0].lower())
+        env, warnings = _collect_knob_overrides([result])
+        self.assertNotIn(self.RADIX, env)
+        self.assertTrue(any("conflict" in warning for warning in warnings))
 
-    def test_no_conflict_no_warning(self):
-        r = _make_sweep_result(tune_ranges=[
-            _tr(0, 65536, knobs={"UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX": "4"}),
-            _tr(65536, None, knobs={"UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX": "4"}),
-        ])
-        knob_env, warnings = _collect_knob_overrides([r])
-        self.assertEqual(warnings, [])
-        self.assertEqual(knob_env["UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX"], "4")
+    def test_scalar_partial_range_is_omitted(self):
+        env, warnings = _collect_knob_overrides([
+            sweep_result(ranges=[tune_range(knobs={"UNKNOWN_SCALAR": "4"})])])
+        self.assertEqual(env, {})
+        self.assertTrue(warnings)
 
-    def test_no_knobs_returns_empty(self):
-        r = _make_sweep_result(tune_ranges=[_tr(0, None)])
-        knob_env, warnings = _collect_knob_overrides([r])
-        self.assertEqual(knob_env, {})
-        self.assertEqual(warnings, [])
+    def test_scalar_full_single_cell_is_allowed(self):
+        result = sweep_result(sizes=[4096, 4100],
+                              ranges=[tune_range(knobs={"UNKNOWN_SCALAR": "4"})])
+        env, _ = _collect_knob_overrides([result])
+        self.assertEqual(env, {"UNKNOWN_SCALAR": "4"})
 
-
-# ---------------------------------------------------------------------------
-# _build_conf_lines / _build_sh_lines
-# ---------------------------------------------------------------------------
-
-class TestBuildConfLines(unittest.TestCase):
-    def setUp(self):
-        self.fp = _fp()
-        self.tokens = {"UCC_TL_UCP_TUNE": ["allreduce:0-64k:host:[8-inf]:inf:@knomial",
-                                            "allreduce:64k-inf:host:[8-inf]:inf:@sra_knomial"]}
-        self.knobs = {"UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX": "4"}
-
-    def test_conf_has_tune_var(self):
-        lines = _build_conf_lines(self.tokens, self.knobs, self.fp)
-        joined = "\n".join(lines)
-        self.assertIn("UCC_TL_UCP_TUNE=", joined)
-
-    def test_conf_tokens_hash_separated(self):
-        lines = _build_conf_lines(self.tokens, self.knobs, self.fp)
-        tune_line = next(l for l in lines if l.startswith("UCC_TL_UCP_TUNE="))
-        # Both tokens should be present, '#'-separated.
-        self.assertIn("#", tune_line)
-        self.assertIn("@knomial", tune_line)
-        self.assertIn("@sra_knomial", tune_line)
-
-    def test_conf_has_knob(self):
-        lines = _build_conf_lines(self.tokens, self.knobs, self.fp)
-        joined = "\n".join(lines)
-        self.assertIn("UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX=4", joined)
-
-    def test_conf_has_fingerprint_hash(self):
-        lines = _build_conf_lines(self.tokens, self.knobs, self.fp)
-        joined = "\n".join(lines)
-        self.assertIn(self.fp.hash, joined)
-
-    def test_conf_has_correctness_warning(self):
-        lines = _build_conf_lines(self.tokens, self.knobs, self.fp)
-        joined = "\n".join(lines)
-        self.assertIn("Correctness", joined)
+    def test_scalar_does_not_leak_into_an_unrelated_memory_cell(self):
+        host = sweep_result(sizes=[4096, 4100],
+                            ranges=[tune_range(knobs={"UNKNOWN_SCALAR": "4"})])
+        cuda = sweep_result(mem="cuda", sizes=[4096, 4100], ranges=[])
+        env, warnings = _collect_knob_overrides([host, cuda])
+        self.assertNotIn("UNKNOWN_SCALAR", env)
+        self.assertTrue(warnings)
 
 
-class TestBuildShLines(unittest.TestCase):
-    def setUp(self):
-        self.fp = _fp()
-        self.tokens = {"UCC_TL_UCP_TUNE": ["allreduce:0-inf:host:[8-inf]:inf:@sra_knomial"]}
-        self.knobs = {}
-
-    def test_sh_starts_with_shebang(self):
-        lines = _build_sh_lines(self.tokens, self.knobs, self.fp)
-        self.assertTrue(lines[0].startswith("#!/"))
-
-    def test_sh_exports_tune_var(self):
-        lines = _build_sh_lines(self.tokens, self.knobs, self.fp)
-        joined = "\n".join(lines)
-        self.assertIn("export UCC_TL_UCP_TUNE=", joined)
-
-    def test_sh_exports_knob(self):
-        knobs = {"UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX": "4"}
-        lines = _build_sh_lines(self.tokens, knobs, self.fp)
-        joined = "\n".join(lines)
-        self.assertIn("export UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX='4'", joined)
-
-
-# ---------------------------------------------------------------------------
-# emit_conf (writes files to a temp dir)
-# ---------------------------------------------------------------------------
-
-class TestEmitConf(unittest.TestCase):
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.fp = _fp()
-
-    def _emit(self, results):
-        return emit_conf(Path(self.tmpdir), results, self.fp)
-
-    def test_conf_file_created(self):
-        r = _make_sweep_result(tune_ranges=[_tr(0, None)])
-        paths = self._emit([r])
-        self.assertTrue(paths["conf"].exists())
-
-    def test_sh_file_created(self):
-        r = _make_sweep_result(tune_ranges=[_tr(0, None)])
-        paths = self._emit([r])
-        self.assertTrue(paths["sh"].exists())
-
-    def test_fingerprint_json_created(self):
-        paths = self._emit([])
-        self.assertTrue(paths["fingerprint"].exists())
-        data = json.loads(paths["fingerprint"].read_text())
-        self.assertEqual(data["ucc_version"], self.fp.ucc_version)
-
-    def test_results_json_created(self):
-        r = _make_sweep_result(tune_ranges=[_tr(0, None)])
-        paths = self._emit([r])
-        self.assertTrue(paths["results"].exists())
-        data = json.loads(paths["results"].read_text())
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]["collective"], "allreduce")
-
-    def test_results_json_has_tune_token(self):
-        r = _make_sweep_result(
-            collective="allreduce",
-            mem_type="host",
-            team_size=8,
-            tune_ranges=[_tr(0, None, "sra_knomial", 1)],
+class TestValidationProbes(unittest.TestCase):
+    def test_complete_probe_set_and_inclusive_end(self):
+        probes = _validation_probe_sizes(
+            [tune_range(4096, 16380)],
+            [1024, 4096, 4100, 16380, 16384, 16388],
+            resolution_bytes=1024,
         )
-        paths = self._emit([r])
-        data = json.loads(paths["results"].read_text())
-        tok = data[0]["tune_ranges"][0]["tune_token"]
-        self.assertEqual(tok, "allreduce:0-inf:host:[8-inf]:inf:@sra_knomial")
+        by_size = {(probe.size_bytes, probe.inside): probe for probe in probes}
+        for key in ((4096, True), (16380, True), (4100, True),
+                    (4092, False), (16384, False)):
+            self.assertIn(key, by_size)
+        reasons = {reason for probe in probes for reason in probe.reasons}
+        self.assertTrue({"midpoint", "quartile-25", "quartile-75"} <= reasons)
 
-    def test_empty_results_produces_valid_conf(self):
-        paths = self._emit([])
-        content = paths["conf"].read_text()
-        # No TUNE= lines when there are no results.
-        self.assertNotIn("_TUNE=", content)
+    def test_alignment_deduplicates_probes(self):
+        probes = _validation_probe_sizes([tune_range(4096, 4100)],
+                                         [4096, 4097, 4099, 4100])
+        keys = [(probe.size_bytes, probe.inside) for probe in probes]
+        self.assertEqual(len(keys), len(set(keys)))
+        self.assertTrue(all(size % 4 == 0 for size, _ in keys))
 
-    def test_knob_conflict_file_created(self):
-        r = _make_sweep_result(tune_ranges=[
-            _tr(0,     65536, knobs={"UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX": "2"}),
-            _tr(65536, None,  knobs={"UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX": "4"}),
-        ])
-        self._emit([r])
-        conflict_file = Path(self.tmpdir) / "knob_conflicts.txt"
-        self.assertTrue(conflict_file.exists())
+    @patch("ucc_offline_tune.measure_paired")
+    def test_exact_config_validation_inside_and_outside(self, measure):
+        result = sweep_result(ranges=[tune_range()], sizes=[4092, 4096, 4100, 4104])
+        measure.side_effect = lambda default, tuned, **kwargs: (
+            paired(.8) if 4096 <= default.count * 4 <= 4100 else paired(1.0))
+        points = validate([result], _collect_tune_tokens([result]), {}, n_reps=10)
+        self.assertTrue(points)
+        self.assertTrue(all(point.passed for point in points))
+        self.assertTrue(any(not point.inside for point in points))
 
+    def test_trim_then_remove_cap(self):
+        result = sweep_result(ranges=[tune_range(4096, 8192)], sizes=[4096, 8192])
+        points = [ValidationPoint("allreduce", "host", 4096, 8, 10, .2, True,
+                                  component="tl/ucp", requested_team_size=8,
+                                  executed_team_size=8),
+                  ValidationPoint("allreduce", "host", 8192, 11, 10, -.1, False,
+                                  component="tl/ucp", requested_team_size=8,
+                                  executed_team_size=8)]
+        trim_failed_ranges([result], points, 1)
+        self.assertEqual((result.tune_ranges[0].start_bytes,
+                          result.tune_ranges[0].end_bytes), (4096, 4096))
+        result.tune_ranges = [tune_range(4096, 8192)]
+        trim_failed_ranges([result], points, 2)
+        self.assertEqual(result.tune_ranges, [])
+        with self.assertRaises(ValueError):
+            trim_failed_ranges([result], points, 3)
 
-# ---------------------------------------------------------------------------
-# _representative_sizes
-# ---------------------------------------------------------------------------
-
-class TestRepresentativeSizes(unittest.TestCase):
-    def test_picks_middle_of_range(self):
-        sizes = [1024, 65536, 1 << 20, 1 << 24]
-        ranges = [_tr(0, 1 << 20), _tr(1 << 20, None)]
-        reps = _representative_sizes(ranges, sizes)
-        # Range [0, 1M) contains sizes [1024, 65536]. Middle of 2 = index 1 → 65536.
-        self.assertEqual(reps[0], 65536)
-        # Range [1M, inf) contains [1M, 16M]. Middle of 2 = index 1 → 16M.
-        self.assertEqual(reps[1], 1 << 24)
-
-    def test_empty_ranges_returns_empty(self):
-        self.assertEqual(_representative_sizes([], [1024, 65536]), [])
-
-    def test_single_size_in_range(self):
-        sizes = [4096]
-        ranges = [_tr(0, None)]
-        reps = _representative_sizes(ranges, sizes)
-        self.assertEqual(reps, [4096])
-
-
-# ---------------------------------------------------------------------------
-# validate (measure() mocked)
-# ---------------------------------------------------------------------------
-
-class TestValidate(unittest.TestCase):
-    @patch("ucc_offline_tune.measure")
-    def test_pass_when_tuned_faster(self, mock_measure):
-        # Tuned = 8us, default = 10us → speedup=20% > 5% margin.
-        call_count = [0]
-
-        def side_effect(rs):
-            call_count[0] += 1
-            # Alternate: tuned call (has TUNE in extra_env), default (no TUNE).
-            if "UCC_TL_UCP_TUNE" in rs.extra_env:
-                return _make_run_result(8.0)
-            return _make_run_result(10.0)
-
-        mock_measure.side_effect = side_effect
-        r = _make_sweep_result(
-            tune_ranges=[_tr(0, None)],
-            size_decisions=[
-                SizeDecision(65536, True, "sra_knomial", 1, 8.0, 10.0, 0.20, {})
-            ],
-        )
-        points = validate([r], _collect_tune_tokens([r]), {}, margin_threshold=0.05,
-                          n_reps=2, n_iter=50, n_warmup=5)
-        self.assertEqual(len(points), 1)
-        self.assertTrue(points[0].passed)
-        self.assertAlmostEqual(points[0].speedup, 0.20, places=2)
-
-    @patch("ucc_offline_tune.measure")
-    def test_fail_when_tuned_slower(self, mock_measure):
-        def side_effect(rs):
-            if "UCC_TL_UCP_TUNE" in rs.extra_env:
-                return _make_run_result(12.0)   # tuned is slower
-            return _make_run_result(10.0)
-
-        mock_measure.side_effect = side_effect
-        r = _make_sweep_result(
-            tune_ranges=[_tr(0, None)],
-            size_decisions=[
-                SizeDecision(65536, True, "sra_knomial", 1, 12.0, 10.0, -0.20, {})
-            ],
-        )
-        points = validate([r], _collect_tune_tokens([r]), {}, margin_threshold=0.05,
-                          n_reps=2, n_iter=50, n_warmup=5)
-        self.assertEqual(len(points), 1)
-        self.assertFalse(points[0].passed)
-
-    @patch("ucc_offline_tune.measure")
-    def test_no_points_for_empty_tune_ranges(self, mock_measure):
-        r = _make_sweep_result(tune_ranges=[])
-        points = validate([r], {}, {}, n_reps=2, n_iter=50, n_warmup=5)
-        self.assertEqual(points, [])
-        mock_measure.assert_not_called()
-
-    @patch("ucc_offline_tune.measure")
-    def test_failed_measure_skipped(self, mock_measure):
-        mock_measure.side_effect = RuntimeError("no binary")
-        r = _make_sweep_result(
-            tune_ranges=[_tr(0, None)],
-            size_decisions=[SizeDecision(65536, True, "sra_knomial", 1, 8.0, 10.0, 0.2, {})],
-        )
-        points = validate([r], _collect_tune_tokens([r]), {}, n_reps=2, n_iter=50, n_warmup=5)
-        self.assertEqual(points, [])
-
-
-# ---------------------------------------------------------------------------
-# run_tuning (sweep_cell and run_ucc_info_algs mocked)
-# ---------------------------------------------------------------------------
-
-class TestRunTuning(unittest.TestCase):
-    @patch("ucc_offline_tune.sweep_cell")
-    def test_returns_one_result_per_cell(self, mock_sweep):
-        mock_sweep.return_value = _make_sweep_result()
-
-        results, skipped = run_tuning(
-            component_collective_pairs=[("tl/ucp", "allreduce")],
-            mem_types=["host"],
-            team_sizes=[8],
-            msg_sizes_bytes=[1024, 65536],
-            alg_map={"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}},
-            n_reps=3,
-            n_iter=100,
-            n_warmup=10,
-            mpi_launcher=["mpirun", "-np", "8"],
-        )
-        self.assertEqual(len(results), 1)
-        mock_sweep.assert_called_once()
-
-    @patch("ucc_offline_tune.sweep_cell")
-    def test_skipped_when_no_algs(self, mock_sweep):
-        # Component exists but collective not found → skipped gracefully.
-        results, skipped = run_tuning(
-            component_collective_pairs=[("tl/ucp", "allreduce")],
-            mem_types=["host"],
-            team_sizes=[8],
-            msg_sizes_bytes=[1024],
-            alg_map={"tl/cuda": {"allreduce": [AlgInfo(0, "knomial", "")]}},
-            n_reps=3,
-            n_iter=100,
-            n_warmup=10,
-        )
-        self.assertEqual(results, [])
-        self.assertEqual(len(skipped), 1)
-        self.assertIn("no algorithms found", skipped[0])
-        mock_sweep.assert_not_called()
-
-    @patch("ucc_offline_tune.sweep_cell")
-    def test_multiple_cells_all_swept(self, mock_sweep):
-        mock_sweep.return_value = _make_sweep_result()
-
-        results, _ = run_tuning(
-            component_collective_pairs=[
-                ("tl/ucp", "allreduce"),
-                ("tl/ucp", "alltoall"),
-            ],
-            mem_types=["host", "cuda"],
-            team_sizes=[8],
-            msg_sizes_bytes=[1024],
-            alg_map={
-                "tl/ucp": {
-                    "allreduce": [AlgInfo(0, "knomial", "")],
-                    "alltoall":  [AlgInfo(0, "knomial", "")],
-                }
-            },
-            n_reps=3,
-            n_iter=100,
-            n_warmup=10,
-        )
-        # 2 collectives × 2 mem_types × 1 team_size = 4 cells
-        self.assertEqual(mock_sweep.call_count, 4)
-        self.assertEqual(len(results), 4)
-
-
-# ---------------------------------------------------------------------------
-# Fingerprint parsing (mock subprocess)
-# ---------------------------------------------------------------------------
-
-class TestFingerprintParsing(unittest.TestCase):
-    def test_ucc_version_parsed(self):
-        out = "# UCC version=1.4.0 revision abcdef1234\n# Configured with: ...\n"
-        with patch("ucc_tune_fingerprint._run", return_value=out):
-            ver = _ucc_version("ucc_info")
-        self.assertEqual(ver, "1.4.0")
-
-    def test_ucc_version_unknown_on_bad_output(self):
-        with patch("ucc_tune_fingerprint._run", return_value="garbage"):
-            ver = _ucc_version("ucc_info")
-        self.assertEqual(ver, "unknown")
-
-    def test_ucx_version_parsed(self):
-        out = "# UCX version=1.17.0 (Release)\n"
-        with patch("ucc_tune_fingerprint._run", return_value=out):
-            ver = _ucx_version("ucx_info")
-        self.assertEqual(ver, "1.17.0")
-
-    def test_ucx_version_parsed_library_version_spelling(self):
-        # Byte-for-byte from `ucx_info -v`, UCX 1.18.0 on gaia (dgx-gaia-45).
-        # This spelling used to fall through to "unknown".
-        out = ("# Library version: 1.18.0\n"
-               "# Library path: /lib/libucs.so.0\n"
-               "# API headers version: 1.18.0\n"
-               "# Git branch '', revision 152bf42\n")
-        with patch("ucc_tune_fingerprint._run", return_value=out):
-            ver = _ucx_version("ucx_info")
-        self.assertEqual(ver, "1.18.0")
-
-    def test_ucx_version_unknown_on_bad_output(self):
-        with patch("ucc_tune_fingerprint._run", return_value="garbage"):
-            ver = _ucx_version("ucx_info")
-        self.assertEqual(ver, "unknown")
-
-
-# ---------------------------------------------------------------------------
-# write_summary
-# ---------------------------------------------------------------------------
-
-class TestWriteSummary(unittest.TestCase):
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-
-    def test_summary_file_created(self):
-        r = _make_sweep_result(tune_ranges=[_tr(0, None)])
-        path = write_summary(
-            Path(self.tmpdir), [r], [], _fp(), []
-        )
-        self.assertTrue(path.exists())
-
-    def test_summary_contains_collective(self):
-        r = _make_sweep_result(collective="allreduce", tune_ranges=[_tr(0, None)])
-        path = write_summary(Path(self.tmpdir), [r], [], _fp(), [])
-        content = path.read_text()
-        self.assertIn("allreduce", content)
-
-    def test_summary_flags_cell_with_no_measurements(self):
-        # Regression (hpcac-internal job 10464): a UCX transport fault made
-        # every perftest launch abort, so no size was ever measured — yet the
-        # summary reported "UCC default is within margin", which reads as a
-        # successful tuning run that found nothing to change.
-        r = _make_sweep_result(
-            tune_ranges=[], size_decisions=[],
-            warnings=["All algorithms failed at 1k — size skipped"],
-        )
-        content = write_summary(Path(self.tmpdir), [r], [], _fp(), []).read_text()
-        self.assertIn("NO MEASUREMENTS", content)
-        self.assertNotIn("within margin", content)
-        self.assertIn("All algorithms failed at 1k", content)
-
-    def test_summary_within_margin_needs_a_measurement(self):
-        # The benign message is still emitted when sizes *were* measured and
-        # the default simply won.
-        r = _make_sweep_result(
-            tune_ranges=[],
-            size_decisions=[
-                SizeDecision(65536, False, "knomial", 0, 10.0, 10.1, 0.01, {})
-            ],
-        )
-        content = write_summary(Path(self.tmpdir), [r], [], _fp(), []).read_text()
-        self.assertIn("within margin", content)
-        self.assertNotIn("NO MEASUREMENTS", content)
-
-    def test_summary_records_skipped(self):
-        path = write_summary(Path(self.tmpdir), [], [], _fp(),
-                             ["tl/ucp/allreduce: no algorithms found"])
-        content = path.read_text()
-        self.assertIn("no algorithms found", content)
-
-    def test_summary_validation_pass(self):
-        vp = ValidationPoint(
-            collective="allreduce", mem_type="host",
-            size_bytes=65536, tuned_median_us=8.0, default_median_us=10.0,
-            speedup=0.20, passed=True,
-        )
-        path = write_summary(Path(self.tmpdir), [], [vp], _fp(), [])
-        content = path.read_text()
-        self.assertIn("PASS", content)
-        self.assertIn("20.0%", content)
-
-    def test_summary_correctness_warning_always_present(self):
-        path = write_summary(
-            Path(self.tmpdir), [],
-            [ValidationPoint("ar", "host", 4096, 8.0, 10.0, 0.2, True)],
-            _fp(), []
-        )
-        content = path.read_text()
-        self.assertIn("Correctness was NOT validated", content)
-
-
-# ---------------------------------------------------------------------------
-# Task 2 — Knob scoping for multi-team-size runs
-# ---------------------------------------------------------------------------
-
-class TestKnobScoping(unittest.TestCase):
-    def _sr(self, team_size=8, knobs=None):
-        return _make_sweep_result(
-            team_size=team_size,
-            tune_ranges=[_tr(0, None, knobs=knobs or {})],
-        )
-
-    def test_single_team_size_conflict_emitted(self):
-        r = _make_sweep_result(tune_ranges=[
-            _tr(0,     65536, knobs={"K": "2"}),
-            _tr(65536, None,  knobs={"K": "4"}),
-        ])
-        knob_env, warnings = _collect_knob_overrides([r])
-        self.assertEqual(knob_env["K"], "4")
-
-    def test_two_team_sizes_same_value_emitted(self):
-        results = [
-            self._sr(team_size=8, knobs={"K": "4"}),
-            self._sr(team_size=64, knobs={"K": "4"}),
+    def test_trim_isolated_by_complete_cell_identity_in_both_rounds(self):
+        variants = [
+            sweep_result(component="tl/ucp", team=8,
+                         ranges=[tune_range(4096, 8192)]),
+            sweep_result(component="tl/nccl", team=8,
+                         ranges=[tune_range(4096, 8192)]),
+            sweep_result(component="tl/ucp", team=64,
+                         ranges=[tune_range(4096, 8192)]),
         ]
-        knob_env, warnings = _collect_knob_overrides(results)
-        self.assertEqual(knob_env["K"], "4")
-
-    def test_two_team_sizes_divergent_omitted(self):
-        results = [
-            self._sr(team_size=8, knobs={"K": "2"}),
-            self._sr(team_size=64, knobs={"K": "4"}),
+        points = [
+            ValidationPoint("allreduce", "host", size, 8, 10, .2, passed,
+                            component=component, team_size=team,
+                            requested_team_size=team, executed_team_size=team)
+            for component, team, size, passed in (
+                ("tl/ucp", 8, 4096, True), ("tl/ucp", 8, 8192, False),
+                ("tl/nccl", 8, 4096, True), ("tl/nccl", 8, 8192, True),
+                ("tl/ucp", 64, 4096, True), ("tl/ucp", 64, 8192, True),
+            )
         ]
-        knob_env, warnings = _collect_knob_overrides(results)
-        self.assertNotIn("K", knob_env)
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("divergent", warnings[0].lower())
+        trim_failed_ranges(variants, points, 1)
+        self.assertEqual([(r.tune_ranges[0].start_bytes,
+                           r.tune_ranges[0].end_bytes) for r in variants],
+                         [(4096, 4096), (4096, 8192), (4096, 8192)])
+
+        variants[0].tune_ranges = [tune_range(4096, 8192)]
+        trim_failed_ranges(variants, points, 2)
+        self.assertEqual(variants[0].tune_ranges, [])
+        self.assertTrue(all(r.tune_ranges for r in variants[1:]))
+
+    def test_trim_isolated_by_datatype_and_reduction_operation(self):
+        variants = [
+            sweep_result(datatype="float32", reduction_op="sum",
+                         ranges=[tune_range(4096, 8192)]),
+            sweep_result(datatype="float64", reduction_op="sum",
+                         ranges=[tune_range(4096, 8192)]),
+            sweep_result(datatype="float32", reduction_op="max",
+                         ranges=[tune_range(4096, 8192)]),
+        ]
+        points = []
+        for result in variants:
+            spec = result.spec
+            fail = spec.datatype == "float32" and spec.reduction_op == "sum"
+            for size in (4096, 8192):
+                points.append(ValidationPoint(
+                    "allreduce", "host", size, 8, 10, .2, not fail,
+                    component="tl/ucp", team_size=8, requested_team_size=8,
+                    executed_team_size=8, datatype=spec.datatype,
+                    reduction_op=spec.reduction_op))
+        trim_failed_ranges(variants, points, 1)
+        self.assertEqual(variants[0].tune_ranges, [])
+        self.assertTrue(all(r.tune_ranges for r in variants[1:]))
+
+    def test_coverage_ignores_opposing_outcome_from_other_cell(self):
+        result = sweep_result(ranges=[tune_range(4096, 4096)], sizes=[4096])
+        own = ValidationPoint(
+            "allreduce", "host", 4096, 8, 10, .2, True,
+            component="tl/ucp", requested_team_size=8, executed_team_size=8)
+        foreign = ValidationPoint(
+            "allreduce", "host", 4096, 11, 10, -.1, False,
+            component="tl/nccl", requested_team_size=8, executed_team_size=8)
+        self.assertTrue(_validation_covers_results([result], [own, foreign]))
+
+    @patch("ucc_offline_tune.measure_paired", return_value=paired(.8))
+    def test_outside_performance_difference_fails(self, _measure):
+        result = sweep_result(ranges=[tune_range()], sizes=[4092, 4096, 4100, 4104])
+        points = validate([result], _collect_tune_tokens([result]), {})
+        self.assertTrue(any(not point.inside and not point.passed for point in points))
+
+    @patch("ucc_offline_tune.validate")
+    def test_validation_regeneration_is_bounded(self, validate_mock):
+        result = sweep_result(ranges=[tune_range(4096, 8192)], sizes=[4096, 8192])
+        validate_mock.side_effect = [
+            [ValidationPoint("allreduce", "host", 4096, 8, 10, .2, True,
+                             component="tl/ucp", requested_team_size=8,
+                             executed_team_size=8),
+             ValidationPoint("allreduce", "host", 8192, 11, 10, -.1, False,
+                             component="tl/ucp", requested_team_size=8,
+                             executed_team_size=8)],
+            [ValidationPoint("allreduce", "host", 4096, 11, 10, -.1, False,
+                             component="tl/ucp", requested_team_size=8,
+                             executed_team_size=8)],
+        ]
+        validate_with_trimming([result])
+        self.assertLessEqual(validate_mock.call_count, 3)
+        self.assertEqual(result.tune_ranges, [])
 
 
-# ---------------------------------------------------------------------------
-# Task 3 — Skip asymmetric collectives
-# ---------------------------------------------------------------------------
+class TestEmission(unittest.TestCase):
+    def test_default_output_is_clearly_provisional(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = emit_conf(Path(directory),
+                              [sweep_result(ranges=[tune_range()])], fingerprint())
+            self.assertEqual(paths["conf"].name, "ucc_tuned_provisional.conf")
+            self.assertIn("not-for-deployment", paths["conf"].read_text())
+            payload = json.loads(paths["results"].read_text())
+            self.assertEqual(payload["status"], "provisional-not-for-deployment")
 
-class TestAsymmetricSkip(unittest.TestCase):
-    @patch("ucc_offline_tune.sweep_cell")
-    def test_asymmetric_skipped_by_default(self, mock_sweep):
-        results, skipped = run_tuning(
-            component_collective_pairs=[("tl/ucp", "alltoallv")],
-            mem_types=["host"],
-            team_sizes=[8],
-            msg_sizes_bytes=[1024],
-            alg_map={"tl/ucp": {"alltoallv": [AlgInfo(0, "knomial", "")]}},
-            n_reps=3, n_iter=100, n_warmup=10,
-        )
-        self.assertEqual(results, [])
-        self.assertEqual(len(skipped), 1)
-        self.assertIn("skipped asymmetric", skipped[0].lower())
-        mock_sweep.assert_not_called()
-
-    @patch("ucc_offline_tune.sweep_cell")
-    def test_force_asymmetric_includes(self, mock_sweep):
-        mock_sweep.return_value = _make_sweep_result()
-        results, skipped = run_tuning(
-            component_collective_pairs=[("tl/ucp", "alltoallv")],
-            mem_types=["host"],
-            team_sizes=[8],
-            msg_sizes_bytes=[1024],
-            skip_asymmetric=False,
-            alg_map={"tl/ucp": {"alltoallv": [AlgInfo(0, "knomial", "")]}},
-            n_reps=3, n_iter=100, n_warmup=10,
-        )
-        self.assertEqual(len(results), 1)
-        mock_sweep.assert_called_once()
-
-    @patch("ucc_offline_tune.sweep_cell")
-    def test_symmetric_always_included(self, mock_sweep):
-        mock_sweep.return_value = _make_sweep_result()
-        for coll in ("allreduce", "alltoall"):
-            results, skipped = run_tuning(
-                component_collective_pairs=[("tl/ucp", coll)],
-                mem_types=["host"],
-                team_sizes=[8],
-                msg_sizes_bytes=[1024],
-                alg_map={"tl/ucp": {coll: [AlgInfo(0, "knomial", "")]}},
-                n_reps=3, n_iter=100, n_warmup=10,
+    def test_accepted_requires_correctness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ValueError):
+                emit_conf(Path(directory), [], fingerprint(), accepted=True)
+            result = sweep_result(ranges=[tune_range(4096, 4096)], sizes=[4096])
+            paths = emit_conf(
+                Path(directory), [result], fingerprint(), accepted=True,
+                correctness={"default_complete": True, "tuned_complete": True,
+                             "default_failures": [], "new_tuned_failures": []},
+                validation_points=[ValidationPoint("allreduce", "host", 4096,
+                                                   8, 10, .2, True,
+                                                   component="tl/ucp", team_size=8,
+                                                   requested_team_size=8,
+                                                   executed_team_size=8)],
             )
-            self.assertEqual(len(results), 1, f"{coll} should be included")
+            self.assertEqual(paths["conf"].name, "ucc_tuned.conf")
+            payload = json.loads(paths["results"].read_text())
+            self.assertEqual(payload["validation"][0]["cell_key"]["datatype"],
+                             "float32")
+
+    def test_json_is_deterministic_and_inclusive(self):
+        result = sweep_result(ranges=[tune_range()])
+        first = json.dumps(_results_to_json([result]), sort_keys=True)
+        second = json.dumps(_results_to_json([result]), sort_keys=True)
+        self.assertEqual(first, second)
+        self.assertTrue(_results_to_json([result])[0]["tune_ranges"][0]["inclusive"])
+        self.assertEqual(_results_to_json([result])[0]["cell_key"], {
+            "component": "tl/ucp", "collective": "allreduce",
+            "mem_type": "host", "team_size": 8,
+            "datatype": "float32", "reduction_op": "sum",
+        })
 
 
-# ---------------------------------------------------------------------------
-# Task 4a — Empty alg_map raises RuntimeError
-# ---------------------------------------------------------------------------
+class TestCliSafety(unittest.TestCase):
+    def test_routine_defaults(self):
+        args = _build_arg_parser().parse_args([])
+        self.assertEqual((args.min_speedup, args.min_pairs, args.max_pairs),
+                         (.05, 10, 20))
+        self.assertEqual((args.boundary_resolution_bytes,
+                          args.max_boundary_probes,
+                          args.max_confirmation_points), (1024, 4, 40))
+        self.assertEqual(args.team_sizes, "8")
+        self.assertEqual(args.launcher, "mpirun -np {team_size}")
 
-class TestEmptyAlgMap(unittest.TestCase):
-    def test_empty_alg_map_raises(self):
-        with self.assertRaises(RuntimeError) as ctx:
-            run_tuning(
-                component_collective_pairs=[("tl/ucp", "allreduce")],
-                mem_types=["host"],
-                team_sizes=[8],
-                msg_sizes_bytes=[1024],
-                alg_map={},
-            )
-        self.assertIn("empty algorithm map", str(ctx.exception))
+    def test_proof_mode_flag_exists_without_unsafe_flag(self):
+        parser = _build_arg_parser()
+        self.assertTrue(parser.parse_args(["--proof-mode"]).proof_mode)
+        self.assertNotIn("legacy", parser.format_help().lower())
+
+    @patch("ucc_offline_tune.collect_fingerprint")
+    def test_unsupported_launcher_fails_before_stage_zero(self, fingerprint):
+        from ucc_offline_tune import main
+        with self.assertRaises(SystemExit):
+            main(["--launcher", "jsrun -n 8"])
+        fingerprint.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# Task 4b — Deduplicated ucc_info call
-# ---------------------------------------------------------------------------
-
-class TestDedupUccInfo(unittest.TestCase):
-    @patch("ucc_offline_tune.run_ucc_info_raw")
+class TestCellLaunchers(unittest.TestCase):
     @patch("ucc_offline_tune.sweep_cell")
-    def test_precomputed_alg_map_skips_subprocess(self, mock_sweep, mock_raw):
-        mock_sweep.return_value = _make_sweep_result()
-        run_tuning(
-            component_collective_pairs=[("tl/ucp", "allreduce")],
-            mem_types=["host"],
-            team_sizes=[8],
-            msg_sizes_bytes=[1024],
-            alg_map={"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}},
-            n_reps=3, n_iter=100, n_warmup=10,
-        )
-        mock_raw.assert_not_called()
+    def test_two_team_sizes_get_distinct_bound_launchers(self, sweep):
+        sweep.side_effect = lambda spec: SweepResult(spec, [], [], [])
+        run_tuning([("tl/ucp", "allreduce")], ["host"], [8, 64], [4096],
+                   alg_map={"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}},
+                   mpi_launcher=["mpirun", "-np", "{team_size}"])
+        specs = [call.args[0] for call in sweep.call_args_list]
+        self.assertEqual([spec.mpi_launcher for spec in specs],
+                         [["mpirun", "-np", "8"], ["mpirun", "-np", "64"]])
+        self.assertEqual([spec.executed_team_size for spec in specs], [8, 64])
 
-
-# ---------------------------------------------------------------------------
-# Task 4c — Version note in generated config
-# ---------------------------------------------------------------------------
-
-class TestVersionNote(unittest.TestCase):
-    def test_conf_contains_version_note(self):
-        fp = _fp()
-        tokens = {"UCC_TL_UCP_TUNE": ["tok"]}
-        knobs = {}
-        lines = _build_conf_lines(tokens, knobs, fp)
-        joined = "\n".join(lines)
-        self.assertIn("UCC_INI_MAX_LINE", joined)
-        self.assertIn("8192", joined)
-
-    def test_sh_contains_version_note(self):
-        fp = _fp()
-        tokens = {"UCC_TL_UCP_TUNE": ["tok"]}
-        knobs = {}
-        lines = _build_sh_lines(tokens, knobs, fp)
-        joined = "\n".join(lines)
-        self.assertIn("UCC_INI_MAX_LINE", joined)
+    def test_serialized_requested_and_executed_team_size(self):
+        payload = _results_to_json([sweep_result()])[0]
+        self.assertEqual(payload["requested_team_size"], 8)
+        self.assertEqual(payload["executed_team_size"], 8)
 
 
 if __name__ == "__main__":

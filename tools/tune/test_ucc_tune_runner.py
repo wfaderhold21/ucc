@@ -11,8 +11,35 @@ from ucc_tune_runner import (
     _build_cmd,
     _parse_output,
     _tukey_clean,
+    bind_launcher_team_size,
     measure,
+    measure_paired,
 )
+
+
+class TestLauncherBinding(unittest.TestCase):
+    def test_mpirun_default_is_rebound_to_requested_eight(self):
+        self.assertEqual(bind_launcher_team_size(["mpirun", "-np", "1"], 8),
+                         (["mpirun", "-np", "8"], 8))
+
+    def test_srun_and_template(self):
+        self.assertEqual(
+            bind_launcher_team_size(["srun", "--ntasks={team_size}", "--exclusive"], 64),
+            (["srun", "--ntasks=64", "--exclusive"], 64))
+
+    def test_ambiguous_and_unsupported_fail_closed(self):
+        for launcher in (["mpirun", "-np", "8", "-n", "8"],
+                         ["jsrun", "-n", "8"], ["srun", "--exclusive"]):
+            with self.subTest(launcher=launcher), self.assertRaises(ValueError):
+                bind_launcher_team_size(launcher, 8)
+
+    @patch("ucc_tune_runner.subprocess.run")
+    def test_deliberate_requested_executed_mismatch_never_launches(self, run):
+        from ucc_tune_runner import _run_once
+        with self.assertRaisesRegex(RuntimeError, "team-size mismatch"):
+            _run_once(RunSpec("allreduce", requested_team_size=8,
+                              executed_team_size=4))
+        run.assert_not_called()
 
 
 class TestBuildCmd(unittest.TestCase):
@@ -213,6 +240,54 @@ class TestMeasure(unittest.TestCase):
         # Verify the spec that was used contains extra_env.
         called_spec = mock_run.call_args_list[0][0][0]
         self.assertEqual(called_spec.extra_env["UCC_TLS"], "ucp")
+
+
+class TestMeasurePaired(unittest.TestCase):
+    @staticmethod
+    def _sample(us, count=1024):
+        return SingleRunSample(count, count * 4, us, us, us)
+
+    @patch("ucc_tune_runner._run_once")
+    def test_balanced_orders_and_ten_complete_pairs(self, run_once):
+        run_once.side_effect = lambda spec: self._sample(
+            80 if spec.extra_env.get("ARM") == "A" else 100)
+        result = measure_paired(RunSpec("allreduce", extra_env={"ARM": "D"}),
+                                RunSpec("allreduce", extra_env={"ARM": "A"}), seed=7)
+        orders = {sample.pair_id: sample.order for sample in result.samples}
+        self.assertEqual(result.complete_pairs, 10)
+        self.assertLessEqual(abs(list(orders.values()).count("AB")
+                                 - list(orders.values()).count("BA")), 1)
+        self.assertEqual(result.evidence.decision.value, "WIN")
+
+    @patch("ucc_tune_runner._run_once")
+    def test_failure_is_retained_and_falls_back(self, run_once):
+        run_once.side_effect = [None, self._sample(80)] + [self._sample(100), self._sample(80)] * 13
+        result = measure_paired(RunSpec("allreduce"), RunSpec("allreduce"))
+        self.assertTrue(any(not sample.ok for sample in result.samples))
+        self.assertEqual(result.evidence.decision.value, "DEFAULT")
+        self.assertLessEqual(result.attempts, 14)
+
+    @patch("ucc_tune_runner._run_once")
+    def test_high_variance_uses_bounded_second_batch(self, run_once):
+        calls = {"D": 0, "A": 0}
+        def next_sample(spec):
+            arm = spec.extra_env["ARM"]
+            pair = calls[arm]
+            calls[arm] += 1
+            default = 50 if pair % 2 == 0 else 150
+            return self._sample(default if arm == "D" else default * .8)
+        run_once.side_effect = next_sample
+        result = measure_paired(RunSpec("allreduce", extra_env={"ARM": "D"}),
+                                RunSpec("allreduce", extra_env={"ARM": "A"}))
+        self.assertEqual(result.complete_pairs, 20)
+        self.assertLessEqual(result.attempts, 28)
+        self.assertEqual(result.evidence.decision.value, "DEFAULT")
+
+    def test_unsafe_limits_rejected(self):
+        with self.assertRaises(ValueError):
+            measure_paired(RunSpec("allreduce"), RunSpec("allreduce"), min_pairs=9)
+        with self.assertRaises(ValueError):
+            measure_paired(RunSpec("allreduce"), RunSpec("allreduce"), max_pairs=21)
 
 
 if __name__ == "__main__":

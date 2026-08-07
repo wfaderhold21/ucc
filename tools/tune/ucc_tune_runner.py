@@ -18,13 +18,65 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import os
+import random
 import re
 import statistics
 import subprocess
 from typing import Optional
 
+from ucc_tune_stats import ArmSample, PairedEvidence, classify_evidence
+
 logger = logging.getLogger(__name__)
+
+_MPI_LAUNCHERS = frozenset({"mpirun", "mpiexec"})
+_SRUN_LAUNCHERS = frozenset({"srun"})
+
+
+def bind_launcher_team_size(launcher: list, team_size: int) -> tuple[list, int]:
+    """Return a launcher bound to exactly ``team_size`` ranks, or fail closed."""
+    if team_size <= 0 or not launcher:
+        raise ValueError("team size and launcher must be non-empty and positive")
+    kind = os.path.basename(launcher[0])
+    if kind in _MPI_LAUNCHERS:
+        separate, joined = {"-np", "-n"}, ("--np=", "--n=")
+    elif kind in _SRUN_LAUNCHERS:
+        separate, joined = {"-n", "--ntasks"}, ("--ntasks=",)
+    else:
+        raise ValueError(
+            f"unsupported launcher {launcher[0]!r}; use mpirun/mpiexec or srun "
+            "with one explicit rank-count option")
+    matches: list[tuple[int, Optional[str]]] = []
+    i = 1
+    while i < len(launcher):
+        token = launcher[i]
+        if token in separate:
+            if i + 1 >= len(launcher):
+                raise ValueError(f"launcher rank option {token!r} has no value")
+            matches.append((i + 1, None))
+            i += 2
+            continue
+        prefix = next((p for p in joined if token.startswith(p)), None)
+        if prefix is not None:
+            matches.append((i, prefix))
+        i += 1
+    if len(matches) != 1:
+        raise ValueError(
+            "launcher must contain exactly one unambiguous rank-count option "
+            "(-np/-n for mpirun, -n/--ntasks for srun)")
+    index, prefix = matches[0]
+    raw = launcher[index][len(prefix):] if prefix else launcher[index]
+    if raw != "{team_size}":
+        try:
+            int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"launcher rank count {raw!r} is neither an integer nor "
+                "{team_size}") from exc
+    bound = list(launcher)
+    bound[index] = f"{prefix or ''}{team_size}"
+    return bound, team_size
 
 # ---------------------------------------------------------------------------
 # String maps matching perftest's CLI values exactly (ucc_pt_config.cc)
@@ -95,6 +147,8 @@ class RunSpec:
     mpi_launcher: list = dataclasses.field(
         default_factory=lambda: ["mpirun", "-np", "1"]
     )
+    requested_team_size: Optional[int] = None
+    executed_team_size: Optional[int] = None
 
     perftest_path: str = "ucc_perftest"
     timeout_s: int = 120            # per-rep wall-clock timeout
@@ -133,6 +187,16 @@ class RunResult:
     failed_count: int           # reps that failed to run or parse
 
     variance_warning: bool      # True if cv > spec.cv_warn_threshold
+
+
+@dataclasses.dataclass(frozen=True)
+class PairedRunResult:
+    """Bounded paired collection, including failed arms and its verdict."""
+    samples: tuple[ArmSample, ...]
+    complete_pairs: int
+    attempts: int
+    seed: int
+    evidence: PairedEvidence
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +276,11 @@ def _build_cmd(spec: RunSpec) -> list:
 
 def _run_once(spec: RunSpec) -> Optional[SingleRunSample]:
     """Run perftest once and return the parsed timing sample, or None on failure."""
+    if (spec.requested_team_size is not None
+            and spec.requested_team_size != spec.executed_team_size):
+        raise RuntimeError(
+            f"team-size mismatch before launch: requested "
+            f"{spec.requested_team_size}, bound {spec.executed_team_size}")
     env = os.environ.copy()
     env.update(spec.extra_env)
 
@@ -345,6 +414,109 @@ def measure(spec: RunSpec) -> RunResult:
         )
 
     return result
+
+
+def _balanced_orders(seed: int, count: int) -> list[str]:
+    """Return a reproducible order sequence whose strata differ by at most one."""
+    rng = random.Random(seed)
+    orders: list[str] = []
+    while len(orders) < count:
+        block = ["AB", "BA"]
+        rng.shuffle(block)
+        orders.extend(block)
+    return orders[:count]
+
+
+def measure_paired(
+    default_spec: RunSpec,
+    candidate_spec: RunSpec,
+    *,
+    seed: int = 0,
+    min_pairs: int = 10,
+    max_pairs: int = 20,
+    first_batch_attempts: int = 14,
+    max_attempts: int = 28,
+    min_speedup: float = 0.05,
+    cv_threshold: float = 0.10,
+    log_iqr_threshold: float = 0.10,
+    default_arm: str = "D",
+    candidate_arm: str = "A",
+) -> PairedRunResult:
+    """Collect fresh balanced AB/BA pairs without deleting outliers.
+
+    ``AB`` means default then candidate and ``BA`` means candidate then default.
+    The first batch stops after ``min_pairs`` complete pairs or 14 attempts.  A
+    noisy first batch is extended, without inspecting its effect verdict, to
+    the bounded 20-complete-pair/28-attempt ceiling.
+    """
+    if min_pairs < 10:
+        raise ValueError("min_pairs below the safe minimum of 10")
+    if max_pairs < min_pairs or max_pairs > 20:
+        raise ValueError("max_pairs must be between min_pairs and 20")
+    if first_batch_attempts < min_pairs or first_batch_attempts > max_attempts:
+        raise ValueError("invalid first-batch attempt limit")
+    if max_attempts > 28:
+        raise ValueError("max_attempts exceeds the safe ceiling of 28")
+
+    orders = _balanced_orders(seed, max_attempts)
+    samples: list[ArmSample] = []
+    complete = 0
+    attempts = 0
+    extend_for_variance = False
+
+    def collect_arm(pair_id: int, order: str, arm: str, spec: RunSpec) -> ArmSample:
+        sample = _run_once(spec)
+        if sample is None:
+            return ArmSample(pair_id, order, arm, None, False,
+                             "measurement failed", seed)
+        expected_count = 0 if spec.collective in _SIZELESS_COLLECTIVES else spec.count
+        if sample.count != expected_count:
+            return ArmSample(pair_id, order, arm, sample.avg_us, False,
+                             "wrong element count", seed, sample.size_bytes)
+        if not math.isfinite(sample.avg_us) or sample.avg_us <= 0:
+            return ArmSample(pair_id, order, arm, sample.avg_us, False,
+                             "non-positive timing", seed, sample.size_bytes)
+        return ArmSample(pair_id, order, arm, sample.avg_us, True, None,
+                         seed, sample.size_bytes)
+
+    while attempts < max_attempts and complete < max_pairs:
+        if attempts >= first_batch_attempts and complete < min_pairs:
+            break
+        if complete >= min_pairs and not extend_for_variance:
+            break
+        order = orders[attempts]
+        pair_id = attempts
+        arm_specs = ((default_arm, default_spec), (candidate_arm, candidate_spec))
+        if order == "BA":
+            arm_specs = tuple(reversed(arm_specs))
+        pair_samples = [collect_arm(pair_id, order, arm, arm_spec)
+                        for arm, arm_spec in arm_specs]
+        samples.extend(pair_samples)
+        attempts += 1
+        if all(sample.ok for sample in pair_samples):
+            complete += 1
+
+        if complete == min_pairs:
+            provisional = classify_evidence(
+                samples, min_pairs=min_pairs, min_speedup=min_speedup,
+                cv_threshold=cv_threshold, require_stable_variance=False,
+                log_iqr_threshold=log_iqr_threshold,
+                default_arm=default_arm, candidate_arm=candidate_arm,
+            )
+            extend_for_variance = bool(
+                provisional.cv_default is not None
+                and (provisional.cv_default > cv_threshold
+                     or provisional.cv_candidate > cv_threshold
+                     or provisional.log_ratio_iqr > log_iqr_threshold)
+            )
+
+    evidence = classify_evidence(
+        samples, min_pairs=min_pairs, min_speedup=min_speedup,
+        cv_threshold=cv_threshold, require_stable_variance=True,
+        log_iqr_threshold=log_iqr_threshold,
+        default_arm=default_arm, candidate_arm=candidate_arm,
+    )
+    return PairedRunResult(tuple(samples), complete, attempts, seed, evidence)
 
 
 # ---------------------------------------------------------------------------
