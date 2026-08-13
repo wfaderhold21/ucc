@@ -160,13 +160,10 @@ ucc_status_t ucc_tl_ucp_allreduce_sra_knomial_start(ucc_coll_task_t *task)
     return ucc_schedule_pipelined_post(task);
 }
 
-static void
-ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
-                                                     ucc_coll_args_t *args,
-                                                     ucc_pipeline_params_t *pp)
+void ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params(
+    const ucc_pipeline_params_t *configured, const ucc_coll_args_t *args,
+    size_t topo_nnodes, ucc_pipeline_params_t *pp)
 {
-    ucc_tl_ucp_lib_config_t *cfg = &team->cfg;
-
     if (args->mask & UCC_COLL_ARGS_FIELD_TAG) {
         /* User-tagged (ordered) collective: every internal RS/AG task inherits
          * the caller's single tag (see ucc_tl_ucp_init_task), instead of the
@@ -184,8 +181,8 @@ ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
         return;
     }
 
-    if (!ucc_pipeline_params_is_auto(&cfg->allreduce_sra_kn_pipeline)) {
-        *pp = cfg->allreduce_sra_kn_pipeline;
+    if (!ucc_pipeline_params_is_auto(configured)) {
+        *pp = *configured;
         return;
     }
 
@@ -204,12 +201,18 @@ ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
          * active buffer and is commonly UCC_MEMORY_TYPE_UNKNOWN, while dst is
          * always the authoritative type (see CHECK_SAME_MEMTYPE, which only
          * ties src==dst for out-of-place). */
-        /* Multi-node guard: on a cross-node IB fabric the pipeline's concurrent
-         * fragments compete for NIC bandwidth; the fragmentation overhead
-         * outweighs the RS-AG overlap gain. Measured -15% to -59% at 8-112 PPN
-         * on gaia 4-node (DC transport, 1-16 MB). Disable auto-pipelining for
-         * multi-node; override explicitly with UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE. */
-        if (team->topo && ucc_topo_nnodes(team->topo) > 1) {
+        /* Multi-node guard (fail-closed): on a cross-node IB fabric the
+         * pipeline's concurrent fragments compete for NIC bandwidth; the
+         * fragmentation overhead outweighs the RS-AG overlap gain. Measured
+         * -15% to -59% at 8-112 PPN on gaia 4-node (DC transport, 1-16 MB).
+         *
+         * REQUIREMENT: automatic pipelining MUST require positive confirmation
+         * that the team is single-node. Missing topology (NULL) and known
+         * multi-node both select the monolithic path. User override via
+         * UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE can enable pipelining regardless
+         * of topology state. */
+        if (topo_nnodes != 1) {
+            /* Missing topo OR known multi-node: fail-closed -> monolithic */
             pp->threshold = SIZE_MAX;
             pp->n_frags   = 0;
             pp->frag_size = 0;
@@ -247,6 +250,17 @@ ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
     }
 }
 
+static void
+ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
+                                                     ucc_coll_args_t *args,
+                                                     ucc_pipeline_params_t *pp)
+{
+    size_t topo_nnodes = team->topo ? ucc_topo_nnodes(team->topo) : 0;
+
+    ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params(
+        &team->cfg.allreduce_sra_kn_pipeline, args, topo_nnodes, pp);
+}
+
 ucc_status_t
 ucc_tl_ucp_allreduce_sra_knomial_init(ucc_base_coll_args_t *coll_args,
                                       ucc_base_team_t *team,
@@ -273,8 +287,13 @@ ucc_tl_ucp_allreduce_sra_knomial_init(ucc_base_coll_args_t *coll_args,
                      bargs.max_frag_count: args->dst.info.count;
     ucc_tl_ucp_allreduce_sra_knomial_get_pipeline_params(tl_team, args,
                                                          &pipeline_params);
-    ucc_pipeline_nfrags_pdepth(&pipeline_params, max_frag_count * dt_size,
-                               &n_frags, &pipeline_depth);
+    st = ucc_pipeline_nfrags_pdepth(&pipeline_params, max_frag_count * dt_size,
+                                    &n_frags, &pipeline_depth);
+    if (ucc_unlikely(st != UCC_OK)) {
+        tl_error(team->context->lib, "invalid pipeline parameters for allreduce SRA");
+        ucc_tl_ucp_put_schedule(&schedule_p->super);
+        return st;
+    }
     if (n_frags > 1) {
         bargs.mask           |= UCC_BASE_CARGS_MAX_FRAG_COUNT;
         bargs.max_frag_count = ucc_buffer_block_count(max_frag_count, n_frags, 0);

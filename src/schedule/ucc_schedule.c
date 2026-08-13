@@ -41,11 +41,29 @@ static ucc_status_t ucc_event_manager_init(ucc_coll_task_t *task)
     return UCC_OK;
 }
 
+/* Test binaries may interpose this weak symbol to inject a failure at an exact
+ * subscription attempt. Production builds always take the zero-cost success
+ * path below. */
+static ucc_status_t (*ucc_event_manager_subscribe_fault_cb)(void);
+
+void ucc_event_manager_set_subscribe_fault_cb(ucc_status_t (*cb)(void))
+{
+    ucc_event_manager_subscribe_fault_cb = cb;
+}
+
 ucc_status_t ucc_event_manager_subscribe(ucc_coll_task_t *parent_task,
                                          ucc_event_t event, ucc_coll_task_t *task,
                                          ucc_task_event_handler_p handler)
 {
     ucc_event_manager_t *em;
+    ucc_status_t         status;
+
+    if (ucc_unlikely(ucc_event_manager_subscribe_fault_cb != NULL)) {
+        status = ucc_event_manager_subscribe_fault_cb();
+        if (ucc_unlikely(status != UCC_OK)) {
+            return status;
+        }
+    }
 
     ucc_list_for_each(em, &parent_task->em_list, list_elem) {
         if (em->n_listeners < MAX_LISTENERS) {
@@ -104,7 +122,16 @@ void ucc_dummy_progress(ucc_coll_task_t *task)
 ucc_status_t ucc_coll_task_init(ucc_coll_task_t *task,
                                 ucc_base_coll_args_t *bargs,
                                 ucc_base_team_t *team)
+    /* em_list must be initialized before ucc_event_manager_init below.
+     * Only initialize if the list head looks uninitialized (not already
+     * pointing to itself). This preserves any EM nodes from previous
+     * usage on pooled-task reuse, avoiding the leak where calling
+     * ucc_coll_task_construct here would reset the list head and
+     * orphan those nodes. */
 {
+    if (task->em_list.prev == NULL) {
+        ucc_list_head_init(&task->em_list);
+    }
     task->flags                = 0;
     task->ee                   = NULL;
     task->team                 = team;

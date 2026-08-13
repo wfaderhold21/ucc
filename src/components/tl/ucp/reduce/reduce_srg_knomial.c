@@ -325,8 +325,12 @@ ucc_status_t ucc_tl_ucp_reduce_srg_knomial_init(ucc_base_coll_args_t *coll_args,
                       bargs.max_frag_count: count;
     ucc_tl_ucp_reduce_srg_knomial_get_pipeline_params(tl_team, mt,
                                                       &pipeline_params);
-    ucc_pipeline_nfrags_pdepth(&pipeline_params, max_frag_count * dt_size,
-                               &n_frags, &pipeline_depth);
+    st = ucc_pipeline_nfrags_pdepth(&pipeline_params, max_frag_count * dt_size,
+                                    &n_frags, &pipeline_depth);
+    if (ucc_unlikely(st != UCC_OK)) {
+        tl_error(team->context->lib, "invalid pipeline parameters for reduce SRG");
+        goto err_free_schedule;
+    }
     bargs.max_frag_count = ucc_buffer_block_count(max_frag_count, n_frags, 0);
     if (n_frags > 1) {
         bargs.mask           |= UCC_BASE_CARGS_MAX_FRAG_COUNT;
