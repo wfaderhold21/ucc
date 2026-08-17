@@ -7,7 +7,10 @@
 # $HEADER$
 #
 
-bin_PROGRAMS = ucc_test_mpi
+bin_PROGRAMS = ucc_test_mpi ucc_test_lifetime
+
+ucc_test_lifetime_SOURCES = \
+	test_lifetime.cc
 
 ucc_test_mpi_SOURCES = \
 	test_mpi.cc             \
@@ -30,6 +33,24 @@ ucc_test_mpi_SOURCES = \
 	test_scatter.cc         \
 	test_scatterv.cc        \
 	test_mem_map.cc
+ucc_test_lifetime_CPPFLAGS = $(BASE_CPPFLAGS)
+ucc_test_lifetime_CXXFLAGS = $(BASE_CXXFLAGS) -std=gnu++11
+ucc_test_lifetime_LDFLAGS = -Wl,--rpath-link=${UCS_LIBDIR}
+ucc_test_lifetime_LDADD = $(UCC_TOP_BUILDDIR)/src/libucc.la
+
+if HAVE_CUDA
+ucc_test_lifetime_CPPFLAGS += $(CUDA_CPPFLAGS)
+ucc_test_lifetime_LDFLAGS += $(CUDA_LDFLAGS)
+ucc_test_lifetime_LDADD += $(CUDA_LIBS)
+endif
+
+if HAVE_ROCM
+ucc_test_lifetime_CPPFLAGS += $(HIP_CPPFLAGS)
+ucc_test_lifetime_CXXFLAGS += $(HIP_CXXFLAGS)
+ucc_test_lifetime_LDFLAGS += $(HIP_LDFLAGS)
+ucc_test_lifetime_LDADD += $(HIP_LIBS)
+endif
+
 
 CXX=$(MPICXX)
 LD=$(MPICXX)
