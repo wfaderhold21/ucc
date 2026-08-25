@@ -23,8 +23,8 @@ void test_mem_map::SetUp()
 
     ctx_params.mask = UCC_CONTEXT_PARAM_FIELD_TYPE;
     ctx_params.type = UCC_CONTEXT_EXCLUSIVE;
-    EXPECT_EQ(UCC_OK, ucc_context_create(lib_h, &ctx_params, ctx_config,
-                                         &ctx_h));
+    EXPECT_EQ(
+        UCC_OK, ucc_context_create(lib_h, &ctx_params, ctx_config, &ctx_h));
 }
 
 void test_mem_map::TearDown()
@@ -38,7 +38,8 @@ void test_mem_map::TearDown()
     test_context_config::TearDown();
 }
 
-test_mem_map_export::test_mem_map_export() : test_buffer(nullptr), buffer_size(0)
+test_mem_map_export::test_mem_map_export()
+    : test_buffer(nullptr), buffer_size(0)
 {
     memset(&map_params, 0, sizeof(map_params));
     memset(&segment, 0, sizeof(segment));
@@ -61,8 +62,8 @@ void test_mem_map_export::SetUp()
     memset(test_buffer, 0xAA, buffer_size);
 
     /* Set up memory map parameters */
-    segment.address = test_buffer;
-    segment.len     = buffer_size;
+    segment.address       = test_buffer;
+    segment.len           = buffer_size;
 
     map_params.segments   = &segment;
     map_params.n_segments = 1;
@@ -111,11 +112,13 @@ void test_mem_map_import::TearDown()
 /* Test basic memory map export functionality */
 UCC_TEST_F(test_mem_map_export, basic_export)
 {
-    ucc_mem_map_mem_h memh = nullptr;
+    ucc_mem_map_mem_h memh      = nullptr;
     size_t            memh_size = 0;
 
-    EXPECT_EQ(UCC_OK, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                   &map_params, &memh_size, &memh));
+    EXPECT_EQ(
+        UCC_OK,
+        ucc_mem_map(
+            ctx_h, UCC_MEM_MAP_MODE_EXPORT, &map_params, &memh_size, &memh));
     EXPECT_NE(nullptr, memh);
     EXPECT_GT(memh_size, 0);
 
@@ -126,11 +129,13 @@ UCC_TEST_F(test_mem_map_export, basic_export)
 
 UCC_TEST_F(test_mem_map_export, context_refuses_live_mapping_then_retries)
 {
-    ucc_mem_map_mem_h memh = nullptr;
+    ucc_mem_map_mem_h memh      = nullptr;
     size_t            memh_size = 0;
 
-    ASSERT_EQ(UCC_OK, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                  &map_params, &memh_size, &memh));
+    ASSERT_EQ(
+        UCC_OK,
+        ucc_mem_map(
+            ctx_h, UCC_MEM_MAP_MODE_EXPORT, &map_params, &memh_size, &memh));
     if (memh == nullptr) {
         GTEST_SKIP() << "No enabled TL produced a memory-map handle";
     }
@@ -156,14 +161,20 @@ UCC_TEST_F(test_mem_map_export, different_sizes)
         ASSERT_NE(nullptr, test_buffer);
         memset(test_buffer, 0xCC, size);
 
-        segment.address = test_buffer;
-        segment.len     = size;
+        segment.address             = test_buffer;
+        segment.len                 = size;
 
-        ucc_mem_map_mem_h memh = nullptr;
-        size_t             memh_size = 0;
+        ucc_mem_map_mem_h memh      = nullptr;
+        size_t            memh_size = 0;
 
-        EXPECT_EQ(UCC_OK, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                       &map_params, &memh_size, &memh));
+        EXPECT_EQ(
+            UCC_OK,
+            ucc_mem_map(
+                ctx_h,
+                UCC_MEM_MAP_MODE_EXPORT,
+                &map_params,
+                &memh_size,
+                &memh));
         EXPECT_NE(nullptr, memh);
         EXPECT_GT(memh_size, 0);
 
@@ -188,39 +199,42 @@ UCC_TEST_F(test_mem_map_export, multiple_segments)
     multi_params.n_segments = 2;
 
     /* This should fail as UCC only supports one segment per call */
-    EXPECT_EQ(UCC_ERR_INVALID_PARAM, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                                   &multi_params, &memh_size,
-                                                   &memh));
+    EXPECT_EQ(
+        UCC_ERR_INVALID_PARAM,
+        ucc_mem_map(
+            ctx_h, UCC_MEM_MAP_MODE_EXPORT, &multi_params, &memh_size, &memh));
     EXPECT_EQ(nullptr, memh);
 }
 
 /* Test memory map export with invalid parameters */
 UCC_TEST_F(test_mem_map_export, invalid_params)
 {
-    ucc_mem_map_mem_h memh = nullptr;
+    ucc_mem_map_mem_h memh      = nullptr;
     size_t            memh_size = 0;
 
     /* Test with NULL params */
-    EXPECT_EQ(UCC_ERR_INVALID_PARAM, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                                   nullptr, &memh_size, &memh));
+    EXPECT_EQ(
+        UCC_ERR_INVALID_PARAM,
+        ucc_mem_map(
+            ctx_h, UCC_MEM_MAP_MODE_EXPORT, nullptr, &memh_size, &memh));
 
     /* Test with invalid mode */
     ucc_mem_map_mode_t invalid_mode = UCC_MEM_MAP_MODE_LAST;
-    EXPECT_EQ(UCC_ERR_INVALID_PARAM, ucc_mem_map(ctx_h, invalid_mode,
-                                                   &map_params, &memh_size,
-                                                   &memh));
+    EXPECT_EQ(
+        UCC_ERR_INVALID_PARAM,
+        ucc_mem_map(ctx_h, invalid_mode, &map_params, &memh_size, &memh));
 }
 
 /* Test memory map export with zero length buffer */
 UCC_TEST_F(test_mem_map_export, zero_length)
 {
-    ucc_mem_map_mem_h  memh      = nullptr;
-    size_t             memh_size = 0;
+    ucc_mem_map_mem_h memh      = nullptr;
+    size_t            memh_size = 0;
 
-    segment.len = 0;
+    segment.len                 = 0;
     /* This might succeed or fail depending on implementation */
-    ucc_status_t status = ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                       &map_params, &memh_size, &memh);
+    ucc_status_t status         = ucc_mem_map(
+        ctx_h, UCC_MEM_MAP_MODE_EXPORT, &map_params, &memh_size, &memh);
     if (status == UCC_OK) {
         EXPECT_NE(nullptr, memh);
         EXPECT_EQ(UCC_OK, ucc_mem_unmap(&memh));
@@ -245,9 +259,12 @@ UCC_TEST_F(test_mem_map_import, basic_import)
     export_params.n_segments = 1;
 
     /* Export the memory handle */
-    export_status = ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                &export_params, &export_memh_size,
-                                &export_memh);
+    export_status            = ucc_mem_map(
+        ctx_h,
+        UCC_MEM_MAP_MODE_EXPORT,
+        &export_params,
+        &export_memh_size,
+        &export_memh);
 
     if (export_status != UCC_OK) {
         /* If export fails, skip the test */
@@ -264,9 +281,12 @@ UCC_TEST_F(test_mem_map_import, basic_import)
     ASSERT_NE(nullptr, import_memh);
     memcpy(import_memh, export_memh, export_memh_size);
 
-    import_status = ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_IMPORT,
-                                &export_params, &import_memh_size,
-                                &import_memh);
+    import_status = ucc_mem_map(
+        ctx_h,
+        UCC_MEM_MAP_MODE_IMPORT,
+        &export_params,
+        &import_memh_size,
+        &import_memh);
 
     if (import_status == UCC_OK) {
         EXPECT_NE(nullptr, import_memh);
@@ -275,8 +295,9 @@ UCC_TEST_F(test_mem_map_import, basic_import)
         ucc_mem_unmap(&import_memh);
     } else {
         /* Import might not be supported, which is acceptable */
-        EXPECT_TRUE(import_status == UCC_ERR_NOT_SUPPORTED ||
-                    import_status == UCC_ERR_NOT_IMPLEMENTED);
+        EXPECT_TRUE(
+            import_status == UCC_ERR_NOT_SUPPORTED ||
+            import_status == UCC_ERR_NOT_IMPLEMENTED);
 
         /* Clean up the allocated memory if import failed */
         free(import_memh);
@@ -307,16 +328,19 @@ UCC_TEST_F(test_mem_map_import, import_different_sizes)
         ASSERT_NE(nullptr, test_buffer);
         memset(test_buffer, 0xDD, size);
 
-        export_segment.address   = test_buffer;
-        export_segment.len       = size;
-        export_params.segments   = &export_segment;
-        export_params.n_segments = 1;
+        export_segment.address     = test_buffer;
+        export_segment.len         = size;
+        export_params.segments     = &export_segment;
+        export_params.n_segments   = 1;
 
         /* Export the memory handle */
 
-        ucc_status_t export_status = ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                                 &export_params, &export_memh_size,
-                                                 &export_memh);
+        ucc_status_t export_status = ucc_mem_map(
+            ctx_h,
+            UCC_MEM_MAP_MODE_EXPORT,
+            &export_params,
+            &export_memh_size,
+            &export_memh);
 
         if (export_status != UCC_OK) {
             continue; /* Skip this size if export fails */
@@ -330,16 +354,20 @@ UCC_TEST_F(test_mem_map_import, import_different_sizes)
         ASSERT_NE(nullptr, import_memh);
         memcpy(import_memh, export_memh, export_memh_size);
 
-        import_status = ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_IMPORT,
-                                   &export_params, &import_memh_size,
-                                   &import_memh);
+        import_status = ucc_mem_map(
+            ctx_h,
+            UCC_MEM_MAP_MODE_IMPORT,
+            &export_params,
+            &import_memh_size,
+            &import_memh);
         if (import_status == UCC_OK) {
             EXPECT_NE(nullptr, import_memh);
             ucc_mem_unmap(&import_memh);
         } else {
             /* Import might not be supported for all sizes */
-            EXPECT_TRUE(import_status == UCC_ERR_NOT_SUPPORTED ||
-                        import_status == UCC_ERR_NOT_IMPLEMENTED);
+            EXPECT_TRUE(
+                import_status == UCC_ERR_NOT_SUPPORTED ||
+                import_status == UCC_ERR_NOT_IMPLEMENTED);
 
             /* Clean up the allocated memory if import failed */
             free(import_memh);
@@ -358,8 +386,10 @@ UCC_TEST_F(test_mem_map_import, import_invalid_params)
     ucc_mem_map_params_t params;
     ucc_mem_map_t        segment;
 
-    EXPECT_EQ(UCC_ERR_INVALID_PARAM, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_IMPORT,
-                                                 nullptr, &memh_size, &memh));
+    EXPECT_EQ(
+        UCC_ERR_INVALID_PARAM,
+        ucc_mem_map(
+            ctx_h, UCC_MEM_MAP_MODE_IMPORT, nullptr, &memh_size, &memh));
 
     /* Test import with NULL memh */
     segment.address   = test_buffer;
@@ -367,8 +397,10 @@ UCC_TEST_F(test_mem_map_import, import_invalid_params)
     params.segments   = &segment;
     params.n_segments = 1;
 
-    EXPECT_EQ(UCC_ERR_INVALID_PARAM, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_IMPORT,
-                                                &params, &memh_size, nullptr));
+    EXPECT_EQ(
+        UCC_ERR_INVALID_PARAM,
+        ucc_mem_map(
+            ctx_h, UCC_MEM_MAP_MODE_IMPORT, &params, &memh_size, nullptr));
 }
 
 /* Test memory map unmap with NULL handle */
@@ -387,8 +419,10 @@ UCC_TEST_F(test_mem_map_export, different_modes)
     size_t            memh_size = 0;
 
     /* Test EXPORT mode */
-    EXPECT_EQ(UCC_OK, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                   &map_params, &memh_size, &memh1));
+    EXPECT_EQ(
+        UCC_OK,
+        ucc_mem_map(
+            ctx_h, UCC_MEM_MAP_MODE_EXPORT, &map_params, &memh_size, &memh1));
     EXPECT_NE(nullptr, memh1);
     EXPECT_EQ(UCC_OK, ucc_mem_unmap(&memh1));
 }
@@ -407,8 +441,14 @@ UCC_TEST_F(test_mem_map_export, stress_test)
         /* Fill buffer with iteration-specific pattern */
         memset(test_buffer, i % 256, buffer_size);
 
-        EXPECT_EQ(UCC_OK, ucc_mem_map(ctx_h, UCC_MEM_MAP_MODE_EXPORT,
-                                     &map_params, &memh_size, &memh));
+        EXPECT_EQ(
+            UCC_OK,
+            ucc_mem_map(
+                ctx_h,
+                UCC_MEM_MAP_MODE_EXPORT,
+                &map_params,
+                &memh_size,
+                &memh));
         EXPECT_NE(nullptr, memh);
 
         EXPECT_EQ(UCC_OK, ucc_mem_unmap(&memh));
