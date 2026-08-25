@@ -288,12 +288,17 @@ UccJob::UccJob(int _n_procs, ucc_job_ctx_mode_t _ctx_mode, ucc_job_env_t vars) :
        in a hang in the destruction flow */
     vars.push_back({"UCX_IB_GPU_DIRECT_RDMA", "no"});
 
+    std::vector<std::string> newly_set;
     for (auto &v : vars) {
         var = std::getenv(v.first.c_str());
         if (var) {
             /* found env - back it up for later restore
                after processes creation */
             env_bkp.push_back(ucc_env_var_t(v.first, var));
+        } else {
+            /* env var was not set - track it so we can restore
+               (unset) it after processes creation */
+            newly_set.push_back(v.first);
         }
         setenv(v.first.c_str(), v.second.c_str(), 1);
     }
@@ -305,6 +310,9 @@ UccJob::UccJob(int _n_procs, ucc_job_ctx_mode_t _ctx_mode, ucc_job_env_t vars) :
     for (auto &v : env_bkp) {
         /*restore original env */
         setenv(v.first.c_str(), v.second.c_str(), 1);
+    }
+    for (auto &v : newly_set) {
+        unsetenv(v.c_str());
     }
 }
 

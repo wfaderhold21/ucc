@@ -249,6 +249,7 @@ def run_benchmark(cell, rep):
     env["UCX_TLS"] = UCX_TLS
     env["UCX_NET_DEVICES"] = UCX_NET_DEVICES
     env["UCC_TL_UCP_ALLREDUCE_SRA_KN_PIPELINE"] = pipeline_str
+    env["UCC_TL_UCP_TUNE"] = "allreduce:0-inf:@sra_knomial"
 
     start_time = time.time()
     try:
@@ -258,7 +259,7 @@ def run_benchmark(cell, rep):
                 "srun", "-n", str(nranks),
                 bin_path, "-c", "allreduce", "-b", "32K", "-e", "4M",
                 "-f", "2", "-n", str(ITERS), "-w", str(WARMUP),
-                "-t", DTYPE, "-o", OP
+                "-d", DTYPE, "-o", OP, "-F"
             ]
         else:
             # Specific size
@@ -266,7 +267,7 @@ def run_benchmark(cell, rep):
                 "srun", "-n", str(nranks),
                 bin_path, "-c", "allreduce", "-b", str(count), "-e", str(count),
                 "-f", "1", "-n", str(ITERS), "-w", str(WARMUP),
-                "-t", DTYPE, "-o", OP
+                "-d", DTYPE, "-o", OP, "-F"
             ]
         with open(cell_file, 'w') as outf:
             result = subprocess.run(
@@ -298,9 +299,9 @@ def run_benchmark(cell, rep):
                 lines = f.readlines()
             for line in reversed(lines):
                 parts = line.split()
-                if parts and parts[0].replace('.', '').isdigit():
-                    bw_gbs = parts[-1]
-                    time_us = parts[-2]
+                if parts and parts[0].replace('.', '').isdigit() and len(parts) >= 8:
+                    time_us = parts[2]   # t_avg is always column index 2
+                    bw_gbs = parts[-3]   # bw_avg is third from end when -F is present
                     break
         except Exception:
             pass

@@ -211,6 +211,7 @@ static ucc_status_t mock_frag_init(
         return UCC_ERR_NO_MEMORY;
     }
 
+    ucc_coll_task_construct(&frag->super);
     status = ucc_schedule_init(frag, coll_args, team);
     if (status != UCC_OK) {
         free(frag);
@@ -255,6 +256,7 @@ UCC_TEST_F(test_schedule, pipelined_init_depth_16_success)
     ucc_status_t status;
 
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     memset(&bargs, 0, sizeof(bargs));
     /* bargs.mask intentionally zero — ucc_coll_task_init copies struct via memcpy. */
     bargs.args.coll_type   = UCC_COLL_TYPE_ALLREDUCE;
@@ -297,6 +299,7 @@ UCC_TEST_F(test_schedule, pipelined_init_failure_at_zero)
     ucc_status_t status;
 
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     memset(&bargs, 0, sizeof(bargs));
     /* bargs.mask intentionally zero — ucc_coll_task_init copies struct via memcpy. */
     bargs.args.coll_type   = UCC_COLL_TYPE_ALLREDUCE;
@@ -338,6 +341,7 @@ UCC_TEST_F(test_schedule, pipelined_init_failure_at_middle)
     ucc_base_coll_args_t bargs  = {0};
     ucc_status_t status;
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     memset(&bargs, 0, sizeof(bargs));
     /* bargs.mask intentionally zero — ucc_coll_task_init copies struct via memcpy. */
     bargs.args.coll_type   = UCC_COLL_TYPE_ALLREDUCE;
@@ -380,6 +384,7 @@ UCC_TEST_F(test_schedule, pipelined_init_failure_at_last)
     ucc_base_coll_args_t bargs  = {0};
     ucc_status_t status;
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     memset(&bargs, 0, sizeof(bargs));
     /* bargs.mask intentionally zero — ucc_coll_task_init copies struct via memcpy. */
     bargs.args.coll_type   = UCC_COLL_TYPE_ALLREDUCE;
@@ -423,6 +428,7 @@ UCC_TEST_F(test_schedule, pipelined_init_failure_middle_of_two)
     ucc_status_t status;
 
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     memset(&bargs, 0, sizeof(bargs));
     bargs.args.coll_type   = UCC_COLL_TYPE_ALLREDUCE;
     bargs.args.src.info.count   = 1024;
@@ -463,6 +469,7 @@ UCC_TEST_F(test_schedule, pipelined_ordered_failure_at_three)
     ucc_status_t status;
 
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     memset(&bargs, 0, sizeof(bargs));
     bargs.args.coll_type   = UCC_COLL_TYPE_ALLREDUCE;
     bargs.args.src.info.count   = 2048;
@@ -496,7 +503,7 @@ UCC_TEST_F(test_schedule, pipelined_ordered_failure_at_three)
  * ========================================================================== */
 
 /* ------------------------------------------------------------------ */
-/* Test: pdepth=0 should be rejected (produces zero pipeline depth)    */
+/* Test: n_frags=0 must be rejected at the init entry guard               */
 /* ------------------------------------------------------------------ */
 UCC_TEST_F(test_schedule, pipelined_nfrags_zero_rejected)
 {
@@ -557,6 +564,7 @@ UCC_TEST_F(test_schedule, pipelined_invalid_order_rejected)
     ucc_status_t         status;
 
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     memset(&bargs, 0, sizeof(bargs));
     bargs.args.coll_type   = UCC_COLL_TYPE_ALLREDUCE;
     bargs.args.src.info.count   = 2048;
@@ -785,6 +793,7 @@ UCC_TEST_F(test_schedule, pipelined_all_valid_orders_at_boundary)
         ucc_base_coll_args_t bargs = {0};
 
         memset(&sched, 0, sizeof(sched));
+        ucc_coll_task_construct(&sched.super.super);
         g_frag_init_count.store(0);
         g_total_finalizes.store(0);
         g_fail_after_frag_idx = -1;
@@ -807,6 +816,7 @@ UCC_TEST_F(test_schedule, pipelined_depth_above_limit_clamped)
     ucc_base_coll_args_t bargs = {0};
 
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     g_frag_init_count.store(0);
     g_total_finalizes.store(0);
     g_fail_after_frag_idx = -1;
@@ -897,7 +907,9 @@ static ucc_status_t t473_frag_init(ucc_base_coll_args_t *args,
         free(task);
         return UCC_ERR_NO_MEMORY;
     }
+    ucc_coll_task_construct(&frag->super);
     EXPECT_EQ(UCC_OK, ucc_schedule_init(frag, args, team));
+    ucc_coll_task_construct(task);
     EXPECT_EQ(UCC_OK, ucc_coll_task_init(task, args, team));
     task->finalize = t473_task_finalize;
     frag->tasks[frag->n_tasks++] = task;
@@ -940,6 +952,7 @@ static void t473_expect_subscription_unwind(ucc_pipeline_order_t order,
     ucc_schedule_pipelined_t sched;
     ucc_base_coll_args_t args;
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     t473_set_args(&args);
     ASSERT_EQ(UCC_OK, create_test_team(&team, thread_mode));
     t473_reset(fail_at, -1);
@@ -980,6 +993,7 @@ UCC_TEST_F(test_schedule, pipelined_depth_16_exact_lifecycle)
     ucc_schedule_pipelined_t sched;
     ucc_base_coll_args_t args;
     memset(&sched, 0, sizeof(sched));
+    ucc_coll_task_construct(&sched.super.super);
     t473_set_args(&args);
     ASSERT_EQ(UCC_OK, create_test_team(&team, UCC_THREAD_MULTIPLE));
     t473_reset(-1, -1);
@@ -1007,6 +1021,7 @@ UCC_TEST_F(test_schedule, pipelined_fragment_failure_exact_unwind)
         ucc_schedule_pipelined_t sched;
         ucc_base_coll_args_t args;
         memset(&sched, 0, sizeof(sched));
+        ucc_coll_task_construct(&sched.super.super);
         t473_set_args(&args);
         ASSERT_EQ(UCC_OK, create_test_team(&team, UCC_THREAD_SINGLE));
         t473_reset(-1, fail_at);
@@ -1022,6 +1037,7 @@ UCC_TEST_F(test_schedule, pipelined_fragment_failure_exact_unwind)
         destroy_test_team(team);
     }
 }
+
 /* ==========================================================================
  * Event-manager lifecycle regression tests (task 475)
  *

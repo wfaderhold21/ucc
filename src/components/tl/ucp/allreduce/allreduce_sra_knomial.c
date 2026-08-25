@@ -95,7 +95,7 @@ ucc_tl_ucp_allreduce_sra_knomial_frag_init(ucc_base_coll_args_t *coll_args,
     ucc_base_coll_args_t args     = *coll_args;
     ucc_mrange_uint_t   *p        = &tl_team->cfg.allreduce_sra_kn_radix;
     ucc_schedule_t      *schedule;
-    ucc_coll_task_t     *task, *rs_task;
+    ucc_coll_task_t     *task = NULL, *rs_task = NULL;
     ucc_status_t         status;
     ucc_kn_radix_t       radix;
     size_t               count;
@@ -139,6 +139,16 @@ ucc_tl_ucp_allreduce_sra_knomial_frag_init(ucc_base_coll_args_t *coll_args,
     *frag_p                  = schedule;
     return UCC_OK;
 out:
+    if (task) {
+        ucc_coll_task_destruct(task);
+        ucc_tl_ucp_put_task((ucc_tl_ucp_task_t *)task);
+    }
+    if (rs_task && rs_task != task) {
+        ucc_coll_task_destruct(rs_task);
+        ucc_tl_ucp_put_task((ucc_tl_ucp_task_t *)rs_task);
+    }
+    ucc_coll_task_destruct(&schedule->super);
+    ucc_tl_ucp_put_schedule(schedule);
     return status;
 }
 
@@ -191,6 +201,14 @@ void ucc_tl_ucp_allreduce_sra_knomial_select_pipeline_params(
         ucc_mc_attr_t mc_attr;
         mc_attr.field_mask = UCC_MC_ATTR_FIELD_FAST_ALLOC_SIZE;
         ucc_mc_get_attr(&mc_attr, UCC_MEMORY_TYPE_CUDA);
+        if (mc_attr.fast_alloc_size == 0) {
+            pp->threshold = SIZE_MAX;
+            pp->n_frags   = 0;
+            pp->frag_size = 0;
+            pp->pdepth    = 1;
+            pp->order     = UCC_PIPELINE_PARALLEL;
+            return;
+        }
         pp->threshold = mc_attr.fast_alloc_size;
         pp->n_frags   = 2;
         pp->frag_size = mc_attr.fast_alloc_size;
@@ -291,6 +309,7 @@ ucc_tl_ucp_allreduce_sra_knomial_init(ucc_base_coll_args_t *coll_args,
                                     &n_frags, &pipeline_depth);
     if (ucc_unlikely(st != UCC_OK)) {
         tl_error(team->context->lib, "invalid pipeline parameters for allreduce SRA");
+        ucc_coll_task_destruct(&schedule_p->super.super);
         ucc_tl_ucp_put_schedule(&schedule_p->super);
         return st;
     }

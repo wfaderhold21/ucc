@@ -164,7 +164,7 @@ ucc_tl_ucp_reduce_srg_knomial_frag_init(ucc_base_coll_args_t *coll_args,
     int                    n_frags = sp->super.n_tasks;
     ucc_kn_radix_t         radix, cfg_radix;
     ucc_schedule_t        *schedule;
-    ucc_coll_task_t       *g_task, *rs_task;
+    ucc_coll_task_t       *g_task = NULL, *rs_task = NULL;
     ucc_status_t           status;
     ptrdiff_t              scratch_offset;
     void                  *rs_rbuf, *rs_sbuf, *g_rbuf, *g_sbuf;
@@ -240,6 +240,16 @@ ucc_tl_ucp_reduce_srg_knomial_frag_init(ucc_base_coll_args_t *coll_args,
     *frag_p                  = schedule;
     return UCC_OK;
 out:
+    if (g_task) {
+        ucc_coll_task_destruct(g_task);
+        ucc_tl_ucp_put_task((ucc_tl_ucp_task_t *)g_task);
+    }
+    if (rs_task) {
+        ucc_coll_task_destruct(rs_task);
+        ucc_tl_ucp_put_task((ucc_tl_ucp_task_t *)rs_task);
+    }
+    ucc_coll_task_destruct(&schedule->super);
+    ucc_tl_ucp_put_schedule(schedule);
     return status;
 }
 
@@ -281,6 +291,14 @@ ucc_tl_ucp_reduce_srg_knomial_get_pipeline_params(ucc_tl_ucp_team_t *team,
     if (mtype == UCC_MEMORY_TYPE_CUDA) {
         mc_attr.field_mask = UCC_MC_ATTR_FIELD_FAST_ALLOC_SIZE;
         ucc_mc_get_attr(&mc_attr, UCC_MEMORY_TYPE_CUDA);
+        if (mc_attr.fast_alloc_size == 0) {
+            pp->threshold = SIZE_MAX;
+            pp->n_frags   = 0;
+            pp->frag_size = 0;
+            pp->pdepth    = 1;
+            pp->order     = UCC_PIPELINE_PARALLEL;
+            return;
+        }
         pp->threshold = mc_attr.fast_alloc_size;
         pp->n_frags   = 2;
         pp->order     = UCC_PIPELINE_PARALLEL;
@@ -364,6 +382,7 @@ ucc_status_t ucc_tl_ucp_reduce_srg_knomial_init(ucc_base_coll_args_t *coll_args,
 err_free_scratch:
     ucc_mc_free(schedule->scratch_mc_header);
 err_free_schedule:
+    ucc_coll_task_destruct(&schedule->super.super.super);
     ucc_tl_ucp_put_schedule(&schedule->super.super);
 err_out:
     return st;
