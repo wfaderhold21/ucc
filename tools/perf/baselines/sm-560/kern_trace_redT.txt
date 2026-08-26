@@ -1,0 +1,13 @@
+Generating SQLite file prof_560_redT.sqlite from prof_560_redT.nsys-rep
+Processing [prof_560_redT.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/cuda_gpu_trace.py]... 
+
+ ** CUDA GPU Trace (cuda_gpu_trace):
+
+  Start (ns)    Duration (ns)  CorrId  GrdX  GrdY  GrdZ  BlkX  BlkY  BlkZ  Reg/Trd  StcSMem (MB)  DymSMem (MB)  Bytes (MB)  Throughput (MB/s)  SrcMemKd  DstMemKd           Device            Ctx  GreenCtx  Strm                             Name                           
+ -------------  -------------  ------  ----  ----  ----  ----  ----  ----  -------  ------------  ------------  ----------  -----------------  --------  --------  -------------------------  ---  --------  ----  ----------------------------------------------------------
+ 7,304,922,297         20,576   2,273                                                                               67.109      3,261,490.790  Device              NVIDIA H100 80GB HBM3 (0)    1               7  [CUDA memset]                                             
+ 7,305,178,360         42,593   2,275                                                                              134.218      3,151,163.818  Device              NVIDIA H100 80GB HBM3 (0)    1               7  [CUDA memset]                                             
+ 7,329,775,732          2,241   2,366     1     1     1     1     1     1       16         0.000         0.000                                                     NVIDIA H100 80GB HBM3 (0)    1              20  executor_start(ucc_ec_cuda_executor_state *, int *)       
+ 7,329,795,381    579,074,337   2,367     1     1     1   256     1     1      236         0.001         0.000                                                     NVIDIA H100 80GB HBM3 (0)    1              20  executor_kernel(volatile ucc_ec_cuda_executor *, int, int)
+ 7,908,875,894          1,920   2,368     1     1     1     1     1     1       16         0.000         0.000                                                     NVIDIA H100 80GB HBM3 (0)    1              20  executor_shutdown_ack(ucc_ec_cuda_executor_state *)       
+

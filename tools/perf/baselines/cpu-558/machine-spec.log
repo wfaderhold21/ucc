@@ -1,0 +1,32 @@
+=== machine spec ===
+Wed Aug 26 04:49:34 PM UTC 2026
+SLURM_JOBID=64225
+SLURM_JOB_NODELIST=dgx-gaia-17
+dgx-gaia-17
+--- lscpu ---
+CPU(s):                                  224
+Model name:                              Intel(R) Xeon(R) Platinum 8480C
+Thread(s) per core:                      2
+Core(s) per socket:                      56
+Socket(s):                               2
+NUMA node(s):                            2
+NUMA node0 CPU(s):                       0-55,112-167
+NUMA node1 CPU(s):                       56-111,168-223
+--- free -g ---
+               total        used        free      shared  buff/cache   available
+Mem:            2015          18        1742          21         254        1965
+Swap:              0           0           0
+--- gpu ---
+NVIDIA H100 80GB HBM3, 81559 MiB, 580.95.05
+NVIDIA H100 80GB HBM3, 81559 MiB, 580.95.05
+NVIDIA H100 80GB HBM3, 81559 MiB, 580.95.05
+NVIDIA H100 80GB HBM3, 81559 MiB, 580.95.05
+NVIDIA H100 80GB HBM3, 81559 MiB, 580.95.05
+NVIDIA H100 80GB HBM3, 81559 MiB, 580.95.05
+NVIDIA H100 80GB HBM3, 81559 MiB, 580.95.05
+NVIDIA H100 80GB HBM3, 81559 MiB, 580.95.05
+--- software ---
+UCC source: /labhome/faderholdt/ucc-baseline-558
+gcc: gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0
+MPI launcher: /usr/local/bin/mpiexec /usr/bin/mpiexec /bin/mpiexec 
+UCX: # Library version: 1.19.0

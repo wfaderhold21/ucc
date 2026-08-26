@@ -1,0 +1,23 @@
+Collective:             Reduce DT
+Memory type:            host
+Datatype:               int64
+Reduction:              sum
+Inplace:                N/A
+Warmup:                 
+  small                 100
+  large                 20
+Iterations:             
+  small                 1000
+  large                 200
+Iteration mode:         isolated
+
+       Count        Size                Time, us                       Bus Bandwidth, GB/s
+                                 avg         min         max         avg         max         min
+        1024        8192        0.37        0.37        0.37       66.78       66.78       66.78
+        2048       16384        0.84        0.84        0.84       58.38       58.38       58.38
+        4096       32768        2.03        2.03        2.03       48.45       48.45       48.45
+        8192       65536        4.69        4.69        4.69       41.88       41.88       41.88
+       16384      131072        7.18        7.18        7.18       54.75       54.75       54.75
+       32768      262144       10.00       10.00       10.00       78.65       78.65       78.65
+       65536      524288       10.38       10.38       10.38      151.60      151.60      151.60
+Total time: 0.035489 ms

@@ -1,0 +1,9 @@
+Generating SQLite file prof_560_red.sqlite from prof_560_red.nsys-rep
+Processing [prof_560_red.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)  Med (ns)  Min (ns)  Max (ns)  StdDev (ns)                                                  Name                                                
+ --------  ---------------  ---------  --------  --------  --------  --------  -----------  ----------------------------------------------------------------------------------------------------
+    100.0       20,395,320        220  92,706.0  92,768.0    91,712    96,544        429.7  void UCC_REDUCE_CUDA_DEFAULT_SUM<float, float, (bool)0, (int)1>(ucc_eee_task_reduce, unsigned short)
+

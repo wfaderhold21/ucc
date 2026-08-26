@@ -1,0 +1,305 @@
+make  all-recursive
+make[1]: Entering directory '/labhome/faderholdt/ucc-baseline-558'
+Making all in src
+make[2]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src'
+Making all in .
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src'
+  CC       core/libucc_la-ucc_lib.lo
+  CC       core/libucc_la-ucc_constructor.lo
+  CC       core/libucc_la-ucc_global_opts.lo
+  CC       core/libucc_la-ucc_version.lo
+  CC       core/libucc_la-ucc_context.lo
+  CC       core/libucc_la-ucc_team.lo
+  CC       core/libucc_la-ucc_progress_queue.lo
+  CC       core/libucc_la-ucc_coll.lo
+  CC       core/libucc_la-ucc_ee.lo
+  CC       core/libucc_la-ucc_progress_queue_st.lo
+  CC       core/libucc_la-ucc_progress_queue_mt.lo
+  CC       core/libucc_la-ucc_service_coll.lo
+  CC       core/libucc_la-ucc_dt.lo
+  CC       coll_patterns/libucc_la-ring.lo
+  CC       schedule/libucc_la-ucc_schedule.lo
+  CC       schedule/libucc_la-ucc_schedule_pipelined.lo
+  CC       coll_score/libucc_la-ucc_coll_score.lo
+  CC       coll_score/libucc_la-ucc_coll_score_map.lo
+  CC       utils/libucc_la-ucc_component.lo
+  CC       utils/libucc_la-ucc_datastruct.lo
+  CC       utils/libucc_la-ucc_mpool.lo
+  CC       utils/libucc_la-ucc_math.lo
+  CC       utils/libucc_la-ucc_proc_info.lo
+  CC       utils/libucc_la-ucc_string.lo
+  CC       utils/libucc_la-ucc_coll_utils.lo
+  CC       utils/libucc_la-ucc_sys.lo
+  CC       utils/libucc_la-ucc_parser.lo
+  CC       utils/libucc_la-ucc_assert.lo
+  CC       utils/debug/libucc_la-log.lo
+  CC       components/base/libucc_la-ucc_base_iface.lo
+  CC       components/cl/libucc_la-ucc_cl.lo
+  CC       components/tl/libucc_la-ucc_tl.lo
+  CC       components/mc/libucc_la-ucc_mc.lo
+  CC       components/mc/base/libucc_la-ucc_mc_base.lo
+  CC       components/ec/libucc_la-ucc_ec.lo
+  CC       components/ec/base/libucc_la-ucc_ec_base.lo
+  CC       components/topo/libucc_la-ucc_topo.lo
+  CC       components/topo/libucc_la-ucc_sysinfo.lo
+  CC       components/topo/libucc_la-ucc_sbgp.lo
+  CCLD     libucc.la
+copying selected object files to avoid basename conflicts...
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src'
+Making all in components/cl/basic
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/cl/basic'
+  CC       libucc_cl_basic_la-cl_basic.lo
+  CC       libucc_cl_basic_la-cl_basic_lib.lo
+  CC       libucc_cl_basic_la-cl_basic_context.lo
+  CC       libucc_cl_basic_la-cl_basic_team.lo
+  CC       libucc_cl_basic_la-cl_basic_coll.lo
+  CCLD     libucc_cl_basic.la
+  LN       libucc_cl_basic.la
+  LN       .libs/libucc_cl_basic.so
+  LN       .libs/libucc_cl_basic.so.1
+  LN       .libs/libucc_cl_basic.so.1.0.0
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/cl/basic'
+Making all in components/cl/hier
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/cl/hier'
+  CC       libucc_cl_hier_la-cl_hier.lo
+  CC       libucc_cl_hier_la-cl_hier_lib.lo
+  CC       libucc_cl_hier_la-cl_hier_context.lo
+  CC       libucc_cl_hier_la-cl_hier_team.lo
+  CC       libucc_cl_hier_la-cl_hier_coll.lo
+  CC       allgatherv/libucc_cl_hier_la-unpack.lo
+  CC       allgatherv/libucc_cl_hier_la-allgatherv.lo
+  CC       allreduce/libucc_cl_hier_la-allreduce_rab.lo
+  CC       allreduce/libucc_cl_hier_la-allreduce.lo
+  CC       allreduce/libucc_cl_hier_la-allreduce_split_rail.lo
+  CC       alltoallv/libucc_cl_hier_la-alltoallv.lo
+  CC       alltoall/libucc_cl_hier_la-alltoall.lo
+  CC       barrier/libucc_cl_hier_la-barrier.lo
+  CC       bcast/libucc_cl_hier_la-bcast.lo
+  CC       bcast/libucc_cl_hier_la-bcast_2step.lo
+  CC       reduce/libucc_cl_hier_la-reduce.lo
+  CC       reduce/libucc_cl_hier_la-reduce_2step.lo
+  CCLD     libucc_cl_hier.la
+  LN       libucc_cl_hier.la
+  LN       .libs/libucc_cl_hier.so
+  LN       .libs/libucc_cl_hier.so.1
+  LN       .libs/libucc_cl_hier.so.1.0.0
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/cl/hier'
+Making all in components/mc/cpu
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/mc/cpu'
+  CC       libucc_mc_cpu_la-mc_cpu.lo
+  CCLD     libucc_mc_cpu.la
+  LN       libucc_mc_cpu.la
+  LN       .libs/libucc_mc_cpu.so
+  LN       .libs/libucc_mc_cpu.so.1
+  LN       .libs/libucc_mc_cpu.so.1.0.0
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/mc/cpu'
+Making all in components/ec/cpu
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/ec/cpu'
+  CC       libucc_ec_cpu_la-ec_cpu.lo
+  CC       libucc_ec_cpu_la-ec_cpu_reduce.lo
+  CCLD     libucc_ec_cpu.la
+  LN       libucc_ec_cpu.la
+  LN       .libs/libucc_ec_cpu.so
+  LN       .libs/libucc_ec_cpu.so.1
+  LN       .libs/libucc_ec_cpu.so.1.0.0
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/ec/cpu'
+Making all in components/topo/ib
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/topo/ib'
+  CC       libucc_sysinfo_ib_la-ucc_sysinfo_ib.lo
+  CCLD     libucc_sysinfo_ib.la
+  LN       libucc_sysinfo_ib.la
+  LN       .libs/libucc_sysinfo_ib.so
+  LN       .libs/libucc_sysinfo_ib.so.1
+  LN       .libs/libucc_sysinfo_ib.so.1.0.0
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/topo/ib'
+Making all in components/tl/cuda
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/cuda'
+make[4]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/cuda'
+make[4]: Nothing to be done for 'all-am'.
+make[4]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/cuda'
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/cuda'
+Making all in components/tl/mlx5
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/mlx5'
+make[3]: Nothing to be done for 'all'.
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/mlx5'
+Making all in components/tl/nccl
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/nccl'
+make[3]: Nothing to be done for 'all'.
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/nccl'
+Making all in components/tl/rccl
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/rccl'
+make[3]: Nothing to be done for 'all'.
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/rccl'
+Making all in components/tl/self
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/self'
+  CC       libucc_tl_self_la-tl_self_context.lo
+  CC       libucc_tl_self_la-tl_self.lo
+  CC       libucc_tl_self_la-tl_self_coll.lo
+  CC       libucc_tl_self_la-tl_self_lib.lo
+  CC       libucc_tl_self_la-tl_self_team.lo
+  CCLD     libucc_tl_self.la
+  LN       libucc_tl_self.la
+  LN       .libs/libucc_tl_self.so
+  LN       .libs/libucc_tl_self.so.1
+  LN       .libs/libucc_tl_self.so.1.0.0
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/self'
+Making all in components/tl/sharp
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/sharp'
+make[3]: Nothing to be done for 'all'.
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/sharp'
+Making all in components/tl/ucp
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/ucp'
+Making all in .
+make[4]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/ucp'
+  CC       libucc_tl_ucp_la-tl_ucp.lo
+  CC       libucc_tl_ucp_la-tl_ucp_lib.lo
+  CC       libucc_tl_ucp_la-tl_ucp_context.lo
+  CC       libucc_tl_ucp_la-tl_ucp_ep.lo
+  CC       libucc_tl_ucp_la-tl_ucp_team.lo
+  CC       libucc_tl_ucp_la-tl_ucp_coll.lo
+  CC       libucc_tl_ucp_la-tl_ucp_service_coll.lo
+  CC       libucc_tl_ucp_la-tl_ucp_copy.lo
+  CC       libucc_tl_ucp_la-tl_ucp_dpu_offload.lo
+  CC       libucc_tl_ucp_la-tl_ucp_sendrecv.lo
+  CC       allgather/libucc_tl_ucp_la-allgather.lo
+  CC       allgather/libucc_tl_ucp_la-allgather_ring.lo
+  CC       allgather/libucc_tl_ucp_la-allgather_neighbor.lo
+  CC       allgather/libucc_tl_ucp_la-allgather_knomial.lo
+  CC       allgather/libucc_tl_ucp_la-allgather_bruck.lo
+  CC       allgather/libucc_tl_ucp_la-allgather_sparbit.lo
+  CC       allgather/libucc_tl_ucp_la-allgather_linear.lo
+  CC       allgatherv/libucc_tl_ucp_la-allgatherv.lo
+  CC       allgatherv/libucc_tl_ucp_la-allgatherv_ring.lo
+  CC       allgatherv/libucc_tl_ucp_la-allgatherv_knomial.lo
+  CC       alltoall/libucc_tl_ucp_la-alltoall_pairwise.lo
+  CC       alltoall/libucc_tl_ucp_la-alltoall.lo
+  CC       alltoall/libucc_tl_ucp_la-alltoall_onesided.lo
+  CC       alltoall/libucc_tl_ucp_la-alltoall_bruck.lo
+  CC       alltoallv/libucc_tl_ucp_la-alltoallv.lo
+  CC       alltoallv/libucc_tl_ucp_la-alltoallv_pairwise.lo
+  CC       allreduce/libucc_tl_ucp_la-allreduce.lo
+  CC       alltoallv/libucc_tl_ucp_la-alltoallv_hybrid.lo
+  CC       alltoallv/libucc_tl_ucp_la-alltoallv_onesided.lo
+  CC       allreduce/libucc_tl_ucp_la-allreduce_sra_knomial.lo
+  CC       allreduce/libucc_tl_ucp_la-allreduce_knomial.lo
+  CC       allreduce/libucc_tl_ucp_la-allreduce_sliding_window.lo
+  CC       allreduce/libucc_tl_ucp_la-allreduce_sliding_window_setup.lo
+  CC       allreduce/libucc_tl_ucp_la-allreduce_dbt.lo
+  CC       allreduce/libucc_tl_ucp_la-allreduce_ring.lo
+  CC       barrier/libucc_tl_ucp_la-barrier.lo
+  CC       barrier/libucc_tl_ucp_la-barrier_knomial.lo
+  CC       bcast/libucc_tl_ucp_la-bcast.lo
+  CC       bcast/libucc_tl_ucp_la-bcast_knomial.lo
+  CC       bcast/libucc_tl_ucp_la-bcast_sag_knomial.lo
+  CC       bcast/libucc_tl_ucp_la-bcast_dbt.lo
+  CC       fanin/libucc_tl_ucp_la-fanin.lo
+  CC       fanout/libucc_tl_ucp_la-fanout.lo
+  CC       gather/libucc_tl_ucp_la-gather.lo
+  CC       gather/libucc_tl_ucp_la-gather_knomial.lo
+  CC       gatherv/libucc_tl_ucp_la-gatherv.lo
+  CC       gatherv/libucc_tl_ucp_la-gatherv_linear.lo
+  CC       reduce/libucc_tl_ucp_la-reduce.lo
+  CC       reduce/libucc_tl_ucp_la-reduce_knomial.lo
+  CC       reduce/libucc_tl_ucp_la-reduce_dbt.lo
+  CC       reduce/libucc_tl_ucp_la-reduce_srg_knomial.lo
+  CC       reduce_scatter/libucc_tl_ucp_la-reduce_scatter_knomial.lo
+  CC       reduce_scatter/libucc_tl_ucp_la-reduce_scatter.lo
+  CC       reduce_scatter/libucc_tl_ucp_la-reduce_scatter_ring.lo
+  CC       reduce_scatterv/libucc_tl_ucp_la-reduce_scatterv_ring.lo
+  CC       reduce_scatterv/libucc_tl_ucp_la-reduce_scatterv.lo
+  CC       scatter/libucc_tl_ucp_la-scatter_knomial.lo
+  CC       scatterv/libucc_tl_ucp_la-scatterv.lo
+  CC       scatterv/libucc_tl_ucp_la-scatterv_linear.lo
+  CCLD     libucc_tl_ucp.la
+  LN       libucc_tl_ucp.la
+  LN       .libs/libucc_tl_ucp.so
+  LN       .libs/libucc_tl_ucp.so.1
+  LN       .libs/libucc_tl_ucp.so.1.0.0
+make[4]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/ucp'
+Making all in coll_plugins/example
+make[4]: Entering directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/ucp/coll_plugins/example'
+make[4]: Nothing to be done for 'all'.
+make[4]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/ucp/coll_plugins/example'
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src/components/tl/ucp'
+make[2]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/src'
+Making all in contrib
+make[2]: Entering directory '/labhome/faderholdt/ucc-baseline-558/contrib'
+Making all in doca_urom_ucc_plugin
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/contrib/doca_urom_ucc_plugin'
+make[3]: Nothing to be done for 'all'.
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/contrib/doca_urom_ucc_plugin'
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/contrib'
+make[3]: Nothing to be done for 'all-am'.
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/contrib'
+make[2]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/contrib'
+Making all in tools/info
+make[2]: Entering directory '/labhome/faderholdt/ucc-baseline-558/tools/info'
+/usr/bin/sed -nr 's:\s*#define\s+(\w+)(\s+(\w+)|\s+(".*")|\s*)$:{"\1", UCC_PP_MAKE_STRING(\3\4)},:p' <../../config.h >build_config.h
+make  all-am
+make[3]: Entering directory '/labhome/faderholdt/ucc-baseline-558/tools/info'
+  CC       ucc_info-build_info.o
+  CC       ucc_info-ucc_info.o
+  CCLD     ucc_info
+make[3]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/tools/info'
+make[2]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/tools/info'
+Making all in cmake
+make[2]: Entering directory '/labhome/faderholdt/ucc-baseline-558/cmake'
+make[2]: Nothing to be done for 'all'.
+make[2]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/cmake'
+Making all in tools/perf
+make[2]: Entering directory '/labhome/faderholdt/ucc-baseline-558/tools/perf'
+  CXX      ucc_perftest-ucc_perftest.o
+  CXX      ucc_perftest-ucc_pt_config.o
+  CXX      ucc_perftest-ucc_pt_comm.o
+  CXX      ucc_perftest-ucc_pt_benchmark.o
+  CXX      ucc_perftest-ucc_pt_bootstrap_mpi.o
+  CXX      ucc_perftest-ucc_pt_coll.o
+  CXX      ucc_perftest-ucc_pt_coll_allgather.o
+  CXX      ucc_perftest-ucc_pt_coll_allgatherv.o
+  CXX      ucc_perftest-ucc_pt_coll_allreduce.o
+  CXX      ucc_perftest-ucc_pt_coll_alltoall.o
+  CXX      ucc_perftest-ucc_pt_coll_alltoallv.o
+  CXX      ucc_perftest-ucc_pt_coll_bcast.o
+  CXX      ucc_perftest-ucc_pt_coll_gather.o
+  CXX      ucc_perftest-ucc_pt_coll_barrier.o
+  CXX      ucc_perftest-ucc_pt_coll_reduce_scatterv.o
+  CXX      ucc_perftest-ucc_pt_coll_gatherv.o
+  CXX      ucc_perftest-ucc_pt_coll_reduce.o
+  CXX      ucc_perftest-ucc_pt_coll_scatter.o
+  CXX      ucc_perftest-ucc_pt_coll_reduce_scatter.o
+  CXX      ucc_perftest-ucc_pt_coll_scatterv.o
+  CXX      ucc_perftest-ucc_pt_op_memcpy.o
+  CXX      ucc_perftest-ucc_pt_op_reduce.o
+  CXX      ucc_perftest-ucc_pt_op_reduce_strided.o
+  CXX      generator/ucc_perftest-ucc_pt_generator_file.o
+  CXX      generator/ucc_perftest-ucc_pt_generator_traffic_matrix.o
+  CXX      generator/ucc_perftest-ucc_pt_generator_exp.o
+  CXXLD    ucc_perftest
+make[2]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/tools/perf'
+Making all in test/mpi
+make[2]: Entering directory '/labhome/faderholdt/ucc-baseline-558/test/mpi'
+  CXX      ucc_test_mpi-test_mpi.o
+  CXX      ucc_test_mpi-main.o
+  CXX      ucc_test_mpi-buffer.o
+  CXX      ucc_test_mpi-mpi_util.o
+  CXX      ucc_test_mpi-test_case.o
+  CXX      ucc_test_mpi-test_barrier.o
+  CXX      ucc_test_mpi-test_allreduce.o
+  CXX      ucc_test_mpi-test_allgather.o
+  CXX      ucc_test_mpi-test_allgatherv.o
+  CXX      ucc_test_mpi-test_bcast.o
+  CXX      ucc_test_mpi-test_alltoall.o
+  CXX      ucc_test_mpi-test_alltoallv.o
+  CXX      ucc_test_mpi-test_reduce_scatter.o
+  CXX      ucc_test_mpi-test_reduce_scatterv.o
+  CXX      ucc_test_mpi-test_reduce.o
+  CXX      ucc_test_mpi-test_gather.o
+  CXX      ucc_test_mpi-test_gatherv.o
+  CXX      ucc_test_mpi-test_scatter.o
+  CXX      ucc_test_mpi-test_scatterv.o
+  CXX      ucc_test_mpi-test_mem_map.o
+  CXXLD    ucc_test_mpi
+make[2]: Leaving directory '/labhome/faderholdt/ucc-baseline-558/test/mpi'
+make[2]: Entering directory '/labhome/faderholdt/ucc-baseline-558'
+make[2]: Leaving directory '/labhome/faderholdt/ucc-baseline-558'
+make[1]: Leaving directory '/labhome/faderholdt/ucc-baseline-558'

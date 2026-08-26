@@ -1,0 +1,22 @@
+Rank    0       : dgx-gaia-12 - NVIDIA H100 80GB HBM3 0000:1B:00.0
+Collective:             Reduce DT
+Memory type:            cuda
+Datatype:               float32
+Reduction:              sum
+Inplace:                N/A
+Warmup:                 
+  small                 100
+  large                 20
+Iterations:             
+  small                 1000
+  large                 200
+Iteration mode:         isolated
+
+       Count        Size                Time, us                       Bus Bandwidth, GB/s
+                                 avg         min         max         avg         max         min
+    16777216    67108864      101.52      101.52      101.52     1983.22     1983.22     1983.22
+Total time: 0.101515 ms
+Generating '/tmp/nsys-report-91df.qdstrm'
+[1/1] [0%                          ] prof_560_red.nsys-rep[1/1] [0%                          ] prof_560_red.nsys-rep[1/1] [5%                          ] prof_560_red.nsys-rep[1/1] [7%                          ] prof_560_red.nsys-rep[1/1] [8%                          ] prof_560_red.nsys-rep[1/1] [======33%                   ] prof_560_red.nsys-rep[1/1] [=============58%            ] prof_560_red.nsys-rep[1/1] [====================83%     ] prof_560_red.nsys-rep[1/1] [========================99% ] prof_560_red.nsys-rep[1/1] [========================100%] prof_560_red.nsys-rep[1/1] [========================100%] prof_560_red.nsys-rep
+Generated:
+    /labhome/faderholdt/results-560/prof_560_red.nsys-rep

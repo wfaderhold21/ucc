@@ -1,0 +1,4 @@
+Generating SQLite file /labhome/faderholdt/results-560/prof_560.sqlite from /labhome/faderholdt/results-560/prof_560.nsys-rep
+Processing [/labhome/faderholdt/results-560/prof_560.sqlite] with [/opt/nvidia/nsight-systems/2023.4.4/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+SKIPPED: /labhome/faderholdt/results-560/prof_560.sqlite does not contain CUDA kernel data.
+

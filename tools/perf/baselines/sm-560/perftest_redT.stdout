@@ -1,0 +1,22 @@
+Rank    0       : dgx-gaia-12 - NVIDIA H100 80GB HBM3 0000:1B:00.0
+Collective:             Reduce DT
+Memory type:            cuda
+Datatype:               float32
+Reduction:              sum
+Inplace:                N/A
+Warmup:                 
+  small                 100
+  large                 20
+Iterations:             
+  small                 1000
+  large                 200
+Iteration mode:         isolated
+
+       Count        Size                Time, us                       Bus Bandwidth, GB/s
+                                 avg         min         max         avg         max         min
+    16777216    67108864     2631.67     2631.67     2631.67       76.50       76.50       76.50
+Total time: 2.63167 ms
+Generating '/tmp/nsys-report-d652.qdstrm'
+[1/1] [0%                          ] prof_560_redT.nsys-rep[1/1] [0%                          ] prof_560_redT.nsys-rep[1/1] [10%                         ] prof_560_redT.nsys-rep[1/1] [====27%                     ] prof_560_redT.nsys-rep[1/1] [=========45%                ] prof_560_redT.nsys-rep[1/1] [================68%         ] prof_560_redT.nsys-rep[1/1] [======================92%   ] prof_560_redT.nsys-rep[1/1] [=======================93%  ] prof_560_redT.nsys-rep[1/1] [=======================94%  ] prof_560_redT.nsys-rep[1/1] [=======================95%  ] prof_560_redT.nsys-rep[1/1] [=======================96%  ] prof_560_redT.nsys-rep[1/1] [========================97% ] prof_560_redT.nsys-rep[1/1] [========================98% ] prof_560_redT.nsys-rep[1/1] [========================99% ] prof_560_redT.nsys-rep[1/1] [========================100%] prof_560_redT.nsys-rep[1/1] [========================100%] prof_560_redT.nsys-rep
+Generated:
+    /labhome/faderholdt/results-560/prof_560_redT.nsys-rep
