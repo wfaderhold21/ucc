@@ -4,6 +4,8 @@
  * See file LICENSE for terms.
  */
 
+
+#include "utils/arch/reduce_simd.h"
 #include "utils/ucc_math_op.h"
 #include "ec_cpu.h"
 #include <complex.h>
@@ -227,6 +229,71 @@
 ucc_status_t ucc_ec_cpu_reduce(ucc_eee_task_reduce_t *task, void * restrict dst,
                                void * const * restrict srcs, uint16_t flags)
 {
+    /* SIMD fast path: large counts on a supported (dt, op).  Kernels are a
+     * pure reduce; alpha is applied below exactly as the scalar macros do.
+     * Scalar macros remain the reference and handle unsupported ops. */
+#if defined(__x86_64__) || defined(__aarch64__)
+    if ((task->count >= UCC_ARCH_REDUCE_THRESH) &&
+        ucc_arch_reduce_supported(task->dt, task->op)) {
+        ucc_arch_reduce(dst, (const void * const *)srcs, task->count,
+                        task->n_srcs, task->dt, task->op);
+        if (flags & UCC_EEE_TASK_FLAG_REDUCE_WITH_ALPHA) {
+            switch (task->dt) {
+            case UCC_DT_INT8:
+                if ((task->op == UCC_OP_SUM) || (task->op == UCC_OP_AVG)) {
+                    VEC_OP(((int8_t *)dst), task->count, task->alpha);
+                }
+                break;
+            case UCC_DT_INT16:
+                if ((task->op == UCC_OP_SUM) || (task->op == UCC_OP_AVG)) {
+                    VEC_OP(((int16_t *)dst), task->count, task->alpha);
+                }
+                break;
+            case UCC_DT_INT32:
+                if ((task->op == UCC_OP_SUM) || (task->op == UCC_OP_AVG)) {
+                    VEC_OP(((int32_t *)dst), task->count, task->alpha);
+                }
+                break;
+            case UCC_DT_INT64:
+                if ((task->op == UCC_OP_SUM) || (task->op == UCC_OP_AVG)) {
+                    VEC_OP(((int64_t *)dst), task->count, task->alpha);
+                }
+                break;
+            case UCC_DT_UINT8:
+                if ((task->op == UCC_OP_SUM) || (task->op == UCC_OP_AVG)) {
+                    VEC_OP(((uint8_t *)dst), task->count, task->alpha);
+                }
+                break;
+            case UCC_DT_UINT16:
+                if ((task->op == UCC_OP_SUM) || (task->op == UCC_OP_AVG)) {
+                    VEC_OP(((uint16_t *)dst), task->count, task->alpha);
+                }
+                break;
+            case UCC_DT_UINT32:
+                if ((task->op == UCC_OP_SUM) || (task->op == UCC_OP_AVG)) {
+                    VEC_OP(((uint32_t *)dst), task->count, task->alpha);
+                }
+                break;
+            case UCC_DT_UINT64:
+                if ((task->op == UCC_OP_SUM) || (task->op == UCC_OP_AVG)) {
+                    VEC_OP(((uint64_t *)dst), task->count, task->alpha);
+                }
+                break;
+            case UCC_DT_FLOAT32:
+                /* float scalar applies alpha after every op */
+                VEC_OP(((float *)dst), task->count, task->alpha);
+                break;
+            case UCC_DT_FLOAT64:
+                VEC_OP(((double *)dst), task->count, task->alpha);
+                break;
+            default:
+                break;
+            }
+        }
+        return UCC_OK;
+    }
+#endif
+
     switch (task->dt) {
     case UCC_DT_INT8:
         DO_DT_REDUCE_INT(int8_t, srcs, dst, task->op, task->count,
