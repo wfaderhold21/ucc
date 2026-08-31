@@ -89,7 +89,8 @@ ucc_pt_coll_alltoallv::ucc_pt_coll_alltoallv(ucc_datatype_t dt,
         ucc_mem_map_params_t mem_map_params;
         uint64_t             dst_memh_size, src_memh_size;
         uint64_t             dst_memh_size_max, src_memh_size_max;
-        bool                 import_failed = false;
+        size_t               memh_size_tmp;
+        bool                 map_failed = false;
 
         coll_args.flags |= UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS;
         mem_map_params.n_segments = 1;
@@ -97,9 +98,15 @@ ucc_pt_coll_alltoallv::ucc_pt_coll_alltoallv(ucc_datatype_t dt,
 
         mem_map_params.segments[0].address = dst_header->addr;
         mem_map_params.segments[0].len     = dst_count_size;
-        UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
-                                  &mem_map_params, &dst_memh_size, &dst_memh),
-                      exit, st);
+        st = ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT, &mem_map_params,
+                         &memh_size_tmp, &dst_memh);
+        if (st != UCC_OK) {
+            map_failed    = true;
+            dst_memh      = NULL;
+            dst_memh_size = 0;
+        } else {
+            dst_memh_size = (uint64_t)memh_size_tmp;
+        }
 
         comm->allreduce(&dst_memh_size, &dst_memh_size_max, 1, UCC_OP_MAX,
                         UCC_DT_UINT64);
@@ -108,13 +115,17 @@ ucc_pt_coll_alltoallv::ucc_pt_coll_alltoallv(ucc_datatype_t dt,
         for (int i = 0; i < comm->get_size(); i++) {
             dst_memh_global[i] = ucc_malloc(dst_memh_size_max, "dst memh blob");
             if (i == comm->get_rank()) {
-                memcpy(dst_memh_global[i], dst_memh, dst_memh_size);
+                if (dst_memh) {
+                    memcpy(dst_memh_global[i], dst_memh, dst_memh_size);
+                } else {
+                    memset(dst_memh_global[i], 0, dst_memh_size_max);
+                }
             }
             comm->bcast(dst_memh_global[i], dst_memh_size_max, i);
         }
         for (int i = 0; i < comm->get_size(); i++) {
             st = ucc_mem_map(ctx, UCC_MEM_MAP_MODE_IMPORT, &mem_map_params,
-                             &dst_memh_size_max, &dst_memh_global[i]);
+                             &memh_size_tmp, &dst_memh_global[i]);
             if (st != UCC_OK) {
                 /* Import failed: dst_memh_global[i] is still a raw serialized
                  * blob, not a valid handle. Free it and any not-yet-imported
@@ -123,7 +134,7 @@ ucc_pt_coll_alltoallv::ucc_pt_coll_alltoallv(ucc_datatype_t dt,
                     ucc_free(dst_memh_global[j]);
                     dst_memh_global[j] = NULL;
                 }
-                import_failed = true;
+                map_failed = true;
                 break;
             }
         }
@@ -131,9 +142,15 @@ ucc_pt_coll_alltoallv::ucc_pt_coll_alltoallv(ucc_datatype_t dt,
         if (!is_inplace) {
             mem_map_params.segments[0].address = src_header->addr;
             mem_map_params.segments[0].len     = src_count_size;
-            UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
-                                      &mem_map_params, &src_memh_size, &src_memh),
-                          exit, st);
+            st = ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT, &mem_map_params,
+                             &memh_size_tmp, &src_memh);
+            if (st != UCC_OK) {
+                map_failed    = true;
+                src_memh      = NULL;
+                src_memh_size = 0;
+            } else {
+                src_memh_size = (uint64_t)memh_size_tmp;
+            }
 
             comm->allreduce(&src_memh_size, &src_memh_size_max, 1, UCC_OP_MAX,
                             UCC_DT_UINT64);
@@ -142,13 +159,17 @@ ucc_pt_coll_alltoallv::ucc_pt_coll_alltoallv(ucc_datatype_t dt,
             for (int i = 0; i < comm->get_size(); i++) {
                 src_memh_global[i] = ucc_malloc(src_memh_size_max, "src memh blob");
                 if (i == comm->get_rank()) {
-                    memcpy(src_memh_global[i], src_memh, src_memh_size);
+                    if (src_memh) {
+                        memcpy(src_memh_global[i], src_memh, src_memh_size);
+                    } else {
+                        memset(src_memh_global[i], 0, src_memh_size_max);
+                    }
                 }
                 comm->bcast(src_memh_global[i], src_memh_size_max, i);
             }
             for (int i = 0; i < comm->get_size(); i++) {
                 st = ucc_mem_map(ctx, UCC_MEM_MAP_MODE_IMPORT, &mem_map_params,
-                                 &src_memh_size_max, &src_memh_global[i]);
+                                 &memh_size_tmp, &src_memh_global[i]);
                 if (st != UCC_OK) {
                     /* Import failed: src_memh_global[i] is still a raw
                      * serialized blob, not a valid handle. Free it and any
@@ -158,17 +179,17 @@ ucc_pt_coll_alltoallv::ucc_pt_coll_alltoallv(ucc_datatype_t dt,
                         ucc_free(src_memh_global[j]);
                         src_memh_global[j] = NULL;
                     }
-                    import_failed = true;
+                    map_failed = true;
                     break;
                 }
             }
         }
 
-        /* A local import failure must not let this rank tear down while peers
-         * advance to the next barrier. Synchronize the status across ranks so
-         * every rank takes the error path together. */
+        /* A local export/import failure must not let this rank tear down while
+         * peers advance to the next barrier. Synchronize the status across
+         * ranks so every rank takes the error path together. */
         {
-            uint64_t local_fail = import_failed ? 1 : 0;
+            uint64_t local_fail = map_failed ? 1 : 0;
             uint64_t any_fail   = 0;
             comm->allreduce(&local_fail, &any_fail, 1, UCC_OP_MAX, UCC_DT_UINT64);
             if (any_fail) {
