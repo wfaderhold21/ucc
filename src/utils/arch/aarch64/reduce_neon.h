@@ -51,8 +51,14 @@ static inline int ucc_arch_neon_supported(void)
 /* Shared multi-step helpers                                          */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Truncating folds.  NEON's narrowing ops shift (vmovn_s16 = >> 1), they
+ * do NOT take the low byte.  Shift the value into the upper byte (exact
+ * for values < 2^8 / < 2^16) and narrow-shift it back down:
+ *   (x << n) >> n  ==  x,  truncated to the operand width.
+ */
 /* int8/uint8 product: widen each byte to 16-bit, mullo, keep low byte,
- * pack back to 8-bit.  Operates on two int8x16_t (16 lanes each).
+ * fold back to 8-bit.  Operates on two int8x16_t (16 lanes each).
  */
 static inline int8x16_t ucc_arch_neon_mul_8bit(int8x16_t a, int8x16_t b)
 {
@@ -61,18 +67,43 @@ static inline int8x16_t ucc_arch_neon_mul_8bit(int8x16_t a, int8x16_t b)
     int16x8_t bl = vmovl_s8(vget_low_s8(b));
     int16x8_t bh = vmovl_s8(vget_high_s8(b));
 
-    int16x8_t pl = vmulq_s16(al, bl);
-    int16x8_t ph = vmulq_s16(ah, bh);
+    /* low byte of the 16-bit products, folded back to 8-bit */
+    uint16x8_t pl = vreinterpretq_u16_s16(
+        vandq_s16(vmulq_s16(al, bl), vdupq_n_s16(0xFF)));
+    uint16x8_t ph = vreinterpretq_u16_s16(
+        vandq_s16(vmulq_s16(ah, bh), vdupq_n_s16(0xFF)));
+    uint8x8_t pl8 = vshrn_n_u16(vshlq_n_u16(pl, 8), 8);
+    uint8x8_t ph8 = vshrn_n_u16(vshlq_n_u16(ph, 8), 8);
 
-    /* Mask low 8 bits: AND with 0x00FF per 16-bit element */
-    pl = vandq_s16(pl, vdupq_n_s16(0xFF));
-    ph = vandq_s16(ph, vdupq_n_s16(0xFF));
+    return vcombine_s8(vreinterpret_s8_u8(ph8), vreinterpret_s8_u8(pl8));
+}
 
-    /* Narrow back to int8x8_t: take low byte of each int16, no saturate */
-    int8x8_t pl8 = vmovn_s16(pl);
-    int8x8_t ph8 = vmovn_s16(ph);
+/* Wrapping (mod 2^n) 8-bit add: widen to 16-bit (exact), add, fold. */
+static inline int8x16_t ucc_arch_neon_add_epi8_wrap(int8x16_t a, int8x16_t b)
+{
+    int16x8_t t_lo = vaddq_s16(vmovl_s8(vget_low_s8(a)),
+                                vmovl_s8(vget_low_s8(b)));
+    int16x8_t t_hi = vaddq_s16(vmovl_s8(vget_high_s8(a)),
+                                vmovl_s8(vget_high_s8(b)));
+    uint16x8_t m_lo = vreinterpretq_u16_s16(vandq_s16(t_lo, vdupq_n_s16(0xFF)));
+    uint16x8_t m_hi = vreinterpretq_u16_s16(vandq_s16(t_hi, vdupq_n_s16(0xFF)));
+    uint8x8_t p_lo = vshrn_n_u16(vshlq_n_u16(m_lo, 8), 8);
+    uint8x8_t p_hi = vshrn_n_u16(vshlq_n_u16(m_hi, 8), 8);
+    return vcombine_s8(vreinterpret_s8_u8(p_hi), vreinterpret_s8_u8(p_lo));
+}
 
-    return vcombine_s8(pl8, ph8);
+/* Wrapping (mod 2^n) 16-bit add: widen to 32-bit (exact), add, fold. */
+static inline int16x8_t ucc_arch_neon_add_epi16_wrap(int16x8_t a, int16x8_t b)
+{
+    int32x4_t t_lo = vaddq_s32(vmovl_s16(vget_low_s16(a)),
+                                vmovl_s16(vget_low_s16(b)));
+    int32x4_t t_hi = vaddq_s32(vmovl_s16(vget_high_s16(a)),
+                                vmovl_s16(vget_high_s16(b)));
+    uint32x4_t m_lo = vreinterpretq_u32_s32(vandq_s32(t_lo, vdupq_n_s32(0xFFFF)));
+    uint32x4_t m_hi = vreinterpretq_u32_s32(vandq_s32(t_hi, vdupq_n_s32(0xFFFF)));
+    uint16x4_t p_lo = vshrn_n_u32(vshlq_n_u32(m_lo, 16), 16);
+    uint16x4_t p_hi = vshrn_n_u32(vshlq_n_u32(m_hi, 16), 16);
+    return vcombine_s16(vreinterpret_s16_u16(p_hi), vreinterpret_s16_u16(p_lo));
 }
 
 /* int64/uint64 product: 32-bit cross-term decomposition, low 64 bits
@@ -157,7 +188,7 @@ static inline int64x2_t ucc_arch_neon_max_64bit_u(int64x2_t a, int64x2_t b)
 #define UCC_RED_NEON_INT8_LANES  16
 #define UCC_RED_NEON_INT8_LOAD(p)        vld1q_s8((const int8_t *)(p))
 #define UCC_RED_NEON_INT8_STORE(p, v)    vst1q_s8((int8_t *)(p), (v))
-#define UCC_RED_NEON_INT8_SUM(a, v)      vaddq_s8((a), (v))
+#define UCC_RED_NEON_INT8_SUM(a, v)      ucc_arch_neon_add_epi8_wrap((a), (v))
 #define UCC_RED_NEON_INT8_PROD(a, v)     ucc_arch_neon_mul_8bit((a), (v))
 #define UCC_RED_NEON_INT8_MIN(a, v)      vminq_s8((a), (v))
 #define UCC_RED_NEON_INT8_MAX(a, v)      vmaxq_s8((a), (v))
@@ -184,7 +215,7 @@ static inline int64x2_t ucc_arch_neon_max_64bit_u(int64x2_t a, int64x2_t b)
 #define UCC_RED_NEON_UINT8_LANES  16
 #define UCC_RED_NEON_UINT8_LOAD(p)          vld1q_u8((const uint8_t *)(p))
 #define UCC_RED_NEON_UINT8_STORE(p, v)      vst1q_u8((uint8_t *)(p), (v))
-#define UCC_RED_NEON_UINT8_SUM(a, v)        vaddq_u8((a), (v))
+#define UCC_RED_NEON_UINT8_SUM(a, v)        ucc_arch_neon_add_epi8_wrap((a), (v))
 #define UCC_RED_NEON_UINT8_PROD(a, v)                                       \
     vreinterpretq_u8_s8(ucc_arch_neon_mul_8bit(                            \
         vreinterpretq_s8_u8((a)), vreinterpretq_s8_u8((v))))
@@ -203,7 +234,7 @@ static inline int64x2_t ucc_arch_neon_max_64bit_u(int64x2_t a, int64x2_t b)
 #define UCC_RED_NEON_INT16_LANES  8
 #define UCC_RED_NEON_INT16_LOAD(p)        vld1q_s16((const int16_t *)(p))
 #define UCC_RED_NEON_INT16_STORE(p, v)    vst1q_s16((int16_t *)(p), (v))
-#define UCC_RED_NEON_INT16_SUM(a, v)      vaddq_s16((a), (v))
+#define UCC_RED_NEON_INT16_SUM(a, v)      ucc_arch_neon_add_epi16_wrap((a), (v))
 #define UCC_RED_NEON_INT16_PROD(a, v)     vmulq_s16((a), (v))
 #define UCC_RED_NEON_INT16_MIN(a, v)      vminq_s16((a), (v))
 #define UCC_RED_NEON_INT16_MAX(a, v)      vmaxq_s16((a), (v))
@@ -230,7 +261,7 @@ static inline int64x2_t ucc_arch_neon_max_64bit_u(int64x2_t a, int64x2_t b)
 #define UCC_RED_NEON_UINT16_LANES  8
 #define UCC_RED_NEON_UINT16_LOAD(p)         vld1q_u16((const uint16_t *)(p))
 #define UCC_RED_NEON_UINT16_STORE(p, v)     vst1q_u16((uint16_t *)(p), (v))
-#define UCC_RED_NEON_UINT16_SUM(a, v)       vaddq_u16((a), (v))
+#define UCC_RED_NEON_UINT16_SUM(a, v)       ucc_arch_neon_add_epi16_wrap((a), (v))
 #define UCC_RED_NEON_UINT16_PROD(a, v)      vmulq_u16((a), (v))
 #define UCC_RED_NEON_UINT16_MIN(a, v)       vminq_u16((a), (v))
 #define UCC_RED_NEON_UINT16_MAX(a, v)       vmaxq_u16((a), (v))

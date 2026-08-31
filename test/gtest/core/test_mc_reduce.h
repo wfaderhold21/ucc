@@ -9,6 +9,64 @@ extern "C" {
 }
 #include <common/test.h>
 
+/*
+ * ULP distance for the dt x op matrix assertions (full-matrix correctness
+ * gate). The CPU reduce (scalar reference and SIMD fast path) folds
+ * float32/float64 sum/prod left-associatively in source order, so results
+ * are bitwise-identical to the left-fold reference; min/max/band/bor/bxor/
+ * land/lor/lxor and complex ops are exact.  The matrix therefore asserts
+ * within 1 ULP for float32/float64 and bitwise (exact bits) for every other
+ * type.  bfloat16 is special-cased: the CPU folds in fp32 and converts to
+ * bfloat16 once, while the CUDA kernel rounds after every op.
+ */
+static inline uint32_t f32_ulp_distance(float a, float b)
+{
+    uint32_t ba, bb;
+    memcpy(&ba, &a, sizeof(ba));
+    memcpy(&bb, &b, sizeof(bb));
+    uint64_t ma = (ba & 0x80000000u) ? ~ba : ba | 0x80000000u;
+    uint64_t mb = (bb & 0x80000000u) ? ~bb : bb | 0x80000000u;
+    return (uint32_t)(ma > mb ? ma - mb : mb - ma);
+}
+
+static inline uint64_t f64_ulp_distance(double a, double b)
+{
+    uint64_t ba, bb;
+    memcpy(&ba, &a, sizeof(ba));
+    memcpy(&bb, &b, sizeof(bb));
+    const uint64_t sign = (uint64_t)1 << 63;
+    uint64_t ma = (ba & sign) ? ~ba : ba | sign;
+    uint64_t mb = (bb & sign) ? ~bb : bb | sign;
+    return ma > mb ? ma - mb : mb - ma;
+}
+
+template <typename T>
+struct MatrixAssertImpl {
+    static void check(T expected, T actual, bool device = false)
+    {
+        (void)device;
+        EXPECT_EQ(expected, actual);
+    }
+};
+
+template <>
+struct MatrixAssertImpl<float> {
+    static void check(float expected, float actual, bool device = false)
+    {
+        (void)device;
+        EXPECT_LE(f32_ulp_distance(expected, actual), 1);
+    }
+};
+
+template <>
+struct MatrixAssertImpl<double> {
+    static void check(double expected, double actual, bool device = false)
+    {
+        (void)device;
+        EXPECT_LE(f64_ulp_distance(expected, actual), 1);
+    }
+};
+
 template<ucc_datatype_t, template <typename P> class op>
 struct TypeOpPair;
 
@@ -25,6 +83,10 @@ struct TypeOpPair;
         static type do_op(type arg1, type arg2) {                   \
             op<type> _op;                                           \
             return _op(arg1, arg2);                                 \
+        }                                                           \
+        static void matrix_assert(type arg1, type arg2,             \
+                                  bool device = false) {            \
+            MatrixAssertImpl<type>::check(arg1, arg2, device);      \
         }                                                           \
     };
 
@@ -71,6 +133,21 @@ struct TypeOpPair<UCC_DT_BFLOAT16, op> {
         float32tobfloat16(
             _op(bfloat16tofloat32(&arg1), bfloat16tofloat32(&arg2)), &res);
         return res;
+    }
+    static void matrix_assert(type arg1, type arg2, bool device = false)
+    {
+        if (device) {
+            /* GPU rounds each op to bf16; the CPU folds in fp32 and converts
+             * once.  With n_srcs <= 9 the drift is bounded by ~n*2^-9; allow
+             * 2% relative on the device path. */
+            float f1 = bfloat16tofloat32(&arg1);
+            float f2 = bfloat16tofloat32(&arg2);
+            float scale = fabsf(f2) > 1.0f ? fabsf(f2) : 1.0f;
+            EXPECT_NEAR(f1, f2, 0.02f * scale);
+        } else {
+            /* host path: fp32 fold converted once, bitwise equal */
+            EXPECT_EQ(arg1, arg2);
+        }
     }
 };
 

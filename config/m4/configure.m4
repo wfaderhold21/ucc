@@ -66,6 +66,22 @@ AS_IF([test "x$enable_profiling" = xyes],
 AM_CONDITIONAL([HAVE_PROFILING],[test "x$HAVE_PROFILING" = "xyes"])
 
 #
+# Enables threaded CPU reductions in EC
+#
+AC_ARG_ENABLE([ec-threaded-reduce],
+    AS_HELP_STRING([--enable-ec-threaded-reduce], [Enable threaded CPU reductions in execution component (default is NO).]),
+    [:],
+    [enable_ec_threaded_reduce=no])
+
+AS_IF([test "x$enable_ec_threaded_reduce" = xyes],
+    [AS_MESSAGE([enabling threaded CPU reductions])
+    AC_DEFINE([HAVE_EC_THREADED_REDUCE], [1], [Enable threaded CPU reductions])
+    HAVE_EC_THREADED_REDUCE=yes],
+    [HAVE_EC_THREADED_REDUCE=no])
+
+AM_CONDITIONAL([HAVE_EC_THREADED_REDUCE], [test "x$HAVE_EC_THREADED_REDUCE" = "xyes"])
+
+#
 # Enables logging levels above INFO for debug build
 #
 AC_ARG_ENABLE([debug],

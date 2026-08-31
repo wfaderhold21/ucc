@@ -70,6 +70,76 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_mul_8bit(__m
         _mm_packus_epi16(_mm256_castsi256_si128(pl),
                          _mm256_extractf128_si256(pl, 1)));
 }
+/*
+ * Wrapping (mod 2^n) integer adds.  The SSE/AVX integer add instructions
+ * saturate, but C integer arithmetic wraps, and the scalar reduce
+ * reference (DO_OP_SUM) is C.  Widen to a width where the sum cannot
+ * overflow (8->16, 16->32), add there exactly, then truncate to the
+ * operand width.  Shared by the signed and unsigned 8/16-bit SUM/AVG
+ * kernels (same bit patterns).
+ */
+static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_add_epi8_wrap(__m256i a, __m256i b)
+{
+    const __m128i shuf =
+        _mm_setr_epi8(0, 2, 4, 6, 8, 10, 12, 14,
+                      0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80);
+    const __m128i m8 = _mm_set1_epi16(0xFF);
+
+    __m128i al = _mm256_castsi256_si128(a);
+    __m128i ah = _mm256_extractf128_si256(a, 1);
+    __m128i bl = _mm256_castsi256_si128(b);
+    __m128i bh = _mm256_extractf128_si256(b, 1);
+
+    /* each 128-bit half holds 16 int8 lanes; cvt handles 8 at a time */
+    __m128i t  = _mm_add_epi16(_mm_cvtepi8_epi16(al), _mm_cvtepi8_epi16(bl));
+    __m128i tu = _mm_add_epi16(_mm_cvtepi8_epi16(_mm_srli_si128(al, 8)),
+                                _mm_cvtepi8_epi16(_mm_srli_si128(bl, 8)));
+    __m128i rl  = _mm_shuffle_epi8(_mm_and_si128(t,  m8), shuf);
+    __m128i rlu = _mm_shuffle_epi8(_mm_and_si128(tu, m8), shuf);
+
+    t  = _mm_add_epi16(_mm_cvtepi8_epi16(ah), _mm_cvtepi8_epi16(bh));
+    tu = _mm_add_epi16(_mm_cvtepi8_epi16(_mm_srli_si128(ah, 8)),
+                        _mm_cvtepi8_epi16(_mm_srli_si128(bh, 8)));
+    __m128i rh  = _mm_shuffle_epi8(_mm_and_si128(t,  m8), shuf);
+    __m128i rhu = _mm_shuffle_epi8(_mm_and_si128(tu, m8), shuf);
+
+    /* rl holds lanes 0-7 in bytes 0-7; shift rlu into bytes 8-15 */
+    return _mm256_set_m128i(
+        _mm_or_si128(rh, _mm_slli_si128(rhu, 8)),
+        _mm_or_si128(rl, _mm_slli_si128(rlu, 8)));
+}
+
+static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_add_epi16_wrap(__m256i a, __m256i b)
+{
+    const __m128i shuf =
+        _mm_setr_epi8(0, 1, 4, 5, 8, 9, 12, 13,
+                      0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80);
+    const __m128i m16 = _mm_set1_epi32(0xFFFF);
+
+    __m128i al = _mm256_castsi256_si128(a);
+    __m128i ah = _mm256_extractf128_si256(a, 1);
+    __m128i bl = _mm256_castsi256_si128(b);
+    __m128i bh = _mm256_extractf128_si256(b, 1);
+
+    /* each 128-bit half holds 8 int16 lanes; cvt handles 4 at a time */
+    __m128i t  = _mm_add_epi32(_mm_cvtepi16_epi32(al), _mm_cvtepi16_epi32(bl));
+    __m128i tu = _mm_add_epi32(_mm_cvtepi16_epi32(_mm_srli_si128(al, 8)),
+                                _mm_cvtepi16_epi32(_mm_srli_si128(bl, 8)));
+    __m128i rl  = _mm_shuffle_epi8(_mm_and_si128(t,  m16), shuf);
+    __m128i rlu = _mm_shuffle_epi8(_mm_and_si128(tu, m16), shuf);
+
+    t  = _mm_add_epi32(_mm_cvtepi16_epi32(ah), _mm_cvtepi16_epi32(bh));
+    tu = _mm_add_epi32(_mm_cvtepi16_epi32(_mm_srli_si128(ah, 8)),
+                        _mm_cvtepi16_epi32(_mm_srli_si128(bh, 8)));
+    __m128i rh  = _mm_shuffle_epi8(_mm_and_si128(t,  m16), shuf);
+    __m128i rhu = _mm_shuffle_epi8(_mm_and_si128(tu, m16), shuf);
+
+    /* rl holds lanes 0-3 (8 bytes) in bytes 0-7; shift rlu into 8-15 */
+    return _mm256_set_m128i(
+        _mm_or_si128(rh, _mm_slli_si128(rhu, 8)),
+        _mm_or_si128(rl, _mm_slli_si128(rlu, 8)));
+}
+
 
 /* int64 product: 32-bit cross-term decomposition, low 64 bits exact. */
 static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_mul_64bit(__m256i a, __m256i b)
@@ -140,7 +210,7 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_max_64bit_u(
 #define UCC_RED_AVX2_INT8_LANES  32
 #define UCC_RED_AVX2_INT8_LOAD(p)   _mm256_loadu_si256((const __m256i *)(p))
 #define UCC_RED_AVX2_INT8_STORE(p,v) _mm256_storeu_si256((__m256i *)(p), (v))
-#define UCC_RED_AVX2_INT8_SUM(a,v)  _mm256_add_epi8((a), (v))
+#define UCC_RED_AVX2_INT8_SUM(a,v)  ucc_arch_avx2_add_epi8_wrap((a), (v))
 #define UCC_RED_AVX2_INT8_PROD(a,v) ucc_arch_avx2_mul_8bit((a), (v))
 #define UCC_RED_AVX2_INT8_MIN(a,v)  _mm256_min_epi8((a), (v))
 #define UCC_RED_AVX2_INT8_MAX(a,v)  _mm256_max_epi8((a), (v))
@@ -167,7 +237,7 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_max_64bit_u(
 #define UCC_RED_AVX2_UINT8_LANES  32
 #define UCC_RED_AVX2_UINT8_LOAD(p)   _mm256_loadu_si256((const __m256i *)(p))
 #define UCC_RED_AVX2_UINT8_STORE(p,v) _mm256_storeu_si256((__m256i *)(p), (v))
-#define UCC_RED_AVX2_UINT8_SUM(a,v)  _mm256_add_epi8((a), (v))
+#define UCC_RED_AVX2_UINT8_SUM(a,v)  ucc_arch_avx2_add_epi8_wrap((a), (v))
 #define UCC_RED_AVX2_UINT8_PROD(a,v) ucc_arch_avx2_mul_8bit((a), (v))
 #define UCC_RED_AVX2_UINT8_MIN(a,v)  _mm256_min_epu8((a), (v))
 #define UCC_RED_AVX2_UINT8_MAX(a,v)  _mm256_max_epu8((a), (v))
@@ -184,7 +254,7 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_max_64bit_u(
 #define UCC_RED_AVX2_INT16_LANES  16
 #define UCC_RED_AVX2_INT16_LOAD(p)   _mm256_loadu_si256((const __m256i *)(p))
 #define UCC_RED_AVX2_INT16_STORE(p,v) _mm256_storeu_si256((__m256i *)(p), (v))
-#define UCC_RED_AVX2_INT16_SUM(a,v)  _mm256_add_epi16((a), (v))
+#define UCC_RED_AVX2_INT16_SUM(a,v)  ucc_arch_avx2_add_epi16_wrap((a), (v))
 #define UCC_RED_AVX2_INT16_PROD(a,v) _mm256_mullo_epi16((a), (v))
 #define UCC_RED_AVX2_INT16_MIN(a,v)  _mm256_min_epi16((a), (v))
 #define UCC_RED_AVX2_INT16_MAX(a,v)  _mm256_max_epi16((a), (v))
@@ -211,7 +281,7 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_max_64bit_u(
 #define UCC_RED_AVX2_UINT16_LANES  16
 #define UCC_RED_AVX2_UINT16_LOAD(p)   _mm256_loadu_si256((const __m256i *)(p))
 #define UCC_RED_AVX2_UINT16_STORE(p,v) _mm256_storeu_si256((__m256i *)(p), (v))
-#define UCC_RED_AVX2_UINT16_SUM(a,v)  _mm256_add_epi16((a), (v))
+#define UCC_RED_AVX2_UINT16_SUM(a,v)  ucc_arch_avx2_add_epi16_wrap((a), (v))
 #define UCC_RED_AVX2_UINT16_PROD(a,v) _mm256_mullo_epi16((a), (v))
 #define UCC_RED_AVX2_UINT16_MIN(a,v)  _mm256_min_epu16((a), (v))
 #define UCC_RED_AVX2_UINT16_MAX(a,v)  _mm256_max_epu16((a), (v))

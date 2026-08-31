@@ -15,7 +15,7 @@ extern "C" {
 template <typename T, bool triggered>
 class test_mc_reduce : public testing::Test {
   protected:
-    const int COUNT = 1024;
+    static constexpr int COUNT = 1024;
     ucc_memory_type_t  mem_type;
     ucc_ee_executor_t *executor;
     void              *ee_context = NULL;
@@ -107,40 +107,42 @@ class test_mc_reduce : public testing::Test {
         return status;
     }
 
-    ucc_status_t setup(ucc_memory_type_t mtype, size_t n)
+    ucc_status_t setup(ucc_memory_type_t mtype, size_t n, size_t count)
     {
         ucc_status_t status;
 
-        status = alloc_bufs(mtype, n);
+        status = alloc_bufs(mtype, n, count);
         if (UCC_OK != status) {
             return status;
         }
         return alloc_executor(mtype);
     }
 
-    ucc_status_t alloc_bufs(ucc_memory_type_t mtype, size_t n)
+    ucc_status_t alloc_bufs(ucc_memory_type_t mtype, size_t n, size_t count)
     {
-        size_t n_bytes = COUNT*sizeof(typename T::type);
+        size_t n_bytes = count * sizeof(typename T::type);
         mem_type = mtype;
 
         ucc_mc_alloc(&res_h_mc_header, n_bytes, UCC_MEMORY_TYPE_HOST);
         res_h = (typename T::type *)res_h_mc_header->addr;
         ucc_mc_alloc(&buf1_h_mc_header, n_bytes, UCC_MEMORY_TYPE_HOST);
         buf1_h = (typename T::type *)buf1_h_mc_header->addr;
-        ucc_mc_alloc(&buf2_h_mc_header, n * n_bytes, UCC_MEMORY_TYPE_HOST);
-        buf2_h = (typename T::type *)buf2_h_mc_header->addr;
+        if (n > 0) {
+            ucc_mc_alloc(&buf2_h_mc_header, n * n_bytes, UCC_MEMORY_TYPE_HOST);
+            buf2_h = (typename T::type *)buf2_h_mc_header->addr;
+        }
 
-        for (int i = 0; i < COUNT; i++) {
+        for (size_t i = 0; i < count; i++) {
             res_h[i] = (typename T::type)(0);
         }
-        for (int i = 0; i < COUNT; i++) {
+        for (size_t i = 0; i < count; i++) {
             /* bFloat16 will be assigned with the floats matching the
                uint16_t bit pattern*/
             buf1_h[i] = (typename T::type)(i + 1);
         }
-        for (int j = 0; j < n; j++) {
-            for (int i = 0; i < COUNT; i++) {
-                buf2_h[i + j * COUNT] = (typename T::type)(2 * i + j + 1);
+        for (size_t j = 0; j < n; j++) {
+            for (size_t i = 0; i < count; i++) {
+                buf2_h[i + j * count] = (typename T::type)(2 * i + j + 1);
             }
         }
         if (mtype != UCC_MEMORY_TYPE_HOST) {
@@ -148,12 +150,16 @@ class test_mc_reduce : public testing::Test {
             res_d = (typename T::type *)res_d_mc_header->addr;
             ucc_mc_alloc(&buf1_d_mc_header, n_bytes, mtype);
             buf1_d = (typename T::type *)buf1_d_mc_header->addr;
-            ucc_mc_alloc(&buf2_d_mc_header, n * n_bytes, mtype);
-            buf2_d = (typename T::type *)buf2_d_mc_header->addr;
+            if (n > 0) {
+                ucc_mc_alloc(&buf2_d_mc_header, n * n_bytes, mtype);
+                buf2_d = (typename T::type *)buf2_d_mc_header->addr;
+            }
             ucc_mc_memcpy(res_d, res_h, n_bytes, mtype, UCC_MEMORY_TYPE_HOST);
             ucc_mc_memcpy(buf1_d, buf1_h, n_bytes, mtype, UCC_MEMORY_TYPE_HOST);
-            ucc_mc_memcpy(buf2_d, buf2_h, n * n_bytes, mtype,
-                          UCC_MEMORY_TYPE_HOST);
+            if (n > 0) {
+                ucc_mc_memcpy(buf2_d, buf2_h, n * n_bytes, mtype,
+                              UCC_MEMORY_TYPE_HOST);
+            }
             buf1 = buf1_d;
             buf2 = buf2_d;
             res  = res_d;
@@ -171,21 +177,27 @@ class test_mc_reduce : public testing::Test {
         if (buf1_h != nullptr) {
             ucc_mc_free(buf1_h_mc_header);
         }
+        buf1_h = nullptr;
         if (buf2_h != nullptr) {
             ucc_mc_free(buf2_h_mc_header);
         }
+        buf2_h = nullptr;
         if (res_h != nullptr) {
             ucc_mc_free(res_h_mc_header);
         }
+        res_h = nullptr;
         if (buf1_d != nullptr) {
             ucc_mc_free(buf1_d_mc_header);
         }
+        buf1_d = nullptr;
         if (buf2_d != nullptr) {
             ucc_mc_free(buf2_d_mc_header);
         }
+        buf2_d = nullptr;
         if (res_d != nullptr) {
             ucc_mc_free(res_d_mc_header);
         }
+        res_d = nullptr;
 
         return UCC_OK;
     }
@@ -231,15 +243,16 @@ class test_mc_reduce : public testing::Test {
         return status;
     }
 
-    void test_reduce(ucc_memory_type_t mt) {
+    void test_reduce(ucc_memory_type_t mt, size_t count = COUNT,
+                     uint16_t n_src2 = 1) {
         ucc_status_t status;
 
         if (UCC_OK !=  ucc_mc_available(mt)) {
             GTEST_SKIP();
         }
-        ASSERT_EQ(this->setup(mt, 1), UCC_OK);
-        status = do_reduce(this->buf1, this->buf2, this->res, this->COUNT, 1, 0,
-                           T::dt, T::redop, false, 0);
+        ASSERT_EQ(this->setup(mt, n_src2, count), UCC_OK);
+        status = do_reduce(this->buf1, this->buf2, this->res, count, n_src2,
+                           0, T::dt, T::redop, false, 0);
         if (UCC_ERR_NOT_SUPPORTED == status) {
             GTEST_SKIP();
         }
@@ -249,25 +262,25 @@ class test_mc_reduce : public testing::Test {
         }
 
         if (mt != UCC_MEMORY_TYPE_HOST) {
-            ucc_mc_memcpy(this->res_h, this->res_d, this->COUNT * sizeof(*this->res_d),
+            ucc_mc_memcpy(this->res_h, this->res_d, count * sizeof(*this->res_d),
                           UCC_MEMORY_TYPE_HOST, mt);
         }
-        for (int i = 0; i < this->COUNT; i++) {
+        for (size_t i = 0; i < count; i++) {
             T::assert_equal(T::do_op(this->buf1_h[i],
                                      this->buf2_h[i]), this->res_h[i]);
         }
     };
 
-    void test_reduce_multi(ucc_memory_type_t mt) {
-        const int    num_vec = 3;
+    void test_reduce_multi(ucc_memory_type_t mt, int num_vec = 3,
+                           size_t count = COUNT) {
         ucc_status_t status;
 
         if (UCC_OK !=  ucc_mc_available(mt)) {
             GTEST_SKIP();
         }
-        ASSERT_EQ(this->setup(mt, num_vec), UCC_OK);
-        status = do_reduce(this->buf1, this->buf2, this->res, this->COUNT,
-                           num_vec, this->COUNT * sizeof(*this->buf2), T::dt,
+        ASSERT_EQ(this->setup(mt, num_vec, count), UCC_OK);
+        status = do_reduce(this->buf1, this->buf2, this->res, count,
+                           num_vec, count * sizeof(*this->buf2), T::dt,
                            T::redop, false, 0);
         if (UCC_ERR_NOT_SUPPORTED == status) {
             GTEST_SKIP();
@@ -278,31 +291,30 @@ class test_mc_reduce : public testing::Test {
         }
 
         if (mt != UCC_MEMORY_TYPE_HOST) {
-            ucc_mc_memcpy(this->res_h, this->res_d, this->COUNT * sizeof(*this->res_d),
+            ucc_mc_memcpy(this->res_h, this->res_d, count * sizeof(*this->res_d),
                           UCC_MEMORY_TYPE_HOST, mt);
         }
-        for (int i = 0; i < this->COUNT; i++) {
+        for (size_t i = 0; i < count; i++) {
             typename T::type res = T::do_op(this->buf1_h[i],
-                                                            this->buf2_h[i]);
+                                            this->buf2_h[i]);
             for (int j = 1; j < num_vec; j++) {
-                res = T::do_op(this->buf2_h[i + j * this->COUNT], res);
+                res = T::do_op(this->buf2_h[i + j * count], res);
             }
             T::assert_equal(res, this->res_h[i]);
         }
     };
 
-    void test_reduce_multi_alpha(ucc_memory_type_t mt) {
-        const int    num_vec = 20;
-        const double alpha   = 0.7;
+    void test_reduce_multi_alpha(ucc_memory_type_t mt, int num_vec = 20,
+                                 size_t count = COUNT, double alpha = 0.7) {
         ucc_status_t status;
 
         if (UCC_OK !=  ucc_mc_available(mt)) {
             GTEST_SKIP();
         }
 
-        ASSERT_EQ(UCC_OK, this->setup(mt, num_vec));
-        status = do_reduce(this->buf1, this->buf2, this->res, this->COUNT,
-                           num_vec, this->COUNT * sizeof(*this->buf2), T::dt,
+        ASSERT_EQ(UCC_OK, this->setup(mt, num_vec, count));
+        status = do_reduce(this->buf1, this->buf2, this->res, count,
+                           num_vec, count * sizeof(*this->buf2), T::dt,
                            T::redop, true, alpha);
 
         if (UCC_ERR_NOT_SUPPORTED == status) {
@@ -314,13 +326,13 @@ class test_mc_reduce : public testing::Test {
         }
 
         if (mt != UCC_MEMORY_TYPE_HOST) {
-            ucc_mc_memcpy(this->res_h, this->res_d, this->COUNT * sizeof(*this->res_d),
+            ucc_mc_memcpy(this->res_h, this->res_d, count * sizeof(*this->res_d),
                           UCC_MEMORY_TYPE_HOST, mt);
         }
-        for (int i = 0; i < this->COUNT; i++) {
+        for (size_t i = 0; i < count; i++) {
             typename T::type res = T::do_op(this->buf1_h[i], this->buf2_h[i]);
             for (int j = 1; j < num_vec; j++) {
-                res = T::do_op(this->buf2_h[i + j * this->COUNT], res);
+                res = T::do_op(this->buf2_h[i + j * count], res);
             }
             if (T::dt == UCC_DT_BFLOAT16) {
                 float32tobfloat16(bfloat16tofloat32(&res)*(float)alpha, &res);
@@ -330,6 +342,105 @@ class test_mc_reduce : public testing::Test {
             T::assert_equal(res, this->res_h[i]);
         }
     }
+
+    /*
+     * Full dt x op matrix gate: the (dt, op) pair is fixed by the typed test
+     * case; this driver sweeps odd counts (non-multiples of the SIMD vector
+     * width) and n_srcs 1..UCC_EE_EXECUTOR_NUM_BUFS (9).  Integer/uint
+     * results must be bitwise equal to the reference; float32/float64 within
+     * 1 ULP (see MatrixAssertImpl); bfloat16 bitwise on host, within 2%
+     * relative on device (per-op bf16 rounding).
+     */
+    void test_reduce_matrix(ucc_memory_type_t mt)
+    {
+        const size_t counts[] = {1, 3, 33, 65, 1023, 1024};
+        bool         device   = (mt != UCC_MEMORY_TYPE_HOST);
+
+        if (UCC_OK != ucc_mc_available(mt)) {
+            GTEST_SKIP();
+        }
+
+        for (size_t count : counts) {
+            for (uint16_t n_srcs = 1; n_srcs <= UCC_EE_EXECUTOR_NUM_BUFS;
+                 ++n_srcs) {
+                uint16_t n_src2 = n_srcs - 1;
+
+                ASSERT_EQ(this->setup(mt, n_src2, count), UCC_OK);
+                /* distinct sources: stride in bytes over the buf2 blocks */
+                ucc_status_t status =
+                    this->do_reduce(this->buf1, this->buf2, this->res, count,
+                                    n_src2, count * sizeof(typename T::type),
+                                    T::dt, T::redop, false, 0);
+                if (UCC_ERR_NOT_SUPPORTED == status) {
+                    GTEST_SKIP();
+                }
+                ASSERT_EQ(status, UCC_OK);
+                if (executor) {
+                    free_executor();
+                }
+                if (device) {
+                    ucc_mc_memcpy(this->res_h, this->res_d,
+                                  count * sizeof(*this->res_d),
+                                  UCC_MEMORY_TYPE_HOST, mt);
+                }
+                for (size_t i = 0; i < count; i++) {
+                    if (T::dt == UCC_DT_BFLOAT16) {
+                        /* CPU folds in fp32 and converts to bf16 once */
+                        float acc = 0.0f;
+                        bool  first = true;
+                        for (uint16_t j = 0; j < n_srcs; ++j) {
+                            float s = (j == 0) ?
+                                bfloat16tofloat32(&this->buf1_h[i]) :
+                                bfloat16tofloat32(&this->buf2_h[
+                                    i + (j - 1) * count]);
+                            if (first) {
+                                acc = s;
+                                first = false;
+                            } else {
+                                switch (T::redop) {
+                                case UCC_OP_SUM:
+                                case UCC_OP_AVG:
+                                    acc += s;
+                                    break;
+                                case UCC_OP_PROD:
+                                    acc *= s;
+                                    break;
+                                case UCC_OP_MIN:
+                                    if (s < acc) {
+                                        acc = s;
+                                    }
+                                    break;
+                                case UCC_OP_MAX:
+                                    if (s > acc) {
+                                        acc = s;
+                                    }
+                                    break;
+                                default:
+                                    ADD_FAILURE();
+                                    break;
+                                }
+                            }
+                        }
+                        typename T::type expected;
+                        float32tobfloat16(acc, &expected);
+                        T::matrix_assert(expected, this->res_h[i], device);
+                    } else {
+                        /* CPU folds left-associatively over src1 then the
+                           n_srcs-1 buf2 blocks (stride = count elements) */
+                        typename T::type res = (n_srcs == 1) ?
+                            this->buf1_h[i] :
+                            T::do_op(this->buf1_h[i], this->buf2_h[i]);
+                        for (uint16_t j = 1; j < n_srcs - 1; ++j) {
+                            res =
+                                T::do_op(this->buf2_h[i + j * count], res);
+                        }
+                        T::matrix_assert(res, this->res_h[i], device);
+                    }
+                }
+                this->free_bufs(mt);
+            }
+        }
+    };
     ucc_mc_buffer_header_t *buf1_h_mc_header, *buf2_h_mc_header,
         *res_h_mc_header, *buf1_d_mc_header, *buf2_d_mc_header,
         *res_d_mc_header;
@@ -407,6 +518,11 @@ TYPED_TEST_CASE(test_mc_reduce_float, TypeOpPairsFloat);
         this->test_reduce_multi_alpha(UCC_MEMORY_TYPE_ ## _mt);   \
     }                                                       \
 
+#define DECLARE_REDUCE_MATRIX_TEST(_type, _mt)               \
+    TYPED_TEST(test_mc_reduce_ ## _type, matrix_ ## _mt) {   \
+        this->test_reduce_matrix(UCC_MEMORY_TYPE_ ## _mt);   \
+    }
+
 DECLARE_REDUCE_TEST(int, HOST);
 DECLARE_REDUCE_TEST(uint, HOST);
 DECLARE_REDUCE_TEST(float, HOST);
@@ -416,6 +532,10 @@ DECLARE_REDUCE_MULTI_TEST(uint, HOST);
 DECLARE_REDUCE_MULTI_TEST(float, HOST);
 
 DECLARE_REDUCE_MULTI_ALPHA_TEST(float, HOST);
+
+DECLARE_REDUCE_MATRIX_TEST(int, HOST);
+DECLARE_REDUCE_MATRIX_TEST(uint, HOST);
+DECLARE_REDUCE_MATRIX_TEST(float, HOST);
 
 #ifdef HAVE_CUDA
 DECLARE_REDUCE_TEST(int, CUDA);
@@ -427,6 +547,10 @@ DECLARE_REDUCE_MULTI_TEST(uint, CUDA);
 DECLARE_REDUCE_MULTI_TEST(float, CUDA);
 
 DECLARE_REDUCE_MULTI_ALPHA_TEST(float, CUDA);
+
+DECLARE_REDUCE_MATRIX_TEST(int, CUDA);
+DECLARE_REDUCE_MATRIX_TEST(uint, CUDA);
+DECLARE_REDUCE_MATRIX_TEST(float, CUDA);
 
 template <typename T>
 class test_mc_reduce_int_triggered : public test_mc_reduce<T, true> {};
