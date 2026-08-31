@@ -237,6 +237,7 @@ struct ucc_tl_cuda_task {
             int                needs_setup;
             ucc_mem_map_mem_h *global_memh_dst;
             void              *peer_map_addr[UCC_TL_CUDA_MAX_PEERS]; /* pre-mapped peer rbuf+offset */
+            void              *peer_map_raw[UCC_TL_CUDA_MAX_PEERS];  /* raw cudaIpcOpenMemHandle addr */
         } alltoallv_push;
         struct {
             int                    stage;

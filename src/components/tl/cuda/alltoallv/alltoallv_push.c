@@ -115,7 +115,7 @@ static ucc_status_t alltoallv_push_finalize(ucc_coll_task_t *coll_task)
             ucc_tl_cuda_mem_info_from_global_memh(
                 task->alltoallv_push.global_memh_dst, i, &mi) == UCC_OK) {
             ucc_tl_cuda_unmap_memhandle((uintptr_t)mi.ptr,
-                                        task->alltoallv_push.peer_map_addr[i],
+                                        task->alltoallv_push.peer_map_raw[i],
                                         cache, 0);
         }
     }
@@ -370,6 +370,7 @@ ucc_status_t ucc_tl_cuda_alltoallv_push_setup(ucc_tl_cuda_task_t *task)
 
     for (i = 0; i < UCC_TL_CUDA_MAX_PEERS; i++) {
         task->alltoallv_push.peer_map_addr[i] = NULL;
+        task->alltoallv_push.peer_map_raw[i]  = NULL;
     }
 
     for (i = 0; i < UCC_TL_TEAM_SIZE(team); i++) {
@@ -394,6 +395,7 @@ ucc_status_t ucc_tl_cuda_alltoallv_push_setup(ucc_tl_cuda_task_t *task)
         if (ucc_unlikely(status != UCC_OK)) {
             goto err_unmap;
         }
+        task->alltoallv_push.peer_map_raw[i]  = mapped;
         task->alltoallv_push.peer_map_addr[i] = PTR_OFFSET(mapped, peer_mi.offset);
     }
 
@@ -425,7 +427,7 @@ err_unmap:
             ucc_tl_cuda_mem_info_from_global_memh(
                 args->dst_memh.global_memh, i, &peer_mi) == UCC_OK) {
             ucc_tl_cuda_unmap_memhandle((uintptr_t)peer_mi.ptr,
-                                        task->alltoallv_push.peer_map_addr[i],
+                                        task->alltoallv_push.peer_map_raw[i],
                                         cache, 0);
         }
     }
