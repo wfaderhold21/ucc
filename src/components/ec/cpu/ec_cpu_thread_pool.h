@@ -8,12 +8,22 @@
 #define UCC_EC_CPU_THREAD_POOL_H_
 
 #include "components/ec/base/ucc_ec_base.h"
-#include "ec_cpu.h"
 #include "utils/ucc_lock_free_queue.h"
 #include "utils/ucc_mpool.h"
 #include <pthread.h>
 #include <stdatomic.h>
 
+/*
+ * Optional worker pinning.  When "enable" is set, worker i is bound to
+ * core (start_cpu + i * stride) after creation; a failed bind is a
+ * warning, not an error (the worker runs unpinned).  Pass NULL for no
+ * pinning.
+ */
+typedef struct ucc_ec_cpu_thread_pool_pin {
+    int enable;
+    int start_cpu;
+    int stride;
+} ucc_ec_cpu_thread_pool_pin_t;
 /*
  * Executor-level worker pool for the CPU EC.  Distinct from the reduce
  * kernel pool in ec_cpu_reduce.c (which runs one caller-blocking batch):
@@ -34,8 +44,12 @@ typedef struct ucc_ec_cpu_thread_pool {
     pthread_mutex_t mu;             /* guards live/shutdown + condvars     */
     pthread_cond_t  cv;             /* workers park here when the queue is empty */
     pthread_cond_t  cv_ready;       /* start() waits here for readiness    */
-
     atomic_int      pending;        /* tasks enqueued but not yet claimed  */
+
+    ucc_ec_cpu_thread_pool_pin_t pin; /* worker pinning (from init)        */
+
+    /* Owning EC (set at init) for component-scoped log messages */
+    ucc_ec_base_t *ec;
 } ucc_ec_cpu_thread_pool_t;
 
 /*
@@ -55,13 +69,17 @@ static inline ucc_status_t ucc_ec_cpu_task_get_status(
     return __atomic_load_n(&task->status, __ATOMIC_ACQUIRE);
 }
 
+
+
 ucc_status_t ucc_ec_cpu_thread_pool_init(ucc_ec_cpu_thread_pool_t *pool,
-                                         int n_workers, int max_tasks);
+                                         int n_workers, int max_tasks,
+                                         const ucc_ec_cpu_thread_pool_pin_t *pin);
 void         ucc_ec_cpu_thread_pool_finalize(ucc_ec_cpu_thread_pool_t *pool);
 
 /*
- * Start the worker threads and wait until all of them have parked.
- * Must be called exactly once after init, before any enqueue.
+ * Start the worker threads (applying any pinning from init) and wait
+ * until all of them have parked.  Must be called exactly once after
+ * init, before any enqueue.
  */
 ucc_status_t ucc_ec_cpu_thread_pool_start(ucc_ec_cpu_thread_pool_t *pool);
 

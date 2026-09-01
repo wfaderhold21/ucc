@@ -86,7 +86,7 @@ main(void)
         ref += src0[i] + src1[i];
     }
 
-    check(ucc_ec_cpu_thread_pool_init(&pool, N_WORKERS, 1024) == UCC_OK,
+    check(ucc_ec_cpu_thread_pool_init(&pool, N_WORKERS, 1024, NULL) == UCC_OK,
           "pool init");
     check(ucc_ec_cpu_thread_pool_start(&pool) == UCC_OK, "pool start");
 

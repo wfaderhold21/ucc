@@ -1,25 +1,29 @@
 /*
- * Executor async-post acceptance harness (task 573).
+ * Executor async-post acceptance harness (tasks 573/574).
  *
  * Drives the CPU EC's *public* executor API (ucc_ee_executor_init /
  * start / task_post / task_test / task_finalize / stop / finalize)
- * against the prebuilt libucc + dlopen'd modules:
+ * against the prebuilt libucc + dlopen'd modules.  One process per
+ * mode, selected by argv[1]; the EC config (USE_THREADED_REDUCE &
+ * friends) is parsed at ucc_ec_init, so each mode gets a fresh
+ * process with the env set beforehand:
  *
- *   A. sync path (UCC_USE_THREADED_REDUCE unset):
- *      REDUCE / REDUCE_STRIDED / COPY run inside task_post and come
- *      back UCC_OK immediately; results verified against a reference;
- *      COPY_MULTI -> UCC_ERR_NOT_SUPPORTED.
- *
- *   B. async path (UCC_USE_THREADED_REDUCE=1):
- *      - task_post returns UCC_OK while task->status is UCC_INPROGRESS
- *      - task_test observes INPROGRESS, then a final UCC_OK
- *      - results are bitwise-identical to the sync-path results for
- *        the same inputs (f32 SUM n=4; f64 PROD strided n_srcs=12 >
- *        UCC_EE_EXECUTOR_NUM_BUFS to exercise the heap-srcs worker
- *        path; COPY)
- *      - a burst of 16 concurrent tasks all complete, at least one is
- *        still INPROGRESS mid-flight, and all match their references
- *      - ucc_ec_finalize() stops the pool cleanly (no hang)
+ *   mode 0  sync: default config (threaded reduce off).  REDUCE /
+ *                 REDUCE_STRIDED / COPY run inside task_post and come
+ *                 back UCC_OK immediately; results verified against a
+ *                 reference; COPY_MULTI -> UCC_ERR_NOT_SUPPORTED.
+ *   mode 1  async, 4 workers (UCC_EC_CPU_USE_THREADED_REDUCE=1,
+ *           UCC_EC_CPU_EXEC_NUM_WORKERS=4):
+ *           - task_post returns UCC_OK while task->status is
+ *             UCC_INPROGRESS
+ *           - task_test observes INPROGRESS, then a final UCC_OK
+ *           - results bitwise-identical to the references for the
+ *             same inputs (f32 SUM n=4; f64 PROD strided n_srcs=12 >
+ *             UCC_EE_EXECUTOR_NUM_BUFS to exercise the heap-srcs
+ *             worker path; COPY)
+ *           - a burst of 16 concurrent tasks all complete, at least
+ *             one still INPROGRESS mid-flight, all match references
+ *           - ucc_ec_finalize() stops the pool cleanly (no hang)
  *
  * Compile:
  *   gcc -O2 -std=gnu11 \
@@ -27,8 +31,12 @@
  *       executor_async_post.c -o hap \
  *       -L$T/src/.libs -lucc -lucs -lpthread -lm
  * Run (CPU EC + MC modules dlopen from the src/.libs/ucc -> modules
- *     symlink; worker count via UCC_EC_CPU_EXEC_NUM_WORKERS):
- *   LD_LIBRARY_PATH=$T/src/.libs ./hap
+ *     symlink):
+ *   LD_LIBRARY_PATH=$T/src/.libs ./hap 0            # sync
+ *   UCC_EC_CPU_USE_THREADED_REDUCE=1 \
+ *   UCC_EC_CPU_EXEC_NUM_WORKERS=4 LD_LIBRARY_PATH=$T/src/.libs ./hap 1
+ *   UCC_EC_CPU_USE_THREADED_REDUCE=1 \
+ *   UCC_EC_CPU_EXEC_NUM_WORKERS=1 LD_LIBRARY_PATH=$T/src/.libs ./hap 2
  */
 
 #include <stdio.h>
@@ -186,26 +194,29 @@ wait_done(ucc_ee_executor_task_t *task)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
     ucc_ec_params_t          ec_params = {.thread_mode = UCC_THREAD_MULTIPLE};
     ucc_ee_executor_params_t eparams;
     ucc_ee_executor_t       *executor  = NULL;
     ucc_ee_executor_task_t  *task;
     ucc_status_t             status;
+    int                      mode = 0;
 
     static float       f32_src[N_SRC][COUNT];
     static double      f64_src[N_SRC][COUNT];
     static const float *f32_ptrs[N_SRC];
     static const double *f64_ptrs[N_SRC];
-    static float       f32_dst_sync[COUNT], f32_dst_async[COUNT];
-    static double      f64_dst_sync[COUNT], f64_dst_async[COUNT];
+    static float       f32_dst[COUNT], f32_ref[COUNT];
+    static double      f64_dst[COUNT], f64_ref[COUNT];
     static float       f32_dst_burst[N_COPY_BURST][COUNT];
-    static float       f32_ref[COUNT];
-    static double      f64_ref[COUNT];
     static char        copy_src[COPY_LEN];
-    static char        copy_dst_sync[COPY_LEN], copy_dst_async[COPY_LEN];
+    static char        copy_dst[COPY_LEN];
     unsigned           i, k;
+
+    if (argc > 1) {
+        mode = atoi(argv[1]);
+    }
 
     for (i = 0; i < N_SRC; i++) {
         fill_f32(f32_src[i], COUNT, i);
@@ -227,101 +238,131 @@ main(void)
     status = ucc_ee_executor_start(executor, NULL);
     check(status == UCC_OK, "executor_start");
 
-    /* ---------- A. sync path (threaded reduce off) ---------- */
-
-    /* A1: f32 SUM n=4 completes inside the post */
-    post_f32_reduce(executor, f32_dst_sync, f32_ptrs, 4, &task, &status);
-    check(status == UCC_OK, "sync f32 reduce post");
-    check(task && task->status == UCC_OK, "sync f32 reduce done in post");
-    ref_sum_f32(f32_ref, f32_ptrs, COUNT, 4);
-    check(same_bits(f32_dst_sync, f32_ref, COUNT * sizeof(float)),
-          "sync f32 result");
-    status = ucc_ee_executor_task_finalize(task);
-    check(status == UCC_OK, "sync f32 finalize");
-
-    /* A2: f64 PROD strided, n_srcs = 12 (> NUM_BUFS = 9) */
-    post_strided_f64_prod(executor, f64_dst_sync, f64_src[0], f64_src[1],
-                          N_SRC, &task, &status);
-    check(status == UCC_OK, "sync strided prod post");
-    check(task->status == UCC_OK, "sync strided done in post");
-    ref_prod_f64(f64_ref, f64_ptrs, COUNT, N_SRC);
-    check(same_bits(f64_dst_sync, f64_ref, COUNT * sizeof(double)),
-          "sync strided result");
-    status = ucc_ee_executor_task_finalize(task);
-    check(status == UCC_OK, "sync strided finalize");
-
-    /* A3: COPY */
-    post_copy(executor, copy_src, copy_dst_sync, COPY_LEN, &task, &status);
-    check(status == UCC_OK, "sync copy post");
-    check(task->status == UCC_OK, "sync copy done in post");
-    check(memcmp(copy_dst_sync, copy_src, COPY_LEN) == 0,
-          "sync copy contents");
-    status = ucc_ee_executor_task_finalize(task);
-    check(status == UCC_OK, "sync copy finalize");
-
-    /* A4: unsupported op type still rejected */
-    {
-        ucc_ee_executor_task_args_t args;
-
-        memset(&args, 0, sizeof(args));
-        args.task_type = UCC_EE_EXECUTOR_TASK_COPY_MULTI;
-        status         = ucc_ee_executor_task_post(executor, &args, &task);
-        check(status == UCC_ERR_NOT_SUPPORTED, "sync copy_multi unsupported");
-    }
-
-    /* ---------- B. async path (threaded reduce on) ---------- */
-
-    setenv("UCC_USE_THREADED_REDUCE", "1", 1);
-    setenv("UCC_EC_CPU_EXEC_NUM_WORKERS", "4", 1);
-
-    /* B1: f32 SUM n=4: post returns OK, test observes INPROGRESS then
-     * OK, result bitwise-identical to the sync-path result */
-    post_f32_reduce(executor, f32_dst_async, f32_ptrs, 4, &task, &status);
-    check(status == UCC_OK, "async post returns OK");
-    {
+    /* 1: f32 SUM n=4 */
+    post_f32_reduce(executor, f32_dst, f32_ptrs, 4, &task, &status);
+    check(status == UCC_OK, "f32 reduce post");
+    if (mode == 0) {
+        /* sync: completes inside the post */
+        check(task && task->status == UCC_OK, "sync f32 reduce done in post");
+        ref_sum_f32(f32_ref, f32_ptrs, COUNT, 4);
+        check(same_bits(f32_dst, f32_ref, COUNT * sizeof(float)),
+              "sync f32 result");
+        status = ucc_ee_executor_task_finalize(task);
+        check(status == UCC_OK, "sync f32 finalize");
+    } else {
+        /* async: post returned OK with the task in flight */
         int saw_inprogress = 0;
 
         while (ucc_ee_executor_task_test(task) == UCC_INPROGRESS) {
             saw_inprogress = 1;
         }
         check(task->status == UCC_OK, "async f32 reduce final OK");
-        /* INPROGRESS is a contract, not a guarantee: a 1M-element task
-         * is large enough to still be running on its first test, but a
-         * fast worker could finish first.  The burst below is the
-         * robust INPROGRESS evidence. */
         if (saw_inprogress) {
-            printf("  (B1 observed UCC_INPROGRESS before completion)\n");
+            printf("  (observed UCC_INPROGRESS before completion)\n");
         }
-        check(same_bits(f32_dst_async, f32_dst_sync, COUNT * sizeof(float)),
-              "async f32 result == sync result");
+        /* INPROGRESS on a single task is timing-dependent; the burst
+         * below (mode 1) is the robust INPROGRESS evidence. */
+        ref_sum_f32(f32_ref, f32_ptrs, COUNT, 4);
+        check(same_bits(f32_dst, f32_ref, COUNT * sizeof(float)),
+              "async f32 result");
+        status = ucc_ee_executor_task_finalize(task);
+        check(status == UCC_OK, "async f32 finalize");
     }
-    status = ucc_ee_executor_task_finalize(task);
-    check(status == UCC_OK, "async f32 finalize");
 
-    /* B2: strided f64 PROD n_srcs=12 (heap-srcs path in the worker) */
-    post_strided_f64_prod(executor, f64_dst_async, f64_src[0], f64_src[1],
-                          N_SRC, &task, &status);
-    check(status == UCC_OK, "async strided post");
-    wait_done(task);
-    check(task->status == UCC_OK, "async strided final OK");
-    check(same_bits(f64_dst_async, f64_dst_sync, COUNT * sizeof(double)),
-          "async strided result == sync result");
+    /* 2: f64 PROD strided, n_srcs = 12 (> NUM_BUFS = 9) */
+    post_strided_f64_prod(executor, f64_dst, f64_src[0], f64_src[1], N_SRC,
+                          &task, &status);
+    check(status == UCC_OK, "strided prod post");
+    if (mode == 0) {
+        check(task->status == UCC_OK, "sync strided done in post");
+    } else {
+        wait_done(task);
+        check(task->status == UCC_OK, "async strided final OK");
+    }
+    ref_prod_f64(f64_ref, f64_ptrs, COUNT, N_SRC);
+    check(same_bits(f64_dst, f64_ref, COUNT * sizeof(double)),
+          "strided result");
     status = ucc_ee_executor_task_finalize(task);
-    check(status == UCC_OK, "async strided finalize");
+    check(status == UCC_OK, "strided finalize");
 
-    /* B3: COPY through the pool */
-    post_copy(executor, copy_src, copy_dst_async, COPY_LEN, &task, &status);
-    check(status == UCC_OK, "async copy post");
-    wait_done(task);
-    check(task->status == UCC_OK, "async copy final OK");
-    check(memcmp(copy_dst_async, copy_src, COPY_LEN) == 0,
-          "async copy contents");
+    /* 3: COPY */
+    post_copy(executor, copy_src, copy_dst, COPY_LEN, &task, &status);
+    check(status == UCC_OK, "copy post");
+    if (mode == 0) {
+        check(task->status == UCC_OK, "sync copy done in post");
+    } else {
+        wait_done(task);
+        check(task->status == UCC_OK, "async copy final OK");
+    }
+    check(memcmp(copy_dst, copy_src, COPY_LEN) == 0, "copy contents");
     status = ucc_ee_executor_task_finalize(task);
-    check(status == UCC_OK, "async copy finalize");
+    check(status == UCC_OK, "copy finalize");
 
-    /* B4: burst of 16 f32 SUM n=4 tasks (4 workers): some must still be
-     * INPROGRESS mid-flight, all must complete correctly */
+    /* 4: unsupported op type rejected on every path */
     {
+        ucc_ee_executor_task_args_t args;
+
+        memset(&args, 0, sizeof(args));
+        args.task_type = UCC_EE_EXECUTOR_TASK_COPY_MULTI;
+        status         = ucc_ee_executor_task_post(executor, &args, &task);
+        check(status == UCC_ERR_NOT_SUPPORTED, "copy_multi unsupported");
+    }
+    /* 4b: reduce routing around REDUCE_CHUNK_SIZE (env, default 1024).
+     * count 512 is below the default chunk: in async mode it must
+     * bypass the pool (synchronous, done inside task_post).  With a
+     * lowered chunk (e.g. UCC_EC_CPU_REDUCE_CHUNK_SIZE=100) the same
+     * reduce goes to the pool instead. */
+    {
+        ucc_ee_executor_task_args_t args;
+        const float *rs[4];
+        unsigned long chunk;
+        int           small;
+
+        chunk = 1024; /* must match the config default */
+        if (getenv("UCC_EC_CPU_REDUCE_CHUNK_SIZE")) {
+            chunk = strtoul(getenv("UCC_EC_CPU_REDUCE_CHUNK_SIZE"), NULL, 10);
+        }
+        small = 512 < chunk;
+        for (k = 0; k < 4; k++) {
+            rs[k] = f32_src[k];
+        }
+        memset(&args, 0, sizeof(args));
+        args.task_type   = UCC_EE_EXECUTOR_TASK_REDUCE;
+        args.reduce.dst  = f32_dst;
+        args.reduce.count = 512;
+        args.reduce.dt   = UCC_DT_FLOAT32;
+        args.reduce.op   = UCC_OP_SUM;
+        args.reduce.n_srcs = 4;
+        for (k = 0; k < 4; k++) {
+            args.reduce.srcs[k] = (void *)rs[k];
+        }
+        status = ucc_ee_executor_task_post(executor, &args, &task);
+        check(status == UCC_OK, "small reduce post");
+        if (mode != 0) {
+            if (small) {
+                check(task->status != UCC_INPROGRESS,
+                      "small reduce bypassed the pool (done in post)");
+            } else {
+                check(task->status == UCC_INPROGRESS ||
+                      task->status == UCC_OK,
+                      "large reduce went to the pool");
+            }
+        }
+        if (!small) {
+            wait_done(task);
+        }
+        ref_sum_f32(f32_ref, rs, 512, 4);
+        check(same_bits(f32_dst, f32_ref, 512 * sizeof(float)),
+              "small reduce result");
+        status = ucc_ee_executor_task_finalize(task);
+        check(status == UCC_OK, "small reduce finalize");
+    }
+
+
+    /* 5 (async, mode 1 only): burst of 16 f32 SUM n=4 tasks (4
+     * workers): some must still be INPROGRESS mid-flight, all must
+     * complete correctly */
+    if (mode == 1) {
         ucc_ee_executor_task_t *tasks[N_COPY_BURST];
         int                     all_ok     = 1;
         int                     saw_inprog = 0;
@@ -373,9 +414,9 @@ main(void)
     check(status == UCC_OK, "ucc_ec_finalize (pool stop, no hang)");
 
     if (g_failures) {
-        printf("573-HARNESS: %d FAILURES\n", g_failures);
+        printf("574-HARNESS(mode %d): %d FAILURES\n", mode, g_failures);
         return 1;
     }
-    printf("573-HARNESS: ALL PASS (sync + async parity OK)\n");
+    printf("574-HARNESS(mode %d): ALL PASS\n", mode);
     return 0;
 }

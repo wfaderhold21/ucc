@@ -18,6 +18,45 @@ static ucc_config_field_t ucc_ec_cpu_config_table[] = {
     {"", "", NULL, ucc_offsetof(ucc_ec_cpu_config_t, super),
      UCC_CONFIG_TYPE_TABLE(ucc_ec_config_table)},
 
+#ifdef HAVE_EC_THREADED_REDUCE
+    {"EXEC_NUM_WORKERS", "4",
+     "Number of executor worker threads (pool size) for threaded reduce",
+     ucc_offsetof(ucc_ec_cpu_config_t, exec_num_workers),
+     UCC_CONFIG_TYPE_ULUNITS},
+
+    {"EXEC_MAX_TASKS", "1024",
+     "Maximum number of outstanding executor tasks in the worker pool",
+     ucc_offsetof(ucc_ec_cpu_config_t, exec_max_tasks),
+     UCC_CONFIG_TYPE_ULUNITS},
+
+    {"REDUCE_CHUNK_SIZE", "1024",
+     "Chunk size (in elements) at which a reduce is split across threads",
+     ucc_offsetof(ucc_ec_cpu_config_t, reduce_chunk_size),
+     UCC_CONFIG_TYPE_ULUNITS},
+
+    {"USE_THREADED_REDUCE", "0",
+     "Asynchronously post executor tasks onto the CPU worker pool "
+     "(1 = threaded, 0 = run synchronously in task_post)",
+     ucc_offsetof(ucc_ec_cpu_config_t, use_threaded_reduce),
+     UCC_CONFIG_TYPE_BOOL},
+
+    {"PIN_THREADS", "0",
+     "Pin worker threads to CPU cores for NUMA locality "
+     "(1 = pin, 0 = leave to the scheduler)",
+     ucc_offsetof(ucc_ec_cpu_config_t, pin_threads),
+     UCC_CONFIG_TYPE_BOOL},
+
+    {"PIN_START_CPU", "0",
+     "First CPU core for thread pinning (worker i -> start + i*stride)",
+     ucc_offsetof(ucc_ec_cpu_config_t, pin_start_cpu),
+     UCC_CONFIG_TYPE_INT},
+
+    {"PIN_STRIDE", "1",
+     "CPU core stride for thread pinning (1 = contiguous cores)",
+     ucc_offsetof(ucc_ec_cpu_config_t, pin_stride),
+     UCC_CONFIG_TYPE_INT},
+#endif
+
     {NULL}
 
 };
@@ -25,79 +64,97 @@ static ucc_config_field_t ucc_ec_cpu_config_table[] = {
 #ifdef HAVE_EC_THREADED_REDUCE
 
 /*
- * Executor-level worker pool: one pool per process (the CPU EC is a
- * process singleton), started lazily when the first executor task is
- * posted with UCC_USE_THREADED_REDUCE=1.  The config knobs
- * (EXEC_NUM_WORKERS / EXEC_MAX_TASKS) land with task 574; until then
- * the pool size is the env var or the hardware default.
+ * Executor-level worker pool.  The CPU EC is a process singleton, so
+ * there is one pool per process: it is created and started in
+ * ucc_ec_cpu_init() (when USE_THREADED_REDUCE is set) and stopped in
+ * ucc_ec_cpu_finalize().
+ *
+ * Thread-mode note: under UCC_THREAD_SINGLE / UCC_THREAD_FUNNELED the
+ * caller still posts and tests from its own thread; the pool only
+ * provides the worker that executes the posted task, so those modes
+ * are safe to use with threaded reduce (the posting thread is the
+ * single progress thread).
  */
-static ucc_ec_cpu_thread_pool_t ucc_ec_cpu_pool;
-static int                      ucc_ec_cpu_pool_started;
-static pthread_mutex_t          ucc_ec_cpu_pool_mu = PTHREAD_MUTEX_INITIALIZER;
+static int ucc_ec_cpu_pool_active = 0;
 
-static int ucc_ec_cpu_pool_env_num_workers(void)
+static ucc_status_t ucc_ec_cpu_pool_start(void)
 {
-    const char *env = getenv("UCC_EC_CPU_EXEC_NUM_WORKERS");
-    int         n   = env ? atoi(env) : 0;
+    ucc_ec_cpu_config_t            *cfg  = EC_CPU_CONFIG;
+    ucc_ec_cpu_thread_pool_t       *pool = &ucc_ec_cpu.thread_pool;
+    ucc_ec_cpu_thread_pool_pin_t    pin;
+    ucc_status_t                    status;
+    int                             n_workers;
 
-    if (n <= 0) {
-        n = (int)sysconf(_SC_NPROCESSORS_ONLN);
-    }
-    return n;
-}
-
-static ucc_status_t ucc_ec_cpu_pool_ensure(void)
-{
-    static int         pool_inited;
-    static ucc_status_t init_status = UCC_OK;
-    ucc_status_t       status;
-    int                n_workers;
-
-    pthread_mutex_lock(&ucc_ec_cpu_pool_mu);
-    if (!pool_inited) {
-        n_workers = ucc_ec_cpu_pool_env_num_workers();
-        status    = ucc_ec_cpu_thread_pool_init(&ucc_ec_cpu_pool, n_workers,
-                                                1024);
-        if (status == UCC_OK) {
-            status = ucc_ec_cpu_thread_pool_start(&ucc_ec_cpu_pool);
-            if (status == UCC_OK) {
-                pool_inited             = 1;
-                init_status             = UCC_OK;
-                ucc_ec_cpu_pool_started = 1;
-                ec_info(&ucc_ec_cpu.super,
-                        "threaded reduce pool started with %d workers",
-                        n_workers);
-            } else {
-                /* start failed mid-way (partial workers); the pool is
-                 * fully initialized, so stop + finalize is valid. */
-                ucc_ec_cpu_thread_pool_stop(&ucc_ec_cpu_pool);
-                ucc_ec_cpu_thread_pool_finalize(&ucc_ec_cpu_pool);
-                ec_error(&ucc_ec_cpu.super,
-                         "failed to start threaded reduce pool: %s",
-                         ucc_status_string(status));
-            }
-        } else {
-            /* init failed before the pool was fully constructed: do not
-             * touch the half-zeroed pool (it is never started, so the
-             * teardown path is not reached either). */
-            ec_error(&ucc_ec_cpu.super,
-                     "failed to init threaded reduce pool: %s",
-                     ucc_status_string(status));
+    n_workers = (int)cfg->exec_num_workers;
+    if (n_workers <= 0) {
+        n_workers = (int)sysconf(_SC_NPROCESSORS_ONLN);
+        if (n_workers <= 0) {
+            n_workers = 1;
         }
     }
-    status = init_status;
-    pthread_mutex_unlock(&ucc_ec_cpu_pool_mu);
-    return status;
+    memset(&pin, 0, sizeof(pin));
+    pin.enable    = cfg->pin_threads;
+    pin.start_cpu = cfg->pin_start_cpu;
+    pin.stride    = (cfg->pin_stride > 0) ? cfg->pin_stride : 1;
+
+    pool->ec = &ucc_ec_cpu.super;
+    status   = ucc_ec_cpu_thread_pool_init(pool, n_workers,
+                                          (int)cfg->exec_max_tasks, &pin);
+    if (status != UCC_OK) {
+        ec_error(&ucc_ec_cpu.super,
+                 "failed to init threaded reduce pool: %s",
+                 ucc_status_string(status));
+        return status;
+    }
+    status = ucc_ec_cpu_thread_pool_start(pool);
+    if (status != UCC_OK) {
+        /* start failed mid-way (partial workers); the pool is fully
+         * initialized, so finalize is valid. */
+        ucc_ec_cpu_thread_pool_finalize(pool);
+        ec_error(&ucc_ec_cpu.super,
+                 "failed to start threaded reduce pool: %s",
+                 ucc_status_string(status));
+        return status;
+    }
+    ucc_ec_cpu_pool_active = 1;
+    ec_info(&ucc_ec_cpu.super,
+            "threaded reduce pool started: %d workers, max %lu tasks%s",
+            n_workers, cfg->exec_max_tasks,
+            pin.enable ? " (pinned)" : "");
+    return UCC_OK;
+}
+static void ucc_ec_cpu_pool_stop(void)
+{
+    if (!ucc_ec_cpu_pool_active) {
+        return;
+    }
+    ucc_ec_cpu_thread_pool_stop(&ucc_ec_cpu.thread_pool);
+    ucc_ec_cpu_thread_pool_finalize(&ucc_ec_cpu.thread_pool);
+    ucc_ec_cpu_pool_active = 0;
 }
 
-static void ucc_ec_cpu_pool_teardown(void)
+/*
+ * With threaded reduce on, a reduce below REDUCE_CHUNK_SIZE elements is
+ * still run synchronously in task_post: the enqueue / worker-wake /
+ * status-handoff round trip (~10-20 us) costs more than the reduction
+ * itself at small sizes.  Copies always go to the pool.
+ */
+static int ucc_ec_cpu_task_goes_to_pool(const ucc_ee_executor_task_args_t *task_args)
 {
-    if (ucc_ec_cpu_pool_started) {
-        ucc_ec_cpu_thread_pool_stop(&ucc_ec_cpu_pool);
-        ucc_ec_cpu_thread_pool_finalize(&ucc_ec_cpu_pool);
-        ucc_ec_cpu_pool_started = 0;
+    switch (task_args->task_type) {
+    case UCC_EE_EXECUTOR_TASK_REDUCE:
+        return task_args->reduce.count >= EC_CPU_CONFIG->reduce_chunk_size;
+    case UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED:
+        return task_args->reduce_strided.count >= EC_CPU_CONFIG->reduce_chunk_size;
+    case UCC_EE_EXECUTOR_TASK_COPY:
+        return 1;
+    default:
+        /* unsupported: fall through to the synchronous switch, which
+         * rejects it with UCC_ERR_NOT_SUPPORTED at post time. */
+        return 0;
     }
 }
+
 
 #endif /* HAVE_EC_THREADED_REDUCE */
 
@@ -129,6 +186,25 @@ static ucc_status_t ucc_ec_cpu_init(const ucc_ec_params_t *ec_params)
         return status;
     }
 
+#ifdef HAVE_EC_THREADED_REDUCE
+    if (EC_CPU_CONFIG->use_threaded_reduce) {
+        status = ucc_ec_cpu_pool_start();
+        if (status != UCC_OK) {
+            ucc_mpool_cleanup(&ucc_ec_cpu.executor_tasks, 1);
+            ucc_mpool_cleanup(&ucc_ec_cpu.executors, 1);
+            return status;
+        }
+    } else {
+        ec_debug(&ucc_ec_cpu.super, "threaded reduce disabled (USE_THREADED_REDUCE=0)");
+    }
+#else
+    if (getenv("UCC_EC_CPU_USE_THREADED_REDUCE")) {
+        ec_warn(&ucc_ec_cpu.super,
+                "threaded reduce requested but not compiled in "
+                "(rebuild with --enable-ec-threaded-reduce)");
+    }
+#endif
+
     return UCC_OK;
 }
 
@@ -149,7 +225,7 @@ static ucc_status_t ucc_ec_cpu_finalize()
      * task_finalize), so the queue is empty when we stop the workers.
      */
 #ifdef HAVE_EC_THREADED_REDUCE
-    ucc_ec_cpu_pool_teardown();
+    ucc_ec_cpu_pool_stop();
 #endif
     ucc_mpool_cleanup(&ucc_ec_cpu.executors, 1);
     ucc_mpool_cleanup(&ucc_ec_cpu.executor_tasks, 1);
@@ -204,21 +280,21 @@ ucc_status_t ucc_cpu_executor_task_post(ucc_ee_executor_t *executor,
 
     eee_task->eee = executor;
 #ifdef HAVE_EC_THREADED_REDUCE
-    if (getenv("UCC_USE_THREADED_REDUCE")) {
+    if (ucc_ec_cpu_pool_active && ucc_ec_cpu_task_goes_to_pool(task_args)) {
         /*
-         * Async: copy the args into the pooled task, mark it in-progress
-         * and hand it to a pool worker; task_test() then polls the
-         * worker's release-stored status (mirrors the CUDA interruptible
-         * executor).  task_finalize() must be called after task_test()
-         * returns the final status, exactly as on the synchronous path.
+         * Async (USE_THREADED_REDUCE=1): copy the args into the pooled
+         * task, mark it in-progress and hand it to a pool worker;
+         * task_test() then polls the worker's release-stored status
+         * (mirrors the CUDA interruptible executor).  task_finalize()
+         * must be called after task_test() returns the final status,
+         * exactly as on the synchronous path.  Reduces below
+         * REDUCE_CHUNK_SIZE elements bypass the pool (synchronous) —
+         * the handoff overhead exceeds the reduction at small sizes.
          */
         ucc_ec_cpu_task_set_status(eee_task, UCC_INPROGRESS);
         memcpy(&eee_task->args, task_args, sizeof(*task_args));
-        status = ucc_ec_cpu_pool_ensure();
-        if (ucc_unlikely(status != UCC_OK)) {
-            goto free_task;
-        }
-        status = ucc_ec_cpu_thread_pool_enqueue(&ucc_ec_cpu_pool, eee_task);
+        status = ucc_ec_cpu_thread_pool_enqueue(&ucc_ec_cpu.thread_pool,
+                                                eee_task);
         if (ucc_unlikely(status != UCC_OK)) {
             goto free_task;
         }

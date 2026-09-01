@@ -4,9 +4,10 @@
  * See file LICENSE for terms.
  */
 
+#include "ec_cpu.h"
 #include "ec_cpu_thread_pool.h"
-#include "components/ec/ucc_ec_log.h"
 #include "utils/ucc_malloc.h"
+#include <sched.h>
 #include "utils/ucc_math.h"
 
 typedef struct ucc_ec_cpu_pool_node {
@@ -87,12 +88,14 @@ static void *ucc_ec_cpu_pool_worker(void *arg)
 }
 
 ucc_status_t ucc_ec_cpu_thread_pool_init(ucc_ec_cpu_thread_pool_t *pool,
-                                         int n_workers, int max_tasks)
+                                         int n_workers, int max_tasks,
+                                         const ucc_ec_cpu_thread_pool_pin_t *pin)
 {
     ucc_status_t status;
 
     memset(pool, 0, sizeof(*pool));
     pool->n_workers = n_workers;
+    pool->pin       = (pin != NULL) ? *pin : (ucc_ec_cpu_thread_pool_pin_t){0};
     pool->workers   = ucc_calloc(n_workers, sizeof(pthread_t), "ec cpu pool");
     if (!pool->workers) {
         return UCC_ERR_NO_MEMORY;
@@ -134,6 +137,26 @@ ucc_status_t ucc_ec_cpu_thread_pool_start(ucc_ec_cpu_thread_pool_t *pool)
                            pool) != 0) {
             pool->n_workers = i; /* partial start */
             break;
+        }
+        /*
+         * Pin right after create: the window where the unpinned worker
+         * could run on another core (and pollute the NUMA locality of
+         * later tasks) is as short as possible.  A failed bind only
+         * warns; the worker keeps running unpinned.
+         */
+        if (pool->pin.enable) {
+            cpu_set_t cpuset;
+            int       cpu = pool->pin.start_cpu + i * pool->pin.stride;
+
+            CPU_ZERO(&cpuset);
+            CPU_SET(cpu, &cpuset);
+            if (pthread_setaffinity_np(pool->workers[i], sizeof(cpu_set_t),
+                                       &cpuset) != 0) {
+                if (pool->ec) {
+                    ec_warn(pool->ec, "failed to pin worker %d to CPU %d: %m",
+                            i, cpu);
+                }
+            }
         }
     }
 
