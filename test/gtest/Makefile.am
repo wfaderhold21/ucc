@@ -76,6 +76,7 @@ gtest_SOURCES =                           \
 	core/test_context.cc                  \
 	core/test_mc.cc                       \
 	core/test_mc_reduce.cc                \
+	core/test_ec_cpu_threaded.cc          \
 	core/test_team.cc                     \
 	core/test_schedule.cc                 \
 	core/test_topo.cc                     \

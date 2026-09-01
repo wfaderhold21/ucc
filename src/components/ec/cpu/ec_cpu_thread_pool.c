@@ -191,7 +191,11 @@ ucc_status_t ucc_ec_cpu_thread_pool_enqueue(ucc_ec_cpu_thread_pool_t *pool,
     if (ucc_unlikely(!node)) {
         return UCC_ERR_NO_MEMORY;
     }
-    node->task = task;
+    /* Hand off the task to the worker.  The slot CAS that delivers this node
+     * is raw-asm (TSan-invisible), so use an explicit release-store here to
+     * order the task->args copy the worker will read; the worker does the
+     * matching acquire-load. */
+    __atomic_store_n(&node->task, task, __ATOMIC_RELEASE);
     ucc_lf_queue_enqueue(&pool->queue, &node->lf_elem);
     atomic_fetch_add_explicit(&pool->pending, 1, memory_order_release);
 
@@ -220,7 +224,7 @@ ucc_ec_cpu_thread_pool_dequeue(ucc_ec_cpu_thread_pool_t *pool)
         return NULL;
     }
     node = ucc_container_of(elem, ucc_ec_cpu_pool_node_t, lf_elem);
-    task = node->task;
+    task = __atomic_load_n(&node->task, __ATOMIC_ACQUIRE);
     ucc_mpool_put(node);
     return task;
 }

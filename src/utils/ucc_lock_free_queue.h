@@ -30,13 +30,16 @@ typedef struct ucc_lf_queue {
 } ucc_lf_queue_t;
 
 static inline void ucc_lf_queue_init_elem(ucc_lf_queue_elem_t *elem){
-    elem->was_queued = 0;
+    /* was_queued is read/written across threads (enqueuer vs dequeuer);
+     * use atomic accesses so the field's handoff is race-free. */
+    __atomic_store_n(&elem->was_queued, 0, __ATOMIC_RELAXED);
 }
 
 static inline void ucc_lf_queue_enqueue(ucc_lf_queue_t *     queue,
                                         ucc_lf_queue_elem_t *elem)
 {
-    uint8_t which_pool = elem->was_queued ^ (queue->which_pool & 1);
+    uint8_t which_pool = __atomic_load_n(&elem->was_queued, __ATOMIC_RELAXED) ^
+                         (queue->which_pool & 1);
     int     i;
     for (i = 0; i < LINE_SIZE; i++) {
         if (ucc_atomic_bool_cswap64(
@@ -65,7 +68,7 @@ static inline ucc_lf_queue_elem_t *ucc_lf_queue_dequeue(ucc_lf_queue_t *queue,
             if (ucc_atomic_bool_cswap64(
                     (uint64_t *)&(queue->elements[which_pool][i]),
                     (uint64_t)elem, 0LL)) {
-                elem->was_queued = 1;
+                __atomic_store_n(&elem->was_queued, 1, __ATOMIC_RELAXED);
                 return elem;
             }
         }
@@ -75,7 +78,7 @@ static inline ucc_lf_queue_elem_t *ucc_lf_queue_dequeue(ucc_lf_queue_t *queue,
     if (!ucc_list_is_empty(&queue->locked_queue[which_pool])) {
         elem = ucc_list_extract_head(&queue->locked_queue[which_pool],
                                      ucc_lf_queue_elem_t, locked_list_elem);
-        elem->was_queued = 1;
+        __atomic_store_n(&elem->was_queued, 1, __ATOMIC_RELAXED);
     }
     ucc_spin_unlock(&queue->locked_queue_lock[which_pool]);
     if (!elem) {
