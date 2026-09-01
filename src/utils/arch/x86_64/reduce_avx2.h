@@ -20,16 +20,32 @@
  *
  *   dst[i] = srcs[0][i] OP srcs[1][i] OP ... OP srcs[n_srcs-1][i]
  *
- * The reduction is a sequential per-lane left-fold in source order.  This
- * matches the scalar reference (src/components/ec/cpu/ec_cpu_reduce.c)
- * exactly:
+ * Each kernel dispatches on n_srcs and emits the per-lane reduction
+ * statically unrolled, with one named vector local per source (no
+ * array, no spills).  Two association strategies:
  *
- *   - sum/prod/band/bor/bxor/land/lor/lxor are left-associative in the scalar
- *     DO_OP_*_N macros, so a left-fold is bitwise identical (integer) or
- *     IEEE-identical (float sum/prod) for every n_srcs.
- *   - min/max/lxor are computed by the scalar as a balanced tree, but the
- *     operations are associative (min/max commutative+idempotent, lxor is
- *     truthiness XOR), so the per-lane left-fold yields the same value.
+ *   TREE (sum/prod/band/bor/bxor/land/lor/lxor): the exact
+ *   left-associative chain of the scalar reference
+ *   (src/components/ec/cpu/ec_cpu_reduce.c):
+ *     n_srcs <= 8:   ((s0 OP s1) OP s2) ... OP s(n_srcs-1)
+ *     n_srcs  > 8:   the 8-wide left chain, then s8..s(n_srcs-1) folded
+ *                    in left-associatively
+ *   -> bitwise identical to the scalar for every dtype/op/n_srcs.
+ *
+ *   BTREE (min/max only): a balanced tree.  min/max are exact,
+ *   associative and commutative (IEEE min/max pick the non-NaN operand
+ *   regardless of association), so the tree is bitwise identical to the
+ *   scalar's DO_OP__N shape too, with ~log2(n_srcs) dependency depth
+ *   instead of n_srcs-1.
+ *
+ * The eight source base pointers are hoisted to locals (p0..p7) so the
+ * vector loads use only the loop index (a runtime pointer array per
+ * iteration forces dependent loads and blocks codegen).
+ *
+ * All independent source loads are issued up front, giving the compiler
+ * the ILP to overlap the OP chain (a runtime inner fold loop prevents
+ * the outer element loop from being unrolled, leaving the chain
+ * latency-bound at n_srcs >= 4).
  *
  * alpha (AVG / REDUCE_WITH_ALPHA) is NOT applied here; the dispatcher applies
  * it after the call, mirroring the scalar path.
@@ -416,7 +432,10 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_max_64bit_u(
 #define UCC_RED_AVX2_S_LAND(acc,val)  ((acc) && (val))
 #define UCC_RED_AVX2_S_LOR(acc,val)   ((acc) || (val))
 #define UCC_RED_AVX2_S_LXOR(acc,val)  ((!(acc)) != (!(val)))
-#define UCC_RED_AVX2_DEF_FOLD(CTYPE, DT, UTAG, OP, UOP)                       \
+/* ------------------------------------------------------------------ */
+/* TREE kernel generator: per-n_srcs statically unrolled left-fold     */
+/* ------------------------------------------------------------------ */
+#define UCC_RED_AVX2_DEF_TREE(CTYPE, DT, UTAG, OP, UOP)                       \
     static inline __attribute__((target("avx2"))) void                    \
     ucc_arch_reduce_avx2_##DT##_##OP(void *dst,                           \
                                      const void * const *srcs,            \
@@ -424,18 +443,190 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_max_64bit_u(
     {                                                                      \
         const CTYPE **restrict s = (const CTYPE **)srcs;                 \
         CTYPE *restrict d = (CTYPE *)dst;                                \
+        const CTYPE *restrict p0 = s[0];                     \
+        const CTYPE *restrict p1 = s[1];                     \
+        const CTYPE *restrict p2 = s[2];                     \
+        const CTYPE *restrict p3 = s[3];                     \
+        const CTYPE *restrict p4 = s[4];                     \
+        const CTYPE *restrict p5 = s[5];                     \
+        const CTYPE *restrict p6 = s[6];                     \
+        const CTYPE *restrict p7 = s[7];                     \
         const unsigned lanes = UCC_RED_AVX2_##UTAG##_LANES;               \
-        size_t i;                                                          \
-        for (i = 0; i + lanes <= count; i += lanes) {                     \
-            UCC_RED_AVX2_##UTAG##_VEC acc =                                \
-                UCC_RED_AVX2_##UTAG##_LOAD(&s[0][i]);                     \
-            unsigned j;                                                    \
-            for (j = 1; j < n_srcs; j++) {                                 \
-                UCC_RED_AVX2_##UTAG##_VEC v =                              \
-                    UCC_RED_AVX2_##UTAG##_LOAD(&s[j][i]);                 \
-                acc = UCC_RED_AVX2_##UTAG##_##UOP(acc, v);                 \
+        size_t i = 0;                                                     \
+        if (n_srcs <= 8) {                                                 \
+            switch (n_srcs) {                                              \
+            case 1:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                                                UCC_RED_AVX2_##UTAG##_LOAD(&p0[i])); \
+                }                                                          \
+                break;                                                     \
+            case 2:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                                                UCC_RED_AVX2_##UTAG##_##UOP(v0, v1)); \
+                }                                                          \
+                break;                                                     \
+            case 3:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v1);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v2);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i], v0);               \
+                }                                                          \
+                break;                                                     \
+            case 4:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v1);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v2);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v3);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i], v0);               \
+                }                                                          \
+                break;                                                     \
+            case 5:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v4 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v1);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v2);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v3);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v4);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i], v0);               \
+                }                                                          \
+                break;                                                     \
+            case 6:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v4 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v5 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p5[i]);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v1);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v2);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v3);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v4);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v5);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i], v0);               \
+                }                                                          \
+                break;                                                     \
+            case 7:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v4 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v5 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p5[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v6 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p6[i]);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v1);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v2);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v3);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v4);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v5);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v6);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i], v0);               \
+                }                                                          \
+                break;                                                     \
+            case 8:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v4 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v5 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p5[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v6 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p6[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v7 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p7[i]);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v1);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v2);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v3);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v4);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v5);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v6);             \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v7);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i], v0);               \
+                }                                                          \
+                break;                                                     \
             }                                                              \
-            UCC_RED_AVX2_##UTAG##_STORE(&d[i], acc);                      \
+        } else {                                                           \
+            for (i = 0; i + lanes <= count; i += lanes) {                 \
+                UCC_RED_AVX2_##UTAG##_VEC v0 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v1 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v2 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v3 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v4 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v5 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p5[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v6 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p6[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v7 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p7[i]);                 \
+                v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v1);                 \
+                v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v2);                 \
+                v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v3);                 \
+                v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v4);                 \
+                v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v5);                 \
+                v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v6);                 \
+                v0 = UCC_RED_AVX2_##UTAG##_##UOP(v0, v7);                 \
+                unsigned j;                                                \
+                for (j = 8; j < n_srcs; j++) {                            \
+                    v0 = UCC_RED_AVX2_##UTAG##_##UOP(                     \
+                        v0, UCC_RED_AVX2_##UTAG##_LOAD(&s[j][i]));        \
+                }                                                          \
+                UCC_RED_AVX2_##UTAG##_STORE(&d[i], v0);                    \
+            }                                                              \
         }                                                                  \
         for (; i < count; i++) {                                           \
             CTYPE acc = s[0][i];                                          \
@@ -447,42 +638,17 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_max_64bit_u(
         }                                                                  \
     }
 
-
-/* TREE reduction helpers: exact DO_OP__N shape (min/max/lxor)         */
-#define UCC_RED_AVX2_TREE2(UTAG, UOP, a, b)     UCC_RED_AVX2_##UTAG##_##UOP(a, b)
-#define UCC_RED_AVX2_TREE3(UTAG, UOP, a, b, c)     UCC_RED_AVX2_##UTAG##_##UOP(UCC_RED_AVX2_##UTAG##_##UOP(a, b), c)
-#define UCC_RED_AVX2_TREE4(UTAG, UOP, a, b, c, d) \
-    UCC_RED_AVX2_##UTAG##_##UOP(UCC_RED_AVX2_##UTAG##_##UOP(a, b), \
-                                UCC_RED_AVX2_##UTAG##_##UOP(c, d))
-#define UCC_RED_AVX2_TREE5(UTAG, UOP, a, b, c, d, e) \
-    UCC_RED_AVX2_##UTAG##_##UOP(UCC_RED_AVX2_##UTAG##_##UOP(a, b), \
-                                UCC_RED_AVX2_TREE3(UTAG, UOP, c, d, e))
-#define UCC_RED_AVX2_TREE6(UTAG, UOP, a, b, c, d, e, f) \
-    UCC_RED_AVX2_##UTAG##_##UOP(UCC_RED_AVX2_TREE3(UTAG, UOP, a, b, c), \
-                                UCC_RED_AVX2_TREE3(UTAG, UOP, d, e, f))
-#define UCC_RED_AVX2_TREE7(UTAG, UOP, a, b, c, d, e, f, g) \
-    UCC_RED_AVX2_##UTAG##_##UOP(UCC_RED_AVX2_TREE3(UTAG, UOP, a, b, c), \
-                                UCC_RED_AVX2_TREE4(UTAG, UOP, d, e, f, g))
-#define UCC_RED_AVX2_TREE8(UTAG, UOP, a, b, c, d, e, f, g, h) \
-    UCC_RED_AVX2_##UTAG##_##UOP(UCC_RED_AVX2_TREE4(UTAG, UOP, a, b, c, d), \
-                                UCC_RED_AVX2_TREE4(UTAG, UOP, e, f, g, h))
-
-/* scalar tree helpers */
-#define UCC_RED_AVX2_STREE2(UOP, a, b)     UCC_RED_AVX2_S_##UOP(a, b)
-#define UCC_RED_AVX2_STREE3(UOP, a, b, c)     UCC_RED_AVX2_S_##UOP(UCC_RED_AVX2_S_##UOP(a, b), c)
-#define UCC_RED_AVX2_STREE4(UOP, a, b, c, d)     UCC_RED_AVX2_S_##UOP(UCC_RED_AVX2_S_##UOP(a, b), \
-                         UCC_RED_AVX2_S_##UOP(c, d))
-#define UCC_RED_AVX2_STREE5(UOP, a, b, c, d, e)     UCC_RED_AVX2_S_##UOP(UCC_RED_AVX2_S_##UOP(a, b), \
-                         UCC_RED_AVX2_STREE3(UOP, c, d, e))
-#define UCC_RED_AVX2_STREE6(UOP, a, b, c, d, e, f)     UCC_RED_AVX2_S_##UOP(UCC_RED_AVX2_STREE3(UOP, a, b, c), \
-                         UCC_RED_AVX2_STREE3(UOP, d, e, f))
-#define UCC_RED_AVX2_STREE7(UOP, a, b, c, d, e, f, g)     UCC_RED_AVX2_S_##UOP(UCC_RED_AVX2_STREE3(UOP, a, b, c), \
-                         UCC_RED_AVX2_STREE4(UOP, d, e, f, g))
-#define UCC_RED_AVX2_STREE8(UOP, a, b, c, d, e, f, g, h)     UCC_RED_AVX2_S_##UOP(UCC_RED_AVX2_STREE4(UOP, a, b, c, d), \
-                         UCC_RED_AVX2_STREE4(UOP, e, f, g, h))
-
-/* TREE kernel: exact DO_OP__N tree, then fold from source 8           */
-#define UCC_RED_AVX2_DEF_TREE(CTYPE, DT, UTAG, OP, UOP)                       \
+/* ------------------------------------------------------------------ */
+/* BTREE kernel generator (min/max only): balanced-tree association    */
+/* ------------------------------------------------------------------ */
+/* min/max are exact, associative and commutative, and IEEE min/max     */
+/* pick the non-NaN operand regardless of association, so a balanced    */
+/* tree yields bitwise the same result as the scalar reference's       */
+/* DO_OP__N shape.  The pairing halves the dependency depth at every   */
+/* n_srcs (~log2 vs n_srcs-1 for the left fold), exposing ILP at      */
+/* n_srcs >= 4; the n_srcs > 8 tail left-folds s8..s(n_srcs-1) into   */
+/* the tree result (matches the scalar DO_OP__8(...) OP s8 OP ...).   */
+#define UCC_RED_AVX2_DEF_BTREE(CTYPE, DT, UTAG, OP, UOP)                    \
     static inline __attribute__((target("avx2"))) void                    \
     ucc_arch_reduce_avx2_##DT##_##OP(void *dst,                           \
                                      const void * const *srcs,            \
@@ -490,65 +656,199 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_max_64bit_u(
     {                                                                      \
         const CTYPE **restrict s = (const CTYPE **)srcs;                 \
         CTYPE *restrict d = (CTYPE *)dst;                                \
+        const CTYPE *restrict p0 = s[0];                     \
+        const CTYPE *restrict p1 = s[1];                     \
+        const CTYPE *restrict p2 = s[2];                     \
+        const CTYPE *restrict p3 = s[3];                     \
+        const CTYPE *restrict p4 = s[4];                     \
+        const CTYPE *restrict p5 = s[5];                     \
+        const CTYPE *restrict p6 = s[6];                     \
+        const CTYPE *restrict p7 = s[7];                     \
         const unsigned lanes = UCC_RED_AVX2_##UTAG##_LANES;               \
-        size_t i;                                                          \
-        for (i = 0; i + lanes <= count; i += lanes) {                     \
-            unsigned k = n_srcs < 8 ? n_srcs : 8;                        \
-            UCC_RED_AVX2_##UTAG##_VEC v[8] = {0};                            \
-            unsigned j;                                                    \
-            for (j = 0; j < k; j++) v[j] =                                 \
-                UCC_RED_AVX2_##UTAG##_LOAD(&s[j][i]);                    \
-            UCC_RED_AVX2_##UTAG##_VEC acc = v[0];                        \
-            switch (k) {                                                   \
-            case 2: acc = UCC_RED_AVX2_TREE2(UTAG, UOP, v[0], v[1]);     \
-                    break;                                                 \
-            case 3: acc = UCC_RED_AVX2_TREE3(UTAG, UOP, v[0], v[1],      \
-                                             v[2]); break;                 \
-            case 4: acc = UCC_RED_AVX2_TREE4(UTAG, UOP, v[0], v[1],      \
-                                             v[2], v[3]); break;           \
-            case 5: acc = UCC_RED_AVX2_TREE5(UTAG, UOP, v[0], v[1],      \
-                                             v[2], v[3], v[4]); break;     \
-            case 6: acc = UCC_RED_AVX2_TREE6(UTAG, UOP, v[0], v[1],      \
-                                             v[2], v[3], v[4], v[5]);      \
-                    break;                                                 \
-            case 7: acc = UCC_RED_AVX2_TREE7(UTAG, UOP, v[0], v[1],      \
-                                             v[2], v[3], v[4], v[5],      \
-                                             v[6]); break;                 \
-            case 8: acc = UCC_RED_AVX2_TREE8(UTAG, UOP, v[0], v[1],      \
-                                             v[2], v[3], v[4], v[5],      \
-                                             v[6], v[7]); break;           \
+        size_t i = 0;                                                      \
+        if (n_srcs <= 8) {                                                 \
+            switch (n_srcs) {                                              \
+            case 1:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                                                UCC_RED_AVX2_##UTAG##_LOAD(&p0[i])); \
+                }                                                          \
+                break;                                                     \
+            case 2:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                                                UCC_RED_AVX2_##UTAG##_##UOP(v0, v1)); \
+                }                                                          \
+                break;                                                     \
+            case 3:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                        UCC_RED_AVX2_##UTAG##_##UOP(                      \
+                            UCC_RED_AVX2_##UTAG##_##UOP(v0, v1), v2));    \
+                }                                                          \
+                break;                                                     \
+            case 4:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                        UCC_RED_AVX2_##UTAG##_##UOP(                      \
+                            UCC_RED_AVX2_##UTAG##_##UOP(v0, v1),          \
+                            UCC_RED_AVX2_##UTAG##_##UOP(v2, v3)));        \
+                }                                                          \
+                break;                                                     \
+            case 5:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v4 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                        UCC_RED_AVX2_##UTAG##_##UOP(                      \
+                            UCC_RED_AVX2_##UTAG##_##UOP(v0, v1),          \
+                            UCC_RED_AVX2_##UTAG##_##UOP(                  \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v2, v3),      \
+                                v4)));                                     \
+                }                                                          \
+                break;                                                     \
+            case 6:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v4 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v5 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p5[i]);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                        UCC_RED_AVX2_##UTAG##_##UOP(                      \
+                            UCC_RED_AVX2_##UTAG##_##UOP(                  \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v0, v1),      \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v2, v3)),     \
+                            UCC_RED_AVX2_##UTAG##_##UOP(v4, v5)));        \
+                }                                                          \
+                break;                                                     \
+            case 7:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v4 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v5 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p5[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v6 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p6[i]);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                        UCC_RED_AVX2_##UTAG##_##UOP(                      \
+                            UCC_RED_AVX2_##UTAG##_##UOP(                  \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v0, v1),      \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v2, v3)),     \
+                            UCC_RED_AVX2_##UTAG##_##UOP(                  \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v4, v5),      \
+                                v6)));                                     \
+                }                                                          \
+                break;                                                     \
+            case 8:                                                        \
+                for (i = 0; i + lanes <= count; i += lanes) {             \
+                    UCC_RED_AVX2_##UTAG##_VEC v0 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v1 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v2 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v3 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v4 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v5 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p5[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v6 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p6[i]);             \
+                    UCC_RED_AVX2_##UTAG##_VEC v7 =                         \
+                        UCC_RED_AVX2_##UTAG##_LOAD(&p7[i]);             \
+                    UCC_RED_AVX2_##UTAG##_STORE(&d[i],                     \
+                        UCC_RED_AVX2_##UTAG##_##UOP(                      \
+                            UCC_RED_AVX2_##UTAG##_##UOP(                  \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v0, v1),      \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v2, v3)),     \
+                            UCC_RED_AVX2_##UTAG##_##UOP(                  \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v4, v5),      \
+                                UCC_RED_AVX2_##UTAG##_##UOP(v6, v7))));   \
+                }                                                          \
+                break;                                                     \
             }                                                              \
-            for (j = k; j < n_srcs; j++) {                                 \
-                acc = UCC_RED_AVX2_##UTAG##_##UOP(                         \
-                    acc, UCC_RED_AVX2_##UTAG##_LOAD(&s[j][i]));          \
+        } else {                                                           \
+            for (i = 0; i + lanes <= count; i += lanes) {                 \
+                UCC_RED_AVX2_##UTAG##_VEC v0 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p0[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v1 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p1[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v2 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p2[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v3 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p3[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v4 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p4[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v5 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p5[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v6 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p6[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC v7 =                             \
+                    UCC_RED_AVX2_##UTAG##_LOAD(&p7[i]);                 \
+                UCC_RED_AVX2_##UTAG##_VEC acc =                            \
+                    UCC_RED_AVX2_##UTAG##_##UOP(                          \
+                        UCC_RED_AVX2_##UTAG##_##UOP(                      \
+                            UCC_RED_AVX2_##UTAG##_##UOP(v0, v1),          \
+                            UCC_RED_AVX2_##UTAG##_##UOP(v2, v3)),         \
+                        UCC_RED_AVX2_##UTAG##_##UOP(                      \
+                            UCC_RED_AVX2_##UTAG##_##UOP(v4, v5),          \
+                            UCC_RED_AVX2_##UTAG##_##UOP(v6, v7)));        \
+                unsigned j;                                                \
+                for (j = 8; j < n_srcs; j++) {                            \
+                    acc = UCC_RED_AVX2_##UTAG##_##UOP(                    \
+                        acc, UCC_RED_AVX2_##UTAG##_LOAD(&s[j][i]));       \
+                }                                                          \
+                UCC_RED_AVX2_##UTAG##_STORE(&d[i], acc);                    \
             }                                                              \
-            UCC_RED_AVX2_##UTAG##_STORE(&d[i], acc);                      \
         }                                                                  \
         for (; i < count; i++) {                                           \
-            unsigned k = n_srcs < 8 ? n_srcs : 8;                        \
-            CTYPE v[8] = {0};                                                \
+            CTYPE acc = s[0][i];                                          \
             unsigned j;                                                    \
-            for (j = 0; j < k; j++) v[j] = s[j][i];                       \
-            CTYPE acc = v[0];                                         \
-            switch (k) {                                                   \
-            case 2: acc = UCC_RED_AVX2_STREE2(UOP, v[0], v[1]); break;   \
-            case 3: acc = UCC_RED_AVX2_STREE3(UOP, v[0], v[1], v[2]);     \
-                    break;                                                 \
-            case 4: acc = UCC_RED_AVX2_STREE4(UOP, v[0], v[1], v[2],     \
-                                              v[3]); break;                \
-            case 5: acc = UCC_RED_AVX2_STREE5(UOP, v[0], v[1], v[2],     \
-                                              v[3], v[4]); break;          \
-            case 6: acc = UCC_RED_AVX2_STREE6(UOP, v[0], v[1], v[2],     \
-                                              v[3], v[4], v[5]); break;    \
-            case 7: acc = UCC_RED_AVX2_STREE7(UOP, v[0], v[1], v[2],     \
-                                              v[3], v[4], v[5], v[6]);     \
-                    break;                                                 \
-            case 8: acc = UCC_RED_AVX2_STREE8(UOP, v[0], v[1], v[2],     \
-                                              v[3], v[4], v[5], v[6],      \
-                                              v[7]); break;                \
-            }                                                              \
-            for (j = k; j < n_srcs; j++) {                                 \
-                acc = UCC_RED_AVX2_S_##UOP(acc, s[j][i]);                 \
+            for (j = 1; j < n_srcs; j++) {                                 \
+                acc = UCC_RED_AVX2_S_##UOP(acc, s[j][i]);                  \
             }                                                              \
             d[i] = acc;                                                    \
         }                                                                  \
@@ -561,106 +861,94 @@ static inline __attribute__((target("avx2"))) __m256i ucc_arch_avx2_max_64bit_u(
 /* ------------------------------------------------------------------ */
 /* Instantiations: per (dtype, op)                                     */
 /* ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ */
-/* Instantiations: per (dtype, op)                                     */
-/* ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ */
-/* Instantiations: per (dtype, op)                                     */
-/* ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ */
-/* Instantiations: per (dtype, op)                                     */
-/* ------------------------------------------------------------------ */
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, max, MAX, TREE)
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, band, BAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, bor, BOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, bxor, BXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, land, LAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, lor, LOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, lxor, LXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, max, MAX, TREE)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, band, BAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, bor, BOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, bxor, BXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, land, LAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, lor, LOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, lxor, LXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, max, MAX, TREE)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, band, BAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, bor, BOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, bxor, BXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, land, LAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, lor, LOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, lxor, LXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, max, MAX, TREE)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, band, BAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, bor, BOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, bxor, BXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, land, LAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, lor, LOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, lxor, LXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, max, MAX, TREE)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, band, BAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, bor, BOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, bxor, BXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, land, LAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, lor, LOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, lxor, LXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, max, MAX, TREE)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, band, BAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, bor, BOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, bxor, BXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, land, LAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, lor, LOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, lxor, LXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, max, MAX, TREE)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, band, BAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, bor, BOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, bxor, BXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, land, LAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, lor, LOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, lxor, LXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, max, MAX, TREE)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, band, BAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, bor, BOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, bxor, BXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, land, LAND, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, lor, LOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, lxor, LXOR, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(float, float32, FLOAT32, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(float, float32, FLOAT32, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(float, float32, FLOAT32, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(float, float32, FLOAT32, max, MAX, TREE)
-UCC_RED_AVX2_DEF_REDUCE(double, float64, FLOAT64, sum, SUM, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(double, float64, FLOAT64, prod, PROD, FOLD)
-UCC_RED_AVX2_DEF_REDUCE(double, float64, FLOAT64, min, MIN, TREE)
-UCC_RED_AVX2_DEF_REDUCE(double, float64, FLOAT64, max, MAX, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, max, MAX, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, band, BAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, bor, BOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, bxor, BXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, land, LAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, lor, LOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int8_t, int8, INT8, lxor, LXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, max, MAX, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, band, BAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, bor, BOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, bxor, BXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, land, LAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, lor, LOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int16_t, int16, INT16, lxor, LXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, max, MAX, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, band, BAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, bor, BOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, bxor, BXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, land, LAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, lor, LOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int32_t, int32, INT32, lxor, LXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, max, MAX, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, band, BAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, bor, BOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, bxor, BXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, land, LAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, lor, LOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(int64_t, int64, INT64, lxor, LXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, max, MAX, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, band, BAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, bor, BOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, bxor, BXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, land, LAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, lor, LOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint8_t, uint8, UINT8, lxor, LXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, max, MAX, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, band, BAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, bor, BOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, bxor, BXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, land, LAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, lor, LOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint16_t, uint16, UINT16, lxor, LXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, max, MAX, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, band, BAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, bor, BOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, bxor, BXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, land, LAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, lor, LOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint32_t, uint32, UINT32, lxor, LXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, max, MAX, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, band, BAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, bor, BOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, bxor, BXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, land, LAND, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, lor, LOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(uint64_t, uint64, UINT64, lxor, LXOR, TREE)
+UCC_RED_AVX2_DEF_REDUCE(float, float32, FLOAT32, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(float, float32, FLOAT32, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(float, float32, FLOAT32, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(float, float32, FLOAT32, max, MAX, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(double, float64, FLOAT64, sum, SUM, TREE)
+UCC_RED_AVX2_DEF_REDUCE(double, float64, FLOAT64, prod, PROD, TREE)
+UCC_RED_AVX2_DEF_REDUCE(double, float64, FLOAT64, min, MIN, BTREE)
+UCC_RED_AVX2_DEF_REDUCE(double, float64, FLOAT64, max, MAX, BTREE)
 
 #endif /* defined(__x86_64__) */
 #endif /* UCC_ARCH_X86_64_REDUCE_AVX2_H_ */
