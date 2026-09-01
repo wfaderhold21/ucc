@@ -25,6 +25,7 @@ typedef struct ucc_ec_cuda {
     ucc_thread_mode_t              thread_mode;
     ucc_ec_cuda_strm_task_mode_t   strm_task_mode;
     ucc_spinlock_t                 init_spinlock;
+    ucc_ee_executor_t             *cpu_executor;
 } ucc_ec_cuda_t;
 
 typedef struct ucc_ec_cuda_stream_request {
