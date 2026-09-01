@@ -71,6 +71,17 @@ static ucc_config_field_t ucc_ec_cuda_config_table[] = {
      ucc_offsetof(ucc_ec_cuda_config_t, use_cooperative_launch),
      UCC_CONFIG_TYPE_BOOL},
 
+    {"USE_HOST_REDUCE", "0",
+     "Route reduce/reduce_strided tasks to the host CPU executor when the "
+     "shared host-capability policy (size + datatype) matches",
+     ucc_offsetof(ucc_ec_cuda_config_t, use_host_reduce),
+     UCC_CONFIG_TYPE_BOOL},
+
+    {"REDUCE_HOST_LIMIT", "256",
+     "Maximum data size for which to use host-based reduction operations",
+     ucc_offsetof(ucc_ec_cuda_config_t, reduce_host_limit),
+     UCC_CONFIG_TYPE_MEMUNITS},
+
     {NULL}
 
 };

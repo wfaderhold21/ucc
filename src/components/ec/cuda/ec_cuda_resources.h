@@ -99,6 +99,8 @@ typedef struct ucc_ec_cuda_config {
     unsigned long                  reduce_num_blocks;
     int                            reduce_num_threads;
     int                            use_cooperative_launch;
+    int                            use_host_reduce;
+    int                            reduce_host_limit;
     unsigned long                  exec_copy_thresh;
 } ucc_ec_cuda_config_t;
 

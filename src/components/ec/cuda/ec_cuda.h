@@ -13,6 +13,7 @@
 #include "utils/ucc_mpool.h"
 #include "ec_cuda_resources.h"
 #include <cuda_runtime.h>
+#include <stdbool.h>
 
 typedef ucc_status_t (*ucc_ec_cuda_task_post_fn) (uint32_t *dev_status,
                                                   int blocking_wait,
@@ -43,6 +44,16 @@ ucc_status_t ucc_ec_cuda_event_post(void *ee_context, void *event);
 ucc_status_t ucc_ec_cuda_event_test(void *event);
 
 ucc_status_t ucc_ec_cuda_get_resources(ucc_ec_cuda_resources_t **resources);
+
+/* Host-offload policy for REDUCE/REDUCE_STRIDED: true when the task is
+ * small enough (total bytes <= REDUCE_HOST_LIMIT), its datatype is
+ * host-supported, and USE_HOST_REDUCE is enabled.  Mirrors
+ * ec_rocm_use_host_ops() in the ROCm component. */
+bool ec_cuda_use_host_ops(const ucc_ee_executor_task_args_t *task_args);
+
+/* Per-process host-offload routing counters (host vs GPU reduce tasks). */
+uint64_t ucc_ec_cuda_host_reduce_count(void);
+uint64_t ucc_ec_cuda_gpu_reduce_count(void);
 
 extern ucc_ec_cuda_t ucc_ec_cuda;
 

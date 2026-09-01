@@ -5,7 +5,50 @@
  */
 
 #include "ec_cuda_executor.h"
+#include "components/ec/ucc_ec.h"
+#include "components/ec/base/ucc_ec_host_ops.h"
 #include "utils/ucc_atomic.h"
+#include <stdbool.h>
+
+/*
+ * Host-offload routing for small reduces: the interruptible executor posts
+ * to the device stream; when the policy below matches, the task is
+ * delegated to the nested CPU executor instead (mirrors
+ * ec_rocm_executor_interruptible.c:ec_rocm_use_host_ops + delegation).
+ *
+ * Data must already be host-accessible (UCC_MEM_HOST); D2H/H2D staging for
+ * device buffers is a later milestone (580).
+ */
+
+static volatile uint64_t ucc_ec_cuda_host_reduce_cnt = 0;
+static volatile uint64_t ucc_ec_cuda_gpu_reduce_cnt  = 0;
+
+bool ec_cuda_use_host_ops(const ucc_ee_executor_task_args_t *task_args)
+{
+    if (task_args->task_type != UCC_EE_EXECUTOR_TASK_REDUCE &&
+        task_args->task_type != UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED) {
+        return false;
+    }
+    if (!EC_CUDA_CONFIG->use_host_reduce) {
+        return false;
+    }
+    if (ucc_ec_host_total_reduce_len(task_args) > EC_CUDA_CONFIG->reduce_host_limit) {
+        return false;
+    }
+    return ucc_ec_host_dt_supported(task_args);
+}
+
+uint64_t ucc_ec_cuda_host_reduce_count(void)
+{
+    /* volatile read is a single aligned 8-byte load on the supported
+     * archs; increments go through ucc_atomic_add64. */
+    return ucc_ec_cuda_host_reduce_cnt;
+}
+
+uint64_t ucc_ec_cuda_gpu_reduce_count(void)
+{
+    return ucc_ec_cuda_gpu_reduce_cnt;
+}
 
 ucc_status_t ucc_cuda_executor_interruptible_get_stream(cudaStream_t *stream)
 {
@@ -68,6 +111,25 @@ ucc_cuda_executor_interruptible_task_post(ucc_ee_executor_t *executor,
     cudaGraphNode_t nodes[UCC_EE_EXECUTOR_MULTI_OP_NUM_BUFS];
     ucc_ec_cuda_resources_t *resources;
     int i;
+
+    /* Host-offload: small, host-supported reduces go to the nested CPU
+     * executor; everything else stays on the device stream. */
+    if (ec_cuda_use_host_ops(task_args)) {
+        ucc_atomic_add64(&ucc_ec_cuda_host_reduce_cnt, 1);
+        ec_trace(&ucc_ec_cuda.super,
+                 "routing reduce (host policy) to CPU executor");
+        status = ucc_ee_executor_task_post(ucc_ec_cuda.cpu_executor,
+                                           task_args, task);
+        if (ucc_unlikely(status != UCC_OK)) {
+            ec_error(&ucc_ec_cuda.super,
+                     "failed to execute host reduce from CUDA component");
+        }
+        return status;
+    }
+    if (task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE ||
+        task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED) {
+        ucc_atomic_add64(&ucc_ec_cuda_gpu_reduce_cnt, 1);
+    }
 
     status = ucc_ec_cuda_get_resources(&resources);
     if (ucc_unlikely(status != UCC_OK)) {

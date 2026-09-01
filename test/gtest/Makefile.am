@@ -121,7 +121,8 @@ endif
 if HAVE_CUDA
 gtest_SOURCES +=                    \
 	core/test_mc_cuda.cc            \
-	core/test_ec_cuda.cc
+	core/test_ec_cuda.cc            \
+	core/test_ec_cuda_host_ops.cc
 gtest_CPPFLAGS += \
 	$(CUDA_CPPFLAGS)
 gtest_LDFLAGS += \
