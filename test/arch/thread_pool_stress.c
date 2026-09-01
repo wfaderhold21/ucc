@@ -90,7 +90,7 @@ main(void)
     pthread_t producers[NUM_PRODUCERS], consumers[NUM_CONSUMERS];
     int       rc = 0;
 
-    if (ucc_ec_cpu_thread_pool_init(&pool, TOTAL_TASKS) != UCC_OK) {
+    if (ucc_ec_cpu_thread_pool_init(&pool, 0, TOTAL_TASKS) != UCC_OK) {
         fprintf(stderr, "pool init failed\n");
         return 1;
     }
