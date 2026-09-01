@@ -9,6 +9,7 @@
 #include "ec_rocm_executor.h"
 #include "components/mc/ucc_mc.h"
 #include "components/ec/ucc_ec.h"
+#include "components/ec/base/ucc_ec_host_ops.h"
 #include "utils/ucc_atomic.h"
 
 static bool ucc_ec_rocm_copy_multi_use_host (const ucc_ee_executor_task_args_t* task_args)
@@ -25,45 +26,6 @@ static bool ucc_ec_rocm_copy_multi_use_host (const ucc_ee_executor_task_args_t* 
     return result;
 }
 
-static int ucc_ec_rocm_total_reduce_len(const ucc_ee_executor_task_args_t* task_args)
-{
-    int             total_len = 0;
-    ucc_datatype_t  dt;
-    size_t          count;
-
-    if (task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE) {
-        dt    = task_args->reduce.dt;
-        count = task_args->reduce.count;
-    } else {
-        ucc_assert(task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED);
-        dt    = task_args->reduce_strided.dt;
-        count = task_args->reduce_strided.count;
-    }
-    total_len += count * ucc_dt_size(dt);
-
-    return total_len;
-}
-
-static bool ucc_ec_rocm_host_dt_supported(const ucc_ee_executor_task_args_t*  task_args)
-{
-    bool            result = false;
-    ucc_datatype_t  dt;
-
-    if (task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE) {
-        dt     = task_args->reduce.dt;
-    } else {
-        ucc_assert(task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED);
-        dt     = task_args->reduce_strided.dt;
-    }
-    if (dt != UCC_DT_BFLOAT16        &&
-        dt != UCC_DT_FLOAT16         &&
-        dt != UCC_DT_FLOAT32_COMPLEX &&
-        dt != UCC_DT_FLOAT64_COMPLEX) {
-        result = true;
-    }
-    return result;
-}
-
 static inline
 bool ec_rocm_use_host_ops(const ucc_ee_executor_task_args_t *_task_args)
 {
@@ -73,8 +35,8 @@ bool ec_rocm_use_host_ops(const ucc_ee_executor_task_args_t *_task_args)
           ucc_ec_rocm_copy_multi_use_host(_task_args))                                  ||
          ((_task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE                         ||
            _task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED)                &&
-          ucc_ec_rocm_total_reduce_len(_task_args) <= EC_ROCM_CONFIG->reduce_host_limit &&
-          ucc_ec_rocm_host_dt_supported(_task_args) )) {
+          ucc_ec_host_total_reduce_len(_task_args) <= EC_ROCM_CONFIG->reduce_host_limit &&
+          ucc_ec_host_dt_supported(_task_args) )) {
         return true;
     }
     return false;

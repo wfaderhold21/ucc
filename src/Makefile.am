@@ -98,6 +98,7 @@ noinst_HEADERS =                       \
 	components/mc/ucc_mc_log.h         \
 	components/ec/ucc_ec.h             \
 	components/ec/base/ucc_ec_base.h   \
+	components/ec/base/ucc_ec_host_ops.h \
 	components/ec/ucc_ec_log.h         \
 	coll_patterns/recursive_knomial.h  \
 	coll_patterns/sra_knomial.h        \
