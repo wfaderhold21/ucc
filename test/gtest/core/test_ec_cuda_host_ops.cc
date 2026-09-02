@@ -29,6 +29,8 @@ extern "C" {
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
+#include <cstdio>
 
 typedef bool (*ec_cuda_use_host_ops_fn)(const ucc_ee_executor_task_args_t *);
 typedef uint64_t (*count_fn)(void);
@@ -528,4 +530,312 @@ UCC_TEST_F(test_ec_cuda_host_ops, strided_reduce_staged_to_host)
     free(dst_h);
     free(fill);
     cudaFree(src1); cudaFree(src2); cudaFree(dst);
+}
+
+/*
+ * 581 — host-offload vs GPU path parity across dt x op.
+ *
+ * The same 2-source reduce is run twice over the same device buffers:
+ *   - host path: host policy enabled  -> 580 staging (D2H -> CPU reduce ->
+ *     H2D, fenced by a CUDA event) on the nested CPU executor;
+ *   - GPU path:  host policy disabled -> the CUDA reduce kernel.
+ * Both results are compared against an independent reference fold (the
+ * exact 2-source op) and against each other.  Integer/unsigned types must
+ * match bit-exact; floating point within a small tolerance.  Both paths
+ * fold the same values in the same order (GPU: d=s1+s2; CPU: DO_OP_SUM_2
+ * = left-associative token chain), so results are expected to be
+ * (near-)identical.
+ *
+ * The host path is only supported for a subset of dt x op (see
+ * ucc_ec_host_ops.h and the CPU reduce dispatch), so each case also asserts
+ * the routing counter proves which path actually ran.
+ */
+
+static ucc_status_t
+post_reduce_dt_op(ucc_ee_executor_t *exe, ucc_datatype_t dt,
+                  ucc_reduction_op_t op, size_t count, void *dst, void *s1,
+                  void *s2)
+{
+    ucc_ee_executor_task_args_t args;
+    ucc_ee_executor_task_t     *task = NULL;
+    ucc_status_t                status;
+
+    memset(&args, 0, sizeof(args));
+    args.task_type       = UCC_EE_EXECUTOR_TASK_REDUCE;
+    args.reduce.dst      = dst;
+    args.reduce.srcs[0]  = s1;
+    args.reduce.srcs[1]  = s2;
+    args.reduce.count    = count;
+    args.reduce.alpha    = 1.0;
+    args.reduce.dt       = dt;
+    args.reduce.op       = op;
+    args.reduce.n_srcs   = 2;
+
+    status = ucc_ee_executor_task_post(exe, &args, &task);
+    if (status != UCC_OK) {
+        return status;
+    }
+    do {
+        status = ucc_ee_executor_task_test(task);
+    } while (status > 0);
+    if (status != UCC_OK) {
+        return status;
+    }
+    return ucc_ee_executor_task_finalize(task);
+}
+
+/* Exact 2-source reference fold, matching DO_OP_* (ucc_math.h/ucc_math_op.h).
+ * Split by type family: the integral fold references the bitwise/logical ops
+ * (only valid on integral types); the floating-point fold references only the
+ * arithmetic/comparison ops.  Keeping them separate makes each template
+ * instantiation valid (C++11 has no if-constexpr). */
+template <typename T>
+static T
+ref2_int(ucc_reduction_op_t op, T a, T b)
+{
+    switch (op) {
+    case UCC_OP_SUM:  return a + b;
+    case UCC_OP_AVG:  return a + b; /* alpha=1, n_srcs=2 -> identical to SUM */
+    case UCC_OP_PROD: return a * b;
+    case UCC_OP_MIN:  return (a < b) ? a : b;
+    case UCC_OP_MAX:  return (a > b) ? a : b;
+    case UCC_OP_LAND: return ((a != 0) && (b != 0)) ? T(1) : T(0);
+    case UCC_OP_BAND: return a & b;
+    case UCC_OP_LOR:  return ((a != 0) || (b != 0)) ? T(1) : T(0);
+    case UCC_OP_BOR:  return a | b;
+    case UCC_OP_LXOR: return ((a != 0) != (b != 0)) ? T(1) : T(0);
+    case UCC_OP_BXOR: return a ^ b;
+    default:          return T(0);
+    }
+}
+
+template <typename T>
+static T
+ref2_float(ucc_reduction_op_t op, T a, T b)
+{
+    switch (op) {
+    case UCC_OP_SUM:  return a + b;
+    case UCC_OP_AVG:  return a + b; /* alpha=1, n_srcs=2 -> identical to SUM */
+    case UCC_OP_PROD: return a * b;
+    case UCC_OP_MIN:  return (a < b) ? a : b;
+    case UCC_OP_MAX:  return (a > b) ? a : b;
+    default:          return T(0);
+    }
+}
+/* Dispatch by type family: the primary ref2 body (integral ops) is only
+ * odr-used for integer types; explicit specializations for float/double
+ * select the floating-point body, so the invalid bitwise expressions are
+ * never instantiated for a float type (C++11, no if-constexpr). */
+
+template <typename T>
+T
+ref2(ucc_reduction_op_t op, T a, T b)
+{
+    return ref2_int<T>(op, a, b);
+}
+
+template <>
+float
+ref2<float>(ucc_reduction_op_t op, float a, float b)
+{
+    return ref2_float<float>(op, a, b);
+}
+
+template <>
+double
+ref2<double>(ucc_reduction_op_t op, double a, double b)
+{
+    return ref2_float<double>(op, a, b);
+}
+
+template <typename T, bool IS_FLOAT>
+static void
+parity_case(ucc_ee_executor_t *exe, ucc_datatype_t dt, ucc_reduction_op_t op,
+            size_t count, void *s1, void *s2, void *dst, int *cfg_use,
+            int *cfg_limit, count_fn host_cnt, count_fn gpu_cnt)
+{
+    const size_t      bytes = count * sizeof(T);
+    T                *h_s1  = (T *)malloc(bytes);
+    T                *h_s2  = (T *)malloc(bytes);
+    T                *h_g   = (T *)malloc(bytes);
+    T                *h_h   = (T *)malloc(bytes);
+    uint64_t           host_before, gpu_before;
+    ucc_status_t       status;
+    const double       tol = IS_FLOAT ? (sizeof(T) == 4 ? 1e-4 : 1e-12) : 0.0;
+
+    ASSERT_NE(h_s1, nullptr);
+    ASSERT_NE(h_s2, nullptr);
+    ASSERT_NE(h_g, nullptr);
+    ASSERT_NE(h_h, nullptr);
+    for (size_t i = 0; i < count; i++) {
+        h_s1[i] = (T)(i % 7);
+        h_s2[i] = (T)((i * 3) % 5);
+    }
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(s1, h_s1, bytes, cudaMemcpyHostToDevice));
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(s2, h_s2, bytes, cudaMemcpyHostToDevice));
+
+    /* host-offload path (580 staging) */
+    host_before = host_cnt();
+    gpu_before  = gpu_cnt();
+    *cfg_use    = 1;
+    *cfg_limit  = (int)bytes;
+    status = post_reduce_dt_op(exe, dt, op, count, dst, s1, s2);
+    ASSERT_EQ(status, UCC_OK);
+    EXPECT_EQ(host_cnt() - host_before, 1u) << ucc_datatype_str(dt) << " "
+                                             << ucc_reduction_op_str(op)
+                                             << " should route to host";
+    EXPECT_EQ(gpu_cnt() - gpu_before, 0u);
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(h_h, dst, bytes, cudaMemcpyDeviceToHost));
+
+    /* GPU kernel path */
+    host_before = host_cnt();
+    gpu_before  = gpu_cnt();
+    *cfg_use    = 0;
+    status = post_reduce_dt_op(exe, dt, op, count, dst, s1, s2);
+    ASSERT_EQ(status, UCC_OK);
+    EXPECT_EQ(gpu_cnt() - gpu_before, 1u) << ucc_datatype_str(dt) << " "
+                                           << ucc_reduction_op_str(op)
+                                           << " should route to gpu";
+    EXPECT_EQ(host_cnt() - host_before, 0u);
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(h_g, dst, bytes, cudaMemcpyDeviceToHost));
+
+    /* both paths vs the exact reference fold */
+    for (size_t i = 0; i < count; i++) {
+        T r = ref2<T>(op, h_s1[i], h_s2[i]);
+        if (IS_FLOAT) {
+            EXPECT_NEAR((double)h_g[i], (double)r, tol)
+                << ucc_datatype_str(dt) << " " << ucc_reduction_op_str(op)
+                << " gpu i=" << i << " ref=" << (double)r
+                << " gpu=" << (double)h_g[i];
+            EXPECT_NEAR((double)h_h[i], (double)r, tol)
+                << ucc_datatype_str(dt) << " " << ucc_reduction_op_str(op)
+                << " host i=" << i << " ref=" << (double)r
+                << " host=" << (double)h_h[i];
+        } else {
+            EXPECT_EQ(h_g[i], r) << ucc_datatype_str(dt) << " "
+                                 << ucc_reduction_op_str(op) << " gpu i=" << i
+                                 << " ref=" << (int64_t)r
+                                 << " gpu=" << (int64_t)h_g[i];
+            EXPECT_EQ(h_h[i], r) << ucc_datatype_str(dt) << " "
+                                 << ucc_reduction_op_str(op) << " host i=" << i
+                                 << " ref=" << (int64_t)r
+                                 << " host=" << (int64_t)h_h[i];
+        }
+    }
+
+    free(h_s1);
+    free(h_s2);
+    free(h_g);
+    free(h_h);
+}
+
+template <typename T, bool IS_FLOAT>
+static void
+run_ops(ucc_ee_executor_t *exe, ucc_datatype_t dt,
+        const ucc_reduction_op_t *ops, size_t nops, size_t count, void *s1,
+        void *s2, void *dst, int *cfg_use, int *cfg_limit, count_fn host_cnt,
+        count_fn gpu_cnt)
+{
+    for (size_t oi = 0; oi < nops; oi++) {
+        parity_case<T, IS_FLOAT>(exe, dt, ops[oi], count, s1, s2, dst,
+                                 cfg_use, cfg_limit, host_cnt, gpu_cnt);
+    }
+}
+
+UCC_TEST_F(test_ec_cuda_host_ops, host_gpu_parity)
+{
+    ucc_ee_executor_t *exe;
+    ucc_status_t       status;
+    const size_t       count = 64;
+    void              *s1, *s2, *dst;
+    static const ucc_reduction_op_t int8_ops[] = {
+        UCC_OP_SUM, UCC_OP_BAND, UCC_OP_BXOR
+    };
+    static const ucc_reduction_op_t int16_ops[] = {
+        UCC_OP_SUM, UCC_OP_PROD, UCC_OP_MIN
+    };
+    static const ucc_reduction_op_t int32_ops[] = {
+        UCC_OP_SUM, UCC_OP_LAND, UCC_OP_LXOR, UCC_OP_MAX
+    };
+    static const ucc_reduction_op_t int64_ops[] = {
+        UCC_OP_SUM, UCC_OP_BOR, UCC_OP_MIN
+    };
+    static const ucc_reduction_op_t uint8_ops[] = {
+        UCC_OP_SUM, UCC_OP_BAND, UCC_OP_BXOR
+    };
+    static const ucc_reduction_op_t uint16_ops[] = {
+        UCC_OP_SUM, UCC_OP_PROD, UCC_OP_MAX
+    };
+    static const ucc_reduction_op_t uint32_ops[] = {
+        UCC_OP_SUM, UCC_OP_LOR, UCC_OP_LAND
+    };
+    static const ucc_reduction_op_t uint64_ops[] = {
+        UCC_OP_SUM, UCC_OP_BXOR, UCC_OP_MIN
+    };
+    static const ucc_reduction_op_t f32_ops[] = {
+        UCC_OP_SUM, UCC_OP_PROD, UCC_OP_MIN, UCC_OP_MAX
+    };
+    static const ucc_reduction_op_t f64_ops[] = {
+        UCC_OP_SUM, UCC_OP_PROD, UCC_OP_MIN, UCC_OP_MAX
+    };
+
+    exe = get_executor();
+    ASSERT_NE(exe, nullptr);
+    status = ucc_ee_executor_start(exe, nullptr);
+    ASSERT_EQ(status, UCC_OK);
+
+    ASSERT_EQ(cudaSuccess, cudaMalloc(&s1, count * sizeof(int64_t)));
+    ASSERT_EQ(cudaSuccess, cudaMalloc(&s2, count * sizeof(int64_t)));
+    ASSERT_EQ(cudaSuccess, cudaMalloc(&dst, count * sizeof(int64_t)));
+
+    run_ops<int8_t, false>(exe, UCC_DT_INT8, int8_ops,
+                           sizeof(int8_ops) / sizeof(int8_ops[0]), count, s1,
+                           s2, dst, cfg_use_host_reduce(),
+                           cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+    run_ops<int16_t, false>(exe, UCC_DT_INT16, int16_ops,
+                            sizeof(int16_ops) / sizeof(int16_ops[0]), count, s1,
+                            s2, dst, cfg_use_host_reduce(),
+                            cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+    run_ops<int32_t, false>(exe, UCC_DT_INT32, int32_ops,
+                            sizeof(int32_ops) / sizeof(int32_ops[0]), count, s1,
+                            s2, dst, cfg_use_host_reduce(),
+                            cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+    run_ops<int64_t, false>(exe, UCC_DT_INT64, int64_ops,
+                            sizeof(int64_ops) / sizeof(int64_ops[0]), count, s1,
+                            s2, dst, cfg_use_host_reduce(),
+                            cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+    run_ops<uint8_t, false>(exe, UCC_DT_UINT8, uint8_ops,
+                            sizeof(uint8_ops) / sizeof(uint8_ops[0]), count, s1,
+                            s2, dst, cfg_use_host_reduce(),
+                            cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+    run_ops<uint16_t, false>(exe, UCC_DT_UINT16, uint16_ops,
+                             sizeof(uint16_ops) / sizeof(uint16_ops[0]), count,
+                             s1, s2, dst, cfg_use_host_reduce(),
+                             cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+    run_ops<uint32_t, false>(exe, UCC_DT_UINT32, uint32_ops,
+                             sizeof(uint32_ops) / sizeof(uint32_ops[0]), count,
+                             s1, s2, dst, cfg_use_host_reduce(),
+                             cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+    run_ops<uint64_t, false>(exe, UCC_DT_UINT64, uint64_ops,
+                             sizeof(uint64_ops) / sizeof(uint64_ops[0]), count,
+                             s1, s2, dst, cfg_use_host_reduce(),
+                             cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+    run_ops<float, true>(exe, UCC_DT_FLOAT32, f32_ops,
+                         sizeof(f32_ops) / sizeof(f32_ops[0]), count, s1, s2,
+                         dst, cfg_use_host_reduce(), cfg_reduce_host_limit(),
+                         host_cnt_, gpu_cnt_);
+    run_ops<double, true>(exe, UCC_DT_FLOAT64, f64_ops,
+                          sizeof(f64_ops) / sizeof(f64_ops[0]), count, s1, s2,
+                          dst, cfg_use_host_reduce(), cfg_reduce_host_limit(),
+                          host_cnt_, gpu_cnt_);
+
+    *cfg_use_host_reduce() = 0; /* restore default */
+
+    cudaFree(s1);
+    cudaFree(s2);
+    cudaFree(dst);
+    status = ucc_ee_executor_stop(exe);
+    EXPECT_EQ(status, UCC_OK);
+    status = ucc_ee_executor_finalize(exe);
+    EXPECT_EQ(status, UCC_OK);
 }
