@@ -36,5 +36,7 @@ ucc_status_t ucc_ec_cuda_persistent_kernel_start(
 ucc_status_t ucc_ec_cuda_reduce(
     ucc_ee_executor_task_args_t *task, unsigned num_threads,
     unsigned num_blocks, cudaStream_t stream);
+/* interruptible executor: next device stream (round-robin over the pool) */
+ucc_status_t ucc_cuda_executor_interruptible_get_stream(cudaStream_t *stream);
 
 #endif

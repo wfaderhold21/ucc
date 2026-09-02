@@ -45,6 +45,18 @@ ucc_status_t ucc_ec_cuda_event_test(void *event);
 
 ucc_status_t ucc_ec_cuda_get_resources(ucc_ec_cuda_resources_t **resources);
 
+/*
+ * Host-offload a small reduce (580): stage device sources D2H (and any
+ * non-host dst), run the reduce on the nested CPU executor, stage the
+ * result H2D when dst is device memory, and fence with a CUDA event so
+ * task_test() only reports completion after the H2D.  Managed/zero-copy
+ * pointers skip staging.  Called from the interruptible task_post when
+ * ec_cuda_use_host_ops() selects the host path.
+ */
+ucc_status_t ucc_ec_cuda_host_offload_post(ucc_ee_executor_t *executor,
+                                           const ucc_ee_executor_task_args_t *task_args,
+                                           ucc_ee_executor_task_t **task);
+
 /* Host-offload policy for REDUCE/REDUCE_STRIDED: true when the task is
  * small enough (total bytes <= REDUCE_HOST_LIMIT), its datatype is
  * host-supported, and USE_HOST_REDUCE is enabled.  Mirrors

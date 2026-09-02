@@ -107,6 +107,63 @@ static ucc_mpool_ops_t ucc_ec_cuda_interruptible_task_mpool_ops = {
     .obj_cleanup   = ucc_ec_cuda_graph_cleanup,
 };
 
+/*
+ * Host-offload staging task pool (580).  Staging buffers are pinned host
+ * memory (cudaHostAlloc) so the D2H/H2D memcpyAsync is fast and the CPU
+ * executor can read/write them without faults.  Buffers are grown on
+ * demand to the largest task ever seen (a reduce is limited by
+ * REDUCE_HOST_LIMIT, so the buffers stay small).
+ */
+static ucc_status_t ucc_ec_cuda_host_staging_chunk_malloc(ucc_mpool_t *mp, //NOLINT: mp is unused
+                                                          size_t *size_p,
+                                                          void **chunk_p)
+{
+    return CUDA_FUNC(cudaHostAlloc((void **)chunk_p, *size_p, 0));
+}
+
+static void ucc_ec_cuda_host_staging_chunk_free(ucc_mpool_t *mp, //NOLINT: mp is unused
+                                                void *chunk)
+{
+    CUDA_FUNC(cudaFreeHost(chunk));
+}
+
+static void ucc_ec_cuda_host_staging_init(ucc_mpool_t *mp, void *obj, //NOLINT: mp is unused
+                                          void *chunk) //NOLINT: chunk is unused
+{
+    ucc_ec_cuda_executor_host_staging_task_t *task =
+        (ucc_ec_cuda_executor_host_staging_task_t *)obj;
+
+    task->src_h        = NULL;
+    task->src_h_cap    = 0;
+    task->dst_h        = NULL;
+    task->dst_h_cap    = 0;
+    task->src_ptrs     = NULL;
+    task->src_ptrs_cap = 0;
+}
+
+static void ucc_ec_cuda_host_staging_cleanup(ucc_mpool_t *mp, void *obj) //NOLINT: mp is unused
+{
+    ucc_ec_cuda_executor_host_staging_task_t *task =
+        (ucc_ec_cuda_executor_host_staging_task_t *)obj;
+
+    if (task->src_h) {
+        CUDA_FUNC(cudaFreeHost(task->src_h));
+    }
+    if (task->dst_h) {
+        CUDA_FUNC(cudaFreeHost(task->dst_h));
+    }
+    if (task->src_ptrs) {
+        ucc_free(task->src_ptrs);
+    }
+}
+
+static ucc_mpool_ops_t ucc_ec_cuda_host_staging_mpool_ops = {
+    .chunk_alloc   = ucc_ec_cuda_host_staging_chunk_malloc,
+    .chunk_release = ucc_ec_cuda_host_staging_chunk_free,
+    .obj_init      = ucc_ec_cuda_host_staging_init,
+    .obj_cleanup   = ucc_ec_cuda_host_staging_cleanup,
+};
+
 ucc_status_t ucc_ec_cuda_executor_kernel_calc_max_threads(int *max);
 
 static void ucc_ec_cuda_set_threads_nbr(
@@ -215,6 +272,16 @@ ucc_status_t ucc_ec_cuda_resources_init(ucc_ec_base_t *ec,
         goto free_interruptible_tasks_mpool;
     }
 
+    status = ucc_mpool_init(&resources->executor_host_staging_tasks, 0,
+                            sizeof(ucc_ec_cuda_executor_host_staging_task_t),
+                            0, UCC_CACHE_LINE_SIZE, 16, UINT_MAX,
+                            &ucc_ec_cuda_host_staging_mpool_ops,
+                            UCC_THREAD_MULTIPLE, "host offload staging tasks");
+    if (status != UCC_OK) {
+        ec_error(ec, "failed to create host offload staging tasks pool");
+        goto free_persistent_tasks_mpool;
+    }
+
     num_streams = ucc_ec_cuda_config->exec_num_streams;
     resources->exec_streams = ucc_calloc(num_streams, sizeof(cudaStream_t),
                                          "ec cuda streams");
@@ -222,7 +289,7 @@ ucc_status_t ucc_ec_cuda_resources_init(ucc_ec_base_t *ec,
         ec_error(ec, "failed to allocate %zd bytes for executor streams",
                  sizeof(cudaStream_t) * num_streams);
         status = UCC_ERR_NO_MEMORY;
-        goto free_persistent_tasks_mpool;
+        goto free_host_staging_tasks_mpool;
     }
 
     ec_debug(
@@ -237,10 +304,13 @@ ucc_status_t ucc_ec_cuda_resources_init(ucc_ec_base_t *ec,
 
     return UCC_OK;
 
+free_host_staging_tasks_mpool:
+    ucc_free(resources->exec_streams);
+    ucc_mpool_cleanup(&resources->executor_host_staging_tasks, 0);
 free_persistent_tasks_mpool:
     ucc_mpool_cleanup(&resources->executor_persistent_tasks, 0);
 free_interruptible_tasks_mpool:
-    ucc_mpool_cleanup(&resources->executor_persistent_tasks, 0);
+    ucc_mpool_cleanup(&resources->executor_interruptible_tasks, 0);
 free_executors_mpool:
     ucc_mpool_cleanup(&resources->executors, 0);
 free_events_mpool:
@@ -269,10 +339,12 @@ void ucc_ec_cuda_resources_cleanup(ucc_ec_cuda_resources_t *resources)
             CUDA_FUNC(cudaStreamDestroy(resources->exec_streams[i]));
         }
     }
+
     ucc_mpool_cleanup(&resources->events, 1);
     ucc_mpool_cleanup(&resources->executors, 1);
     ucc_mpool_cleanup(&resources->executor_interruptible_tasks, 1);
     ucc_mpool_cleanup(&resources->executor_persistent_tasks, 1);
+    ucc_mpool_cleanup(&resources->executor_host_staging_tasks, 1);
 
     ucc_free(resources->exec_streams);
     cuCtxPopCurrent(&tmp_context);

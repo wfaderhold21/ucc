@@ -61,18 +61,41 @@ typedef struct ucc_ec_cuda_executor_interruptible_task {
     cudaGraphExec_t         graph_exec;
 } ucc_ec_cuda_executor_interruptible_task_t;
 
+/*
+ * Staging task for the host-offload reduce path (580).  Device-resident
+ * reduce buffers are staged to/from the CPU executor's host memory:
+ *   D2H(srcs) -> host reduce -> H2D(dst)
+ * Managed / zero-copy (host-accessible) pointers are copied straight in.
+ * The result is fenced by "event" so the executor task_test() only reports
+ * completion after the H2D has landed on the device.
+ *
+ * "event" is the first field after "super" so it sits at the same offset as
+ * ucc_ec_cuda_executor_interruptible_task_t.event; the interruptible
+ * task_test()/task_finalize() operate on this object unchanged.
+ */
+typedef struct ucc_ec_cuda_executor_host_staging_task {
+    ucc_ee_executor_task_t      super;
+    void                       *event;      /* fences the H2D on the stream   */
+    void                       *src_h;      /* D2H staging for all sources    */
+    size_t                      src_h_cap;
+    void                       *dst_h;      /* H2D staging for the result     */
+    size_t                      dst_h_cap;
+    void                      **src_ptrs;   /* n_srcs source pointers (REDUCE) */
+    size_t                      src_ptrs_cap;
+} ucc_ec_cuda_executor_host_staging_task_t;
+
 typedef struct ucc_ec_cuda_executor_persistent_task {
     ucc_ee_executor_task_t       super;
     int                          num_subtasks;
     ucc_ee_executor_task_args_t *subtasks[MAX_SUBTASKS];
 } ucc_ec_cuda_executor_persistent_task_t;
-
 typedef struct ucc_ec_cuda_resources {
     CUcontext     cu_ctx;
     ucc_mpool_t   events;
     ucc_mpool_t   executors;
     ucc_mpool_t   executor_interruptible_tasks;
     ucc_mpool_t   executor_persistent_tasks;
+    ucc_mpool_t   executor_host_staging_tasks;
     int           streams_initialized;
     int           num_streams;
     cudaStream_t *exec_streams;

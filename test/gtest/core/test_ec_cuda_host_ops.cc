@@ -277,3 +277,255 @@ UCC_TEST_F(test_ec_cuda_host_ops, host_gpu_routing_counters)
     free(dst_l_h);
     cudaFree(s1l); cudaFree(s2l); cudaFree(dst_l);
 }
+/*
+ * 580 — device-buffer host-offload staging.
+ *
+ * When the host policy matches and the reduce buffers are device-resident,
+ * the offload path stages the sources D2H, runs the reduce on the nested
+ * CPU executor, and stages the result H2D (fenced by a CUDA event).  These
+ * tests verify the result is bit-exact vs the reference and that the task
+ * is routed to the host counter (not the GPU counter).
+ */
+static ucc_status_t
+post_reduce_ext(ucc_ee_executor_t *exe, size_t count, void *dst,
+                float **srcs, size_t n_srcs)
+{
+    ucc_ee_executor_task_args_t args;
+    ucc_ee_executor_task_t     *task = NULL;
+    ucc_status_t                status;
+
+    memset(&args, 0, sizeof(args));
+    args.task_type = UCC_EE_EXECUTOR_TASK_REDUCE;
+    args.flags     = UCC_EEE_TASK_FLAG_REDUCE_SRCS_EXT;
+    args.reduce.dst       = dst;
+    args.reduce.srcs_ext  = (void **)srcs;
+    args.reduce.count     = count;
+    args.reduce.alpha     = 1.0;
+    args.reduce.dt        = UCC_DT_FLOAT32;
+    args.reduce.op        = UCC_OP_SUM;
+    args.reduce.n_srcs    = (uint16_t)n_srcs;
+
+    status = ucc_ee_executor_task_post(exe, &args, &task);
+    if (status != UCC_OK) {
+        return status;
+    }
+    do {
+        status = ucc_ee_executor_task_test(task);
+    } while (status > 0);
+    if (status != UCC_OK) {
+        return status;
+    }
+    return ucc_ee_executor_task_finalize(task);
+}
+
+UCC_TEST_F(test_ec_cuda_host_ops, device_reduce_staged_to_host)
+{
+    ucc_ee_executor_t *exe;
+    ucc_status_t       status;
+    const size_t       n = 8; /* 32 bytes <= 64 limit -> host */
+    float             *s1, *s2, *dst, *dst_h;
+    float              ref[8];
+    uint64_t           host_before;
+    size_t             i;
+
+    exe = get_executor();
+    ASSERT_NE(exe, nullptr);
+    status = ucc_ee_executor_start(exe, nullptr);
+    ASSERT_EQ(status, UCC_OK);
+
+    *cfg_use_host_reduce()   = 1;
+    *cfg_reduce_host_limit() = 64;
+
+    ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&s1, n * sizeof(float)));
+    ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&s2, n * sizeof(float)));
+    ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&dst, n * sizeof(float)));
+    dst_h = (float *)malloc(n * sizeof(float));
+    ASSERT_NE(dst_h, nullptr);
+
+    /* s1[i] = 1*(i+1), s2[i] = 2*(i+1) -> dst[i] = 3*(i+1) */
+    for (i = 0; i < n; i++) {
+        ref[i] = (float)(i + 1);
+    }
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(s1, ref, n * sizeof(float),
+                                      cudaMemcpyHostToDevice));
+    for (i = 0; i < n; i++) {
+        ref[i] *= 2.0f; /* s2 = 2*(i+1) */
+    }
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(s2, ref, n * sizeof(float),
+                                      cudaMemcpyHostToDevice));
+
+    host_before = host_cnt_();
+
+    status = post_reduce(exe, n, dst, s1, s2);
+    ASSERT_EQ(status, UCC_OK);
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(dst_h, dst, n * sizeof(float),
+                                      cudaMemcpyDeviceToHost));
+    for (i = 0; i < n; i++) {
+        EXPECT_FLOAT_EQ(dst_h[i], 3.0f * (float)(i + 1));
+    }
+
+    /* small + device buffers: routed to the host counter via staging */
+    EXPECT_EQ(host_cnt_() - host_before, 1u);
+
+    status = ucc_ee_executor_stop(exe);
+    EXPECT_EQ(status, UCC_OK);
+    status = ucc_ee_executor_finalize(exe);
+    EXPECT_EQ(status, UCC_OK);
+
+    free(dst_h);
+    cudaFree(s1); cudaFree(s2); cudaFree(dst);
+}
+
+UCC_TEST_F(test_ec_cuda_host_ops, device_reduce_staged_multi_src)
+{
+    ucc_ee_executor_t *exe;
+    ucc_status_t       status;
+    const size_t       n = 8; /* 32 bytes <= 64 limit -> host */
+    float             *d_srcs[5] = {NULL};
+    float             *dst, *dst_h, *ref;
+    uint64_t           host_before;
+    size_t             i;
+    int                k;
+
+    exe = get_executor();
+    ASSERT_NE(exe, nullptr);
+    status = ucc_ee_executor_start(exe, nullptr);
+    ASSERT_EQ(status, UCC_OK);
+
+    *cfg_use_host_reduce()   = 1;
+    *cfg_reduce_host_limit() = 64;
+
+    for (k = 0; k < 5; k++) {
+        ASSERT_EQ(cudaSuccess,
+                  cudaMalloc((void **)&d_srcs[k], n * sizeof(float)));
+    }
+    ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&dst, n * sizeof(float)));
+    dst_h = (float *)malloc(n * sizeof(float));
+    ref   = (float *)malloc(n * sizeof(float));
+    ASSERT_NE(dst_h, nullptr);
+    ASSERT_NE(ref, nullptr);
+
+    /* src_k[i] = (k+1)*(i+1); total = 15*(i+1) */
+    for (k = 0; k < 5; k++) {
+        for (i = 0; i < n; i++) {
+            ref[i] = (float)(k + 1) * (i + 1);
+        }
+        ASSERT_EQ(cudaSuccess, cudaMemcpy(d_srcs[k], ref, n * sizeof(float),
+                                          cudaMemcpyHostToDevice));
+    }
+    for (i = 0; i < n; i++) {
+        ref[i] = 15.0f * (i + 1);
+    }
+
+    host_before = host_cnt_();
+
+    status = post_reduce_ext(exe, n, dst, d_srcs, 5);
+    ASSERT_EQ(status, UCC_OK);
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(dst_h, dst, n * sizeof(float),
+                                      cudaMemcpyDeviceToHost));
+    for (i = 0; i < n; i++) {
+        EXPECT_FLOAT_EQ(dst_h[i], ref[i]);
+    }
+
+    EXPECT_EQ(host_cnt_() - host_before, 1u);
+
+    status = ucc_ee_executor_stop(exe);
+    EXPECT_EQ(status, UCC_OK);
+    status = ucc_ee_executor_finalize(exe);
+    EXPECT_EQ(status, UCC_OK);
+
+    free(dst_h);
+    free(ref);
+    cudaFree(dst);
+    for (k = 0; k < 5; k++) {
+        cudaFree(d_srcs[k]);
+    }
+}
+
+UCC_TEST_F(test_ec_cuda_host_ops, strided_reduce_staged_to_host)
+{
+    ucc_ee_executor_t *exe;
+    ucc_status_t       status;
+    size_t             n      = 128; /* 512 bytes <= 1024 limit -> host */
+    size_t             n_src2 = 2;   /* 3 sources total */
+    const size_t       stride  = 12; /* 3-float offset; 12 % 4 == 0 */
+    const size_t       region  = (n_src2 - 1) * stride + n * sizeof(float);
+    float             *src1, *src2, *dst, *dst_h, *fill;
+    uint64_t           host_before;
+    size_t             i;
+
+    exe = get_executor();
+    ASSERT_NE(exe, nullptr);
+    status = ucc_ee_executor_start(exe, nullptr);
+    ASSERT_EQ(status, UCC_OK);
+
+    *cfg_use_host_reduce()   = 1;
+    *cfg_reduce_host_limit() = 1024;
+
+    ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&src1, n * sizeof(float)));
+    ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&src2, region));
+    ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&dst, n * sizeof(float)));
+    dst_h = (float *)malloc(n * sizeof(float));
+    fill  = (float *)malloc(region / sizeof(float) + 1);
+    ASSERT_NE(dst_h, nullptr);
+    ASSERT_NE(fill, nullptr);
+
+    /* Constant patterns: src1 = 1.0, every strided slice of src2 = 2.0,
+     * so dst[i] = 1.0 + 2.0 + 2.0 = 5.0 regardless of the (overlapping)
+     * 12-byte stride. */
+    for (i = 0; i < n; i++) {
+        fill[i] = 1.0f;
+    }
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(src1, fill, n * sizeof(float),
+                                      cudaMemcpyHostToDevice));
+    for (i = 0; i < region / sizeof(float) + 1; i++) {
+        fill[i] = 2.0f;
+    }
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(src2, fill, region,
+                                      cudaMemcpyHostToDevice));
+
+    host_before = host_cnt_();
+
+    {
+        ucc_ee_executor_task_args_t args;
+        ucc_ee_executor_task_t     *task = NULL;
+
+        memset(&args, 0, sizeof(args));
+        args.task_type          = UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED;
+        args.reduce_strided.dst     = dst;
+        args.reduce_strided.src1    = src1;
+        args.reduce_strided.src2    = src2;
+        args.reduce_strided.stride  = stride;
+        args.reduce_strided.count   = n;
+        args.reduce_strided.alpha   = 1.0;
+        args.reduce_strided.dt      = UCC_DT_FLOAT32;
+        args.reduce_strided.op      = UCC_OP_SUM;
+        args.reduce_strided.n_src2  = (uint16_t)n_src2;
+
+        status = ucc_ee_executor_task_post(exe, &args, &task);
+        ASSERT_EQ(status, UCC_OK);
+        do {
+            status = ucc_ee_executor_task_test(task);
+        } while (status > 0);
+        ASSERT_EQ(status, UCC_OK);
+        status = ucc_ee_executor_task_finalize(task);
+        ASSERT_EQ(status, UCC_OK);
+    }
+
+    ASSERT_EQ(cudaSuccess, cudaMemcpy(dst_h, dst, n * sizeof(float),
+                                      cudaMemcpyDeviceToHost));
+    for (i = 0; i < n; i++) {
+        EXPECT_FLOAT_EQ(dst_h[i], 5.0f);
+    }
+
+    EXPECT_EQ(host_cnt_() - host_before, 1u);
+
+    status = ucc_ee_executor_stop(exe);
+    EXPECT_EQ(status, UCC_OK);
+    status = ucc_ee_executor_finalize(exe);
+    EXPECT_EQ(status, UCC_OK);
+
+    free(dst_h);
+    free(fill);
+    cudaFree(src1); cudaFree(src2); cudaFree(dst);
+}
