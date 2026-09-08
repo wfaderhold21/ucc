@@ -927,6 +927,7 @@ def run_tuning(
     max_confirmation_points: int = 40,
     per_cell_min_points: int = 10,
     proof_mode: bool = False,
+    skip_knobs: bool = False,
     confirmation_seed: int = 0,
     mpi_launcher: Optional[list] = None,
     perftest_path: str = "ucc_perftest",
@@ -1015,6 +1016,7 @@ def run_tuning(
                     perftest_path=perftest_path,
                     timeout_s=timeout_s,
                     proof_mode=proof_mode,
+                    skip_knobs=skip_knobs,
                     confirmation_seed=confirmation_seed,
                 )
                 done += 1
@@ -1096,6 +1098,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--proof-mode", action="store_true",
                    help=("Run full paired confirmation, boundary refinement, and "
                          "knob attribution (expensive). Default is fast screening only."))
+    p.add_argument("--no-knobs", action="store_true",
+                   help="In --proof-mode, skip knob attribution (algorithm-only).")
     p.add_argument("--seed", type=int, default=0,
                    help="Recorded seed for balanced paired order.")
     p.add_argument("--launcher", default="mpirun -np {team_size}",
@@ -1217,6 +1221,7 @@ def main(argv=None) -> int:
         ucc_info_path=args.ucc_info,
         timeout_s=300,
         proof_mode=args.proof_mode,
+        skip_knobs=args.no_knobs,
         confirmation_seed=args.seed,
     )
 

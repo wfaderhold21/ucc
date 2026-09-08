@@ -226,6 +226,15 @@ class TestSweepCell(unittest.TestCase):
         self.assertEqual(result.size_decisions[0].actual_size_bytes, 4096)
         self.assertTrue(any("deduplicated" in warning for warning in result.warnings))
 
+    @patch("ucc_tune_sweep.confirm_knob")
+    @patch("ucc_tune_sweep._paired_compare", return_value=_evidence(.8))
+    @patch("ucc_tune_sweep.measure", return_value=_run(8))
+    def test_skip_knobs_omits_knob_attribution(self, _measure, _paired, confirm):
+        result = sweep_cell(_spec(proof_mode=True, skip_knobs=True))
+        confirm.assert_not_called()
+        self.assertTrue(result.size_decisions[0].should_override)
+        self.assertEqual(result.size_decisions[0].knob_overrides, {})
+
 
 class TestScreeningPath(unittest.TestCase):
     @patch("ucc_tune_sweep._paired_compare")

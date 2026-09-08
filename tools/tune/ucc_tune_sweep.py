@@ -67,6 +67,7 @@ class SweepSpec:
     executed_team_size: Optional[int] = None
     perftest_path: str = "ucc_perftest"
     proof_mode: bool = False
+    skip_knobs: bool = False
     timeout_s: int = 120
 
     def __post_init__(self) -> None:
@@ -491,33 +492,36 @@ def _sweep_cell_proof(spec: SweepSpec) -> SweepResult:
 
     # Knob evidence is collected only at raw-WIN algorithm points, but no knob
     # or final algorithm decision is mutated until the one cell-wide Holm pass.
-    for decision in sorted(decisions, key=lambda item: item.actual_size_bytes):
-        if decision.policy != Decision.WIN:
-            continue
-        knobs = sorted(knobs_for(spec.component, spec.collective, decision.winner_name),
-                       key=lambda item: item.env_var)
-        for knob_index, knob in enumerate(knobs):
-            required_points = 3 * len(knob.candidates)
-            if budget.used_points + required_points > budget.max_points:
-                warnings.append(f"confirmation budget prevents complete knob sweep for {knob.env_var}; omitted")
+    # Skipped entirely when --no-knobs is set (algorithm-only confirmation).
+    if not spec.skip_knobs:
+        for decision in sorted(decisions, key=lambda item: item.actual_size_bytes):
+            if decision.policy != Decision.WIN:
                 continue
-            for candidate_index, candidate in enumerate(sorted(knob.candidates)):
-                _, evidence_set = confirm_knob(
-                    spec, decision.actual_size_bytes, decision.winner_name,
-                    knob, candidate,
-                    spec.confirmation_seed + 1000 + knob_index * 100 + candidate_index * 3,
-                )
-                for gate, evidence in zip(("algorithm", "knob-effect", "joint"),
-                                          evidence_set):
-                    budget = budget.consume(evidence.complete_pairs)
-                    hypothesis_id = (
-                        f"knob:{decision.actual_size_bytes}:{knob.env_var}:"
-                        f"{candidate}:{gate}"
+            knobs = sorted(knobs_for(spec.component, spec.collective, decision.winner_name),
+                           key=lambda item: item.env_var)
+            for knob_index, knob in enumerate(knobs):
+                required_points = 3 * len(knob.candidates)
+                if budget.used_points + required_points > budget.max_points:
+                    warnings.append(f"confirmation budget prevents complete knob sweep for {knob.env_var}; omitted")
+                    continue
+                for candidate_index, candidate in enumerate(sorted(knob.candidates)):
+                    _, evidence_set = confirm_knob(
+                        spec, decision.actual_size_bytes, decision.winner_name,
+                        knob, candidate,
+                        spec.confirmation_seed + 1000 + knob_index * 100 + candidate_index * 3,
                     )
-                    audit = KnobHypothesis(hypothesis_id, knob.env_var,
-                                           candidate, gate, evidence)
-                    decision.knob_hypotheses.append(audit)
-                    family.append((hypothesis_id, evidence, decision, audit))
+                    for gate, evidence in zip(("algorithm", "knob-effect", "joint"),
+                                              evidence_set):
+                        budget = budget.consume(evidence.complete_pairs)
+                        hypothesis_id = (
+                            f"knob:{decision.actual_size_bytes}:{knob.env_var}:"
+                            f"{candidate}:{gate}"
+                        )
+                        audit = KnobHypothesis(hypothesis_id, knob.env_var,
+                                               candidate, gate, evidence)
+                        decision.knob_hypotheses.append(audit)
+                        family.append((hypothesis_id, evidence, decision, audit))
+
 
     if family:
         adjusted = classify_cell(
