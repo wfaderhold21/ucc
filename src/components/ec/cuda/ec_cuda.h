@@ -59,7 +59,10 @@ ucc_status_t ucc_ec_cuda_host_offload_post(ucc_ee_executor_t *executor,
 
 /* Host-offload policy for REDUCE/REDUCE_STRIDED: true when the task is
  * small enough (total bytes <= REDUCE_HOST_LIMIT), its datatype is
- * host-supported, and USE_HOST_REDUCE is enabled.  Mirrors
+ * host-supported, USE_HOST_REDUCE is enabled, and the buffer residency
+ * gate (USE_HOST_RESIDENCY) passes: "host" (default, 582) allows only
+ * host/managed/zero-copy buffers; "device" also offloads device-resident
+ * buffers via the 580 D2H/H2D staging path.  Mirrors
  * ec_rocm_use_host_ops() in the ROCm component. */
 bool ec_cuda_use_host_ops(const ucc_ee_executor_task_args_t *task_args);
 

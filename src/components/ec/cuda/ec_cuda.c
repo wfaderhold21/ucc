@@ -18,6 +18,12 @@ static const char *stream_task_modes[] = {
     [UCC_EC_CUDA_TASK_LAST]    = NULL
 };
 
+static const char *use_host_residency_modes[] = {
+    [UCC_EC_CUDA_RESIDENCY_HOST]   = "host",
+    [UCC_EC_CUDA_RESIDENCY_DEVICE] = "device",
+    [UCC_EC_CUDA_RESIDENCY_LAST]   = NULL
+};
+
 static ucc_config_field_t ucc_ec_cuda_config_table[] = {
     {"", "", NULL, ucc_offsetof(ucc_ec_cuda_config_t, super),
      UCC_CONFIG_TYPE_TABLE(ucc_ec_config_table)},
@@ -76,6 +82,13 @@ static ucc_config_field_t ucc_ec_cuda_config_table[] = {
      "shared host-capability policy (size + datatype) matches",
      ucc_offsetof(ucc_ec_cuda_config_t, use_host_reduce),
      UCC_CONFIG_TYPE_BOOL},
+
+    {"USE_HOST_RESIDENCY", "host",
+     "Buffer residency allowed on the host-offload route\n"
+     "host   - only host/managed/zero-copy (host-accessible) buffers\n"
+     "device - device-resident buffers are staged D2H/H2D and offloaded",
+     ucc_offsetof(ucc_ec_cuda_config_t, use_host_residency),
+     UCC_CONFIG_TYPE_ENUM(use_host_residency_modes)},
 
     {"REDUCE_HOST_LIMIT", "256",
      "Maximum data size for which to use host-based reduction operations",

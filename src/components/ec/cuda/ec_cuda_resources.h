@@ -112,19 +112,33 @@ typedef enum ucc_ec_cuda_strm_task_mode {
     UCC_EC_CUDA_TASK_LAST,
 } ucc_ec_cuda_strm_task_mode_t;
 
+/* Buffer residency policy for the host-offload route (582): whether
+ * device-resident buffers are allowed to be offloaded (they are staged
+ * D2H/H2D).  Per the B3 sweep, the staging round-trip (D2H +
+ * streamSync + H2D ~ 6-16 us) swamps the small GPU reduce kernel, so the
+ * default is "host" — only host/managed/zero-copy (host-accessible)
+ * buffers are offloaded; the staged device path stays reachable with
+ * "device" (B3: host 1.8-3.5x slower for device-resident buffers). */
+typedef enum ucc_ec_cuda_use_host_residency {
+    UCC_EC_CUDA_RESIDENCY_HOST,
+    UCC_EC_CUDA_RESIDENCY_DEVICE,
+    UCC_EC_CUDA_RESIDENCY_LAST,
+} ucc_ec_cuda_use_host_residency_t;
+
 typedef struct ucc_ec_cuda_config {
-    ucc_ec_config_t                super;
-    ucc_ec_cuda_strm_task_mode_t   strm_task_mode;
-    unsigned long                  exec_num_workers;
-    unsigned long                  exec_num_threads;
-    unsigned long                  exec_max_tasks;
-    unsigned long                  exec_num_streams;
-    unsigned long                  reduce_num_blocks;
-    int                            reduce_num_threads;
-    int                            use_cooperative_launch;
-    int                            use_host_reduce;
-    int                            reduce_host_limit;
-    unsigned long                  exec_copy_thresh;
+    ucc_ec_config_t                       super;
+    ucc_ec_cuda_strm_task_mode_t           strm_task_mode;
+    unsigned long                          exec_num_workers;
+    unsigned long                          exec_num_threads;
+    unsigned long                          exec_max_tasks;
+    unsigned long                          exec_num_streams;
+    unsigned long                          reduce_num_blocks;
+    int                                    reduce_num_threads;
+    int                                    use_cooperative_launch;
+    int                                    use_host_reduce;
+    ucc_ec_cuda_use_host_residency_t       use_host_residency;
+    int                                    reduce_host_limit;
+    unsigned long                          exec_copy_thresh;
 } ucc_ec_cuda_config_t;
 
 extern ucc_ec_cuda_config_t *ucc_ec_cuda_config;

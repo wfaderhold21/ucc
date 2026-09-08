@@ -96,6 +96,14 @@ public:
                        offsetof(ucc_ec_cuda_config_t, reduce_host_limit));
     }
 
+    /* 582: residency gate for the host-offload route (enum, int in
+     * memory). */
+    int *cfg_use_host_residency()
+    {
+        return (int *)((char *)eccuda_->super.config +
+                       offsetof(ucc_ec_cuda_config_t, use_host_residency));
+    }
+
     ucc_ee_executor_t *get_executor()
     {
         ucc_ee_executor_params_t eparams;
@@ -150,14 +158,21 @@ post_reduce(ucc_ee_executor_t *exe, size_t count, float *dst,
 UCC_TEST_F(test_ec_cuda_host_ops, config_defaults)
 {
     /* ucc_ec_init in SetUp parsed the config (env prefix UCC_).  Defaults:
-     * policy off, 256-byte limit (UCS memunits: bare number = bytes). */
+     * policy off, 256-byte limit (UCS memunits: bare number = bytes), and
+     * the 582 residency gate defaulting to "host" (managed/zero-copy only). */
     EXPECT_EQ(*cfg_use_host_reduce(), 0);
     EXPECT_EQ(*cfg_reduce_host_limit(), 256);
+    EXPECT_EQ(*cfg_use_host_residency(), UCC_EC_CUDA_RESIDENCY_HOST);
 }
 
 UCC_TEST_F(test_ec_cuda_host_ops, policy_matrix)
 {
     ucc_ee_executor_task_args_t a;
+
+    /* Zeroed: the residency gate inspects buffer pointers (582), so any
+     * pointer field not explicitly set must be NULL (host-accessible),
+     * never stack garbage. */
+    memset(&a, 0, sizeof(a));
 
     /* policy disabled: never host, regardless of size/dt */
     *cfg_use_host_reduce()   = 0;
@@ -192,6 +207,81 @@ UCC_TEST_F(test_ec_cuda_host_ops, policy_matrix)
     a.reduce_strided.dt = UCC_DT_INT32;
     a.reduce_strided.count = 4; /* 16 bytes */
     EXPECT_TRUE(use_host_(&a));
+
+    /* 582 residency gate: with the default USE_HOST_RESIDENCY=host,
+     * every buffer the reduce touches must be host-accessible (host,
+     * managed, zero-copy); any device-resident buffer keeps the task on
+     * the GPU.  USE_HOST_RESIDENCY=device lifts the gate (the 580
+     * staging path offloads device-resident buffers). */
+    float    *h_host, *d_dev, *d_mng, *d_zc;
+    h_host  = (float *)malloc(16);
+    ASSERT_NE(h_host, nullptr);
+    ASSERT_EQ(cudaSuccess, cudaMalloc(&d_dev, 16));
+    ASSERT_EQ(cudaSuccess,
+              cudaMallocManaged(&d_mng, 16, cudaMemAttachGlobal));
+    ASSERT_EQ(cudaSuccess, cudaHostAlloc(&d_zc, 16, 0));
+
+    a.task_type      = UCC_EE_EXECUTOR_TASK_REDUCE;
+    a.reduce.dt      = UCC_DT_FLOAT32;
+    a.reduce.count   = 4; /* 16 bytes */
+    a.reduce.n_srcs  = 2;
+
+    /* residency=host: all device -> GPU */
+    *cfg_use_host_residency() = UCC_EC_CUDA_RESIDENCY_HOST;
+    a.reduce.dst = d_dev;
+    a.reduce.srcs[0] = d_dev;
+    a.reduce.srcs[1] = d_dev;
+    EXPECT_FALSE(use_host_(&a));
+
+    /* one device source with host dst/src: still GPU */
+    a.reduce.dst = h_host;
+    a.reduce.srcs[0] = d_dev;
+    a.reduce.srcs[1] = h_host;
+    EXPECT_FALSE(use_host_(&a));
+
+    /* managed dst + managed srcs: host */
+    a.reduce.dst = d_mng;
+    a.reduce.srcs[0] = d_mng;
+    a.reduce.srcs[1] = d_mng;
+    EXPECT_TRUE(use_host_(&a));
+
+    /* zero-copy (pinned) dst + mixed managed/host srcs: host */
+    a.reduce.dst = d_zc;
+    a.reduce.srcs[0] = d_mng;
+    a.reduce.srcs[1] = h_host;
+    EXPECT_TRUE(use_host_(&a));
+
+    /* host dst but device src: GPU */
+    a.reduce.dst = h_host;
+    a.reduce.srcs[0] = d_dev;
+    a.reduce.srcs[1] = d_mng;
+    EXPECT_FALSE(use_host_(&a));
+
+    /* residency=device: the all-device case is offloaded (staged) */
+    *cfg_use_host_residency() = UCC_EC_CUDA_RESIDENCY_DEVICE;
+    a.reduce.dst = d_dev;
+    a.reduce.srcs[0] = d_dev;
+    a.reduce.srcs[1] = d_dev;
+    EXPECT_TRUE(use_host_(&a));
+
+    /* strided variant honors the gate too: device buffers,
+     * residency=host -> GPU; residency=device -> host */
+    a.task_type          = UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED;
+    a.reduce_strided.dst     = d_dev;
+    a.reduce_strided.src1    = d_dev;
+    a.reduce_strided.src2    = d_dev;
+    a.reduce_strided.count   = 4;
+    a.reduce_strided.n_src2  = 1;
+    *cfg_use_host_residency() = UCC_EC_CUDA_RESIDENCY_HOST;
+    EXPECT_FALSE(use_host_(&a));
+    *cfg_use_host_residency() = UCC_EC_CUDA_RESIDENCY_DEVICE;
+    EXPECT_TRUE(use_host_(&a));
+
+    *cfg_use_host_residency() = UCC_EC_CUDA_RESIDENCY_HOST; /* restore */
+    free(h_host);
+    cudaFree(d_dev);
+    cudaFree(d_mng);
+    cudaFreeHost(d_zc);
 
     /* non-reduce types are never routed to host */
     a.task_type = UCC_EE_EXECUTOR_TASK_COPY;
@@ -280,7 +370,10 @@ UCC_TEST_F(test_ec_cuda_host_ops, host_gpu_routing_counters)
     cudaFree(s1l); cudaFree(s2l); cudaFree(dst_l);
 }
 /*
- * 580 — device-buffer host-offload staging.
+ * 580 — device-buffer host-offload staging (exercised under the
+ * USE_HOST_RESIDENCY=device policy, which the 582 B3 sweep found is
+ * 1.8-3.5x slower for device-resident buffers; the default residency
+ * policy is "host").
  *
  * When the host policy matches and the reduce buffers are device-resident,
  * the offload path stages the sources D2H, runs the reduce on the nested
@@ -335,8 +428,9 @@ UCC_TEST_F(test_ec_cuda_host_ops, device_reduce_staged_to_host)
     status = ucc_ee_executor_start(exe, nullptr);
     ASSERT_EQ(status, UCC_OK);
 
-    *cfg_use_host_reduce()   = 1;
-    *cfg_reduce_host_limit() = 64;
+    *cfg_use_host_reduce()      = 1;
+    *cfg_reduce_host_limit()    = 64;
+    *cfg_use_host_residency()   = UCC_EC_CUDA_RESIDENCY_DEVICE;
 
     ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&s1, n * sizeof(float)));
     ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&s2, n * sizeof(float)));
@@ -394,8 +488,9 @@ UCC_TEST_F(test_ec_cuda_host_ops, device_reduce_staged_multi_src)
     status = ucc_ee_executor_start(exe, nullptr);
     ASSERT_EQ(status, UCC_OK);
 
-    *cfg_use_host_reduce()   = 1;
-    *cfg_reduce_host_limit() = 64;
+    *cfg_use_host_reduce()      = 1;
+    *cfg_reduce_host_limit()    = 64;
+    *cfg_use_host_residency()   = UCC_EC_CUDA_RESIDENCY_DEVICE;
 
     for (k = 0; k < 5; k++) {
         ASSERT_EQ(cudaSuccess,
@@ -461,8 +556,9 @@ UCC_TEST_F(test_ec_cuda_host_ops, strided_reduce_staged_to_host)
     status = ucc_ee_executor_start(exe, nullptr);
     ASSERT_EQ(status, UCC_OK);
 
-    *cfg_use_host_reduce()   = 1;
-    *cfg_reduce_host_limit() = 1024;
+    *cfg_use_host_reduce()      = 1;
+    *cfg_reduce_host_limit()    = 1024;
+    *cfg_use_host_residency()   = UCC_EC_CUDA_RESIDENCY_DEVICE;
 
     ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&src1, n * sizeof(float)));
     ASSERT_EQ(cudaSuccess, cudaMalloc((void **)&src2, region));
@@ -652,7 +748,8 @@ template <typename T, bool IS_FLOAT>
 static void
 parity_case(ucc_ee_executor_t *exe, ucc_datatype_t dt, ucc_reduction_op_t op,
             size_t count, void *s1, void *s2, void *dst, int *cfg_use,
-            int *cfg_limit, count_fn host_cnt, count_fn gpu_cnt)
+            int *cfg_limit, int *cfg_residency, count_fn host_cnt,
+            count_fn gpu_cnt)
 {
     const size_t      bytes = count * sizeof(T);
     T                *h_s1  = (T *)malloc(bytes);
@@ -674,11 +771,13 @@ parity_case(ucc_ee_executor_t *exe, ucc_datatype_t dt, ucc_reduction_op_t op,
     ASSERT_EQ(cudaSuccess, cudaMemcpy(s1, h_s1, bytes, cudaMemcpyHostToDevice));
     ASSERT_EQ(cudaSuccess, cudaMemcpy(s2, h_s2, bytes, cudaMemcpyHostToDevice));
 
-    /* host-offload path (580 staging) */
+    /* host-offload path (580 staging; residency=device since the buffers
+     * are device-resident — 582) */
     host_before = host_cnt();
     gpu_before  = gpu_cnt();
     *cfg_use    = 1;
     *cfg_limit  = (int)bytes;
+    *cfg_residency = UCC_EC_CUDA_RESIDENCY_DEVICE;
     status = post_reduce_dt_op(exe, dt, op, count, dst, s1, s2);
     ASSERT_EQ(status, UCC_OK);
     EXPECT_EQ(host_cnt() - host_before, 1u) << ucc_datatype_str(dt) << " "
@@ -733,12 +832,13 @@ template <typename T, bool IS_FLOAT>
 static void
 run_ops(ucc_ee_executor_t *exe, ucc_datatype_t dt,
         const ucc_reduction_op_t *ops, size_t nops, size_t count, void *s1,
-        void *s2, void *dst, int *cfg_use, int *cfg_limit, count_fn host_cnt,
-        count_fn gpu_cnt)
+        void *s2, void *dst, int *cfg_use, int *cfg_limit, int *cfg_residency,
+        count_fn host_cnt, count_fn gpu_cnt)
 {
     for (size_t oi = 0; oi < nops; oi++) {
         parity_case<T, IS_FLOAT>(exe, dt, ops[oi], count, s1, s2, dst,
-                                 cfg_use, cfg_limit, host_cnt, gpu_cnt);
+                                 cfg_use, cfg_limit, cfg_residency, host_cnt,
+                                 gpu_cnt);
     }
 }
 
@@ -791,45 +891,54 @@ UCC_TEST_F(test_ec_cuda_host_ops, host_gpu_parity)
     run_ops<int8_t, false>(exe, UCC_DT_INT8, int8_ops,
                            sizeof(int8_ops) / sizeof(int8_ops[0]), count, s1,
                            s2, dst, cfg_use_host_reduce(),
-                           cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+                           cfg_reduce_host_limit(), cfg_use_host_residency(),
+                           host_cnt_, gpu_cnt_);
     run_ops<int16_t, false>(exe, UCC_DT_INT16, int16_ops,
-                            sizeof(int16_ops) / sizeof(int16_ops[0]), count, s1,
-                            s2, dst, cfg_use_host_reduce(),
-                            cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+                            sizeof(int16_ops) / sizeof(int16_ops[0]), count,
+                            s1, s2, dst, cfg_use_host_reduce(),
+                            cfg_reduce_host_limit(), cfg_use_host_residency(),
+                            host_cnt_, gpu_cnt_);
     run_ops<int32_t, false>(exe, UCC_DT_INT32, int32_ops,
-                            sizeof(int32_ops) / sizeof(int32_ops[0]), count, s1,
-                            s2, dst, cfg_use_host_reduce(),
-                            cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+                            sizeof(int32_ops) / sizeof(int32_ops[0]), count,
+                            s1, s2, dst, cfg_use_host_reduce(),
+                            cfg_reduce_host_limit(), cfg_use_host_residency(),
+                            host_cnt_, gpu_cnt_);
     run_ops<int64_t, false>(exe, UCC_DT_INT64, int64_ops,
-                            sizeof(int64_ops) / sizeof(int64_ops[0]), count, s1,
-                            s2, dst, cfg_use_host_reduce(),
-                            cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+                            sizeof(int64_ops) / sizeof(int64_ops[0]), count,
+                            s1, s2, dst, cfg_use_host_reduce(),
+                            cfg_reduce_host_limit(), cfg_use_host_residency(),
+                            host_cnt_, gpu_cnt_);
     run_ops<uint8_t, false>(exe, UCC_DT_UINT8, uint8_ops,
-                            sizeof(uint8_ops) / sizeof(uint8_ops[0]), count, s1,
-                            s2, dst, cfg_use_host_reduce(),
-                            cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+                            sizeof(uint8_ops) / sizeof(uint8_ops[0]), count,
+                            s1, s2, dst, cfg_use_host_reduce(),
+                            cfg_reduce_host_limit(), cfg_use_host_residency(),
+                            host_cnt_, gpu_cnt_);
     run_ops<uint16_t, false>(exe, UCC_DT_UINT16, uint16_ops,
                              sizeof(uint16_ops) / sizeof(uint16_ops[0]), count,
                              s1, s2, dst, cfg_use_host_reduce(),
-                             cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+                             cfg_reduce_host_limit(), cfg_use_host_residency(),
+                             host_cnt_, gpu_cnt_);
     run_ops<uint32_t, false>(exe, UCC_DT_UINT32, uint32_ops,
                              sizeof(uint32_ops) / sizeof(uint32_ops[0]), count,
                              s1, s2, dst, cfg_use_host_reduce(),
-                             cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+                             cfg_reduce_host_limit(), cfg_use_host_residency(),
+                             host_cnt_, gpu_cnt_);
     run_ops<uint64_t, false>(exe, UCC_DT_UINT64, uint64_ops,
                              sizeof(uint64_ops) / sizeof(uint64_ops[0]), count,
                              s1, s2, dst, cfg_use_host_reduce(),
-                             cfg_reduce_host_limit(), host_cnt_, gpu_cnt_);
+                             cfg_reduce_host_limit(), cfg_use_host_residency(),
+                             host_cnt_, gpu_cnt_);
     run_ops<float, true>(exe, UCC_DT_FLOAT32, f32_ops,
                          sizeof(f32_ops) / sizeof(f32_ops[0]), count, s1, s2,
                          dst, cfg_use_host_reduce(), cfg_reduce_host_limit(),
-                         host_cnt_, gpu_cnt_);
+                         cfg_use_host_residency(), host_cnt_, gpu_cnt_);
     run_ops<double, true>(exe, UCC_DT_FLOAT64, f64_ops,
                           sizeof(f64_ops) / sizeof(f64_ops[0]), count, s1, s2,
                           dst, cfg_use_host_reduce(), cfg_reduce_host_limit(),
-                          host_cnt_, gpu_cnt_);
+                          cfg_use_host_residency(), host_cnt_, gpu_cnt_);
 
-    *cfg_use_host_reduce() = 0; /* restore default */
+    *cfg_use_host_reduce() = 0;   /* restore default */
+    *cfg_use_host_residency() = UCC_EC_CUDA_RESIDENCY_HOST; /* restore */
 
     cudaFree(s1);
     cudaFree(s2);

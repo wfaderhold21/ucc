@@ -17,42 +17,18 @@
  * Host-offload routing for small reduces: the interruptible executor posts
  * to the device stream; when the policy below matches, the reduce is offloaded
  * to the nested CPU executor (mirrors ec_rocm_executor_interruptible.c:
- * ec_rocm_use_host_ops + delegation).  Device-resident buffers are staged
- * D2H (sources) / H2D (result) with a CUDA event fence so the offload is
- * ordered on the stream and task_test() only completes after the H2D (580);
- * managed/zero-copy pointers go straight to the CPU executor.
+ * ec_rocm_use_host_ops + delegation).  The buffer residency gate
+ * (USE_HOST_RESIDENCY) decides whether device-resident buffers may be
+ * offloaded at all:
+ *   host   (default, 582 B3) - host/managed/zero-copy pointers go straight
+ *          to the CPU executor; device-resident buffers stay on the GPU.
+ *   device - device-resident buffers are staged D2H (sources) / H2D (result)
+ *          with a CUDA event fence so the offload is ordered on the stream
+ *          and task_test() only completes after the H2D (580).
  */
 
 static volatile uint64_t ucc_ec_cuda_host_reduce_cnt = 0;
 static volatile uint64_t ucc_ec_cuda_gpu_reduce_cnt  = 0;
-
-bool ec_cuda_use_host_ops(const ucc_ee_executor_task_args_t *task_args)
-{
-    if (task_args->task_type != UCC_EE_EXECUTOR_TASK_REDUCE &&
-        task_args->task_type != UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED) {
-        return false;
-    }
-    if (!EC_CUDA_CONFIG->use_host_reduce) {
-        return false;
-    }
-    if (ucc_ec_host_total_reduce_len(task_args) > EC_CUDA_CONFIG->reduce_host_limit) {
-        return false;
-    }
-    return ucc_ec_host_dt_supported(task_args);
-}
-
-uint64_t ucc_ec_cuda_host_reduce_count(void)
-{
-    /* volatile read is a single aligned 8-byte load on the supported
-     * archs; increments go through ucc_atomic_add64. */
-    return ucc_ec_cuda_host_reduce_cnt;
-}
-
-uint64_t ucc_ec_cuda_gpu_reduce_count(void)
-{
-    return ucc_ec_cuda_gpu_reduce_cnt;
-}
-
 /*
  * Is the buffer device-resident?  Host, managed and zero-copy pointers
  * are directly accessible to the CPU executor; only true device pointers
@@ -74,6 +50,77 @@ static int ucc_ec_cuda_buf_is_device(const void *ptr)
     }
     return (attr.type == cudaMemoryTypeDevice) ? 1 : 0;
 }
+
+/*
+ * True when every buffer the reduce touches (dst + all sources) is directly
+ * accessible to the CPU executor: host, managed, or zero-copy.  The
+ * USE_HOST_RESIDENCY=host default policy uses this to keep the offload on
+ * buffers that need no D2H/H2D staging round-trip (582 B3: for
+ * device-resident buffers the staging cost swamps the small GPU kernel).
+ */
+static int
+ec_cuda_reduce_bufs_host_accessible(const ucc_ee_executor_task_args_t *task_args)
+{
+    if (task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE) {
+        const ucc_eee_task_reduce_t *r = &task_args->reduce;
+        int                          i;
+
+        if (ucc_ec_cuda_buf_is_device(r->dst)) {
+            return 0;
+        }
+        for (i = 0; i < (int)r->n_srcs; i++) {
+            const void *src = ((task_args->flags &
+                                UCC_EEE_TASK_FLAG_REDUCE_SRCS_EXT) ?
+                               r->srcs_ext[i] : r->srcs[i]);
+            if (ucc_ec_cuda_buf_is_device(src)) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+    /* UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED */
+    {
+        const ucc_eee_task_reduce_strided_t *s = &task_args->reduce_strided;
+
+        if (ucc_ec_cuda_buf_is_device(s->dst) ||
+            ucc_ec_cuda_buf_is_device(s->src1)) {
+            return 0;
+        }
+        return (s->n_src2 == 0) ? 1 : !ucc_ec_cuda_buf_is_device(s->src2);
+    }
+}
+
+bool ec_cuda_use_host_ops(const ucc_ee_executor_task_args_t *task_args)
+{
+    if (task_args->task_type != UCC_EE_EXECUTOR_TASK_REDUCE &&
+        task_args->task_type != UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED) {
+        return false;
+    }
+    if (!EC_CUDA_CONFIG->use_host_reduce) {
+        return false;
+    }
+    if (ucc_ec_host_total_reduce_len(task_args) > EC_CUDA_CONFIG->reduce_host_limit) {
+        return false;
+    }
+    if (EC_CUDA_CONFIG->use_host_residency == UCC_EC_CUDA_RESIDENCY_HOST &&
+        !ec_cuda_reduce_bufs_host_accessible(task_args)) {
+        return false;
+    }
+    return ucc_ec_host_dt_supported(task_args);
+}
+
+uint64_t ucc_ec_cuda_host_reduce_count(void)
+{
+    /* volatile read is a single aligned 8-byte load on the supported
+     * archs; increments go through ucc_atomic_add64. */
+    return ucc_ec_cuda_host_reduce_cnt;
+}
+
+uint64_t ucc_ec_cuda_gpu_reduce_count(void)
+{
+    return ucc_ec_cuda_gpu_reduce_cnt;
+}
+
 
 /* Grow a task's pinned staging buffer to at least "need" bytes. */
 static ucc_status_t
@@ -428,9 +475,11 @@ ucc_cuda_executor_interruptible_task_post(ucc_ee_executor_t *executor,
     int i;
 
     /* Host-offload: small, host-supported reduces run on the nested CPU
-     * executor (580).  Device-resident buffers are staged D2H/H2D with a
-     * CUDA event fence; host/managed/zero-copy buffers go straight to the
-     * CPU executor. */
+     * executor.  The policy (ec_cuda_use_host_ops) applies the size,
+     * datatype and buffer-residency gates (582): with the default
+     * USE_HOST_RESIDENCY=host only host/managed/zero-copy buffers are
+     * offloaded (no staging); USE_HOST_RESIDENCY=device also stages
+     * device-resident buffers D2H/H2D with a CUDA event fence (580). */
     if (ec_cuda_use_host_ops(task_args)) {
         ucc_atomic_add64(&ucc_ec_cuda_host_reduce_cnt, 1);
         ec_trace(&ucc_ec_cuda.super,
