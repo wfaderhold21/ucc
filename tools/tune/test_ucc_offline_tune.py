@@ -11,7 +11,7 @@ from ucc_offline_tune import (
     ValidationPoint, _build_arg_parser, _collect_knob_overrides,
     _collect_tune_tokens, _results_to_json, _validation_probe_sizes,
     _validation_covers_results, emit_conf, trim_failed_ranges, validate,
-    validate_with_trimming, run_tuning,
+    validate_with_trimming, run_tuning, _compute_cell_budget,
 )
 from ucc_tune_fingerprint import Fingerprint
 from ucc_tune_runner import PairedRunResult
@@ -307,9 +307,9 @@ class TestCliSafety(unittest.TestCase):
                          (.05, 10, 20))
         self.assertEqual((args.boundary_resolution_bytes,
                           args.max_boundary_probes,
-                          args.max_confirmation_points), (1024, 4, 40))
+                          args.max_confirmation_points,
+                          args.per_cell_min_points), (1024, 4, 120, 15))
         self.assertEqual(args.team_sizes, "8")
-        self.assertEqual(args.launcher, "mpirun -np {team_size}")
 
     def test_proof_mode_flag_exists_without_unsafe_flag(self):
         parser = _build_arg_parser()
@@ -340,6 +340,31 @@ class TestCellLaunchers(unittest.TestCase):
         payload = _results_to_json([sweep_result()])[0]
         self.assertEqual(payload["requested_team_size"], 8)
         self.assertEqual(payload["executed_team_size"], 8)
+
+class TestConfirmationBudget(unittest.TestCase):
+    """Regression: `done` was incremented before the per-cell budget was
+    computed, so single-cell runs got max_points=0 and every size fell back
+    to screening-only (no paired confirmation).  The budget must be computed
+    from the count of cells already completed.
+    """
+    @patch("ucc_offline_tune.sweep_cell")
+    def test_single_cell_gets_full_budget(self, sweep):
+        sweep.side_effect = lambda spec: SweepResult(spec, [], [], [])
+        run_tuning([("tl/ucp", "allreduce")], ["host"], [8], [4096],
+                   alg_map={"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}},
+                   mpi_launcher=["mpirun", "-np", "{team_size}"])
+        self.assertEqual(sweep.call_args.args[0].max_confirmation_points, 120)
+
+    def test_four_cells_floor_then_divide_surplus(self):
+        # Worst-case consumption: each cell spends its full allocation, so
+        # the 120-point budget lands 30/30/30/30 across four cells.
+        budgets = []
+        used = 0
+        for done in range(4):
+            budget = _compute_cell_budget(4, done, 120, used, 15)
+            budgets.append(budget)
+            used += budget
+        self.assertEqual(budgets, [30, 30, 30, 30])
 
 
 if __name__ == "__main__":

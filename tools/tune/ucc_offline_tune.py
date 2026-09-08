@@ -800,6 +800,31 @@ def write_summary(
     return summary_path
 
 
+def _compute_cell_budget(
+    total_cells: int,
+    done_cells: int,
+    max_points: int,
+    used_points: int,
+    per_cell_min: int,
+) -> int:
+    """Per-cell confirmation budget with a floor guarantee.
+
+    Each cell is guaranteed at least *per_cell_min* points (or the entire
+    remaining pool if that is smaller).  The budget for the current cell is
+    computed by reserving *per_cell_min* for every future cell and splitting
+    any leftover surplus equally across the remaining cells.
+    """
+    remaining = total_cells - done_cells
+    if remaining <= 0:
+        return 0
+    pool = max_points - used_points
+    if pool <= 0:
+        return 0
+    reserved = remaining * per_cell_min
+    surplus = max(0, pool - reserved)
+    per_cell = per_cell_min + surplus // remaining
+    return min(per_cell, pool)
+
 # ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
@@ -813,17 +838,17 @@ def run_tuning(
     alg_map: Optional[dict] = None,
     datatype: str = "float32",
     reduction_op: str = "sum",
-    n_reps: int = 7,
-    n_iter: int = 1000,
-    n_warmup: int = 100,
+    n_reps: int = 15,
+    n_iter: int = 5000,
+    n_warmup: int = 500,
     persistent: bool = True,
     margin_threshold: float = 0.05,
     min_pairs: int = 10,
     max_pairs: int = 20,
     boundary_resolution_bytes: int = 1024,
     max_boundary_probes: int = 4,
-    max_confirmation_points: int = 40,
-    confirmation_seed: int = 0,
+    max_confirmation_points: int = 120,
+    per_cell_min_points: int = 15,
     mpi_launcher: Optional[list] = None,
     perftest_path: str = "ucc_perftest",
     ucc_info_path: str = "ucc_info",
@@ -880,10 +905,9 @@ def run_tuning(
             for team_size in team_sizes:
                 bound_launcher, executed_team_size = bind_launcher_team_size(
                     mpi_launcher, team_size)
-                done += 1
                 logger.info(
                     "Stage 2/3 [%d/%d]: %s/%s mem=%s team_size=%d",
-                    done, total, comp, coll, mem_type, team_size,
+                    done + 1, total, comp, coll, mem_type, team_size,
                 )
                 spec = SweepSpec(
                     component=comp,
@@ -904,14 +928,15 @@ def run_tuning(
                     max_pairs=max_pairs,
                     boundary_resolution_bytes=boundary_resolution_bytes,
                     max_boundary_probes=max_boundary_probes,
-                    max_confirmation_points=max(
-                        0, max_confirmation_points - confirmation_points_used),
-                    confirmation_seed=confirmation_seed,
+                    max_confirmation_points=_compute_cell_budget(
+                        total, done, max_confirmation_points,
+                        confirmation_points_used, per_cell_min_points),
                     mpi_launcher=bound_launcher,
                     executed_team_size=executed_team_size,
                     perftest_path=perftest_path,
                     timeout_s=timeout_s,
                 )
+                done += 1
                 result = sweep_cell(spec)
                 results.append(result)
                 if result.proof_budget:
@@ -969,11 +994,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Grid multiplication factor (2 or 4).")
     p.add_argument("--datatype", default="float32")
     p.add_argument("--op", default="sum", dest="reduction_op")
-    p.add_argument("--n-reps", type=int, default=7,
+    p.add_argument("--n-reps", type=int, default=15,
                    help="Independent perftest repetitions per measurement.")
-    p.add_argument("--n-iter", type=int, default=1000,
+    p.add_argument("--n-iter", type=int, default=5000,
                    help="Perftest -n iterations per rep.")
-    p.add_argument("--n-warmup", type=int, default=100,
+    p.add_argument("--n-warmup", type=int, default=500,
                    help="Perftest -w warmup iterations per rep.")
     p.add_argument("--no-persistent", action="store_true",
                    help="Disable persistent mode (includes init/finalize overhead).")
@@ -984,7 +1009,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-pairs", type=int, default=20)
     p.add_argument("--boundary-resolution-bytes", type=int, default=1024)
     p.add_argument("--max-boundary-probes", type=int, default=4)
-    p.add_argument("--max-confirmation-points", type=int, default=40)
+    p.add_argument("--max-confirmation-points", type=int, default=120)
+    p.add_argument("--per-cell-min-points", type=int, default=15,
+                   help="Minimum confirmation points guaranteed per cell.")
     p.add_argument("--proof-mode", action="store_true",
                    help="Use 256-byte boundary resolution and 12 probes.")
     p.add_argument("--seed", type=int, default=0,
@@ -1102,7 +1129,7 @@ def main(argv=None) -> int:
         boundary_resolution_bytes=boundary_resolution,
         max_boundary_probes=boundary_probes,
         max_confirmation_points=confirmation_points,
-        confirmation_seed=args.seed,
+        per_cell_min_points=args.per_cell_min_points,
         mpi_launcher=mpi_launcher,
         perftest_path=args.perftest,
         ucc_info_path=args.ucc_info,
