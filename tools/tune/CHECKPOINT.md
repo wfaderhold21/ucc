@@ -3,6 +3,17 @@
 **Branch:** `topic/autotune`
 **Date:** 2026-06-24
 **Status:** Offline tuner (Part 1) complete, tested. Online tuner (Part 2) not started.
+> **2026-09-08 re-scope.** The paired-confirmation machinery described below is
+> no longer the default. `sweep_cell` now has two paths: fast **screening-only**
+> (default) and **proof** (`--proof-mode`). Screening picks the argmin-median
+> algorithm and emits an override only when the median speedup clears
+> `--min-speedup`; it performs no paired confirmation, boundary refinement, or
+> knob attribution. Fast defaults were restored (`--n-reps 7`, `--n-iter 1000`,
+> `--n-warmup 100`, `--max-confirmation-points 40`). Two latent bugs were fixed:
+> the `cuda-mng` → `cuda_managed` spelling (was silently emitting `cuda-managed`,
+> which UCC rejects wholesale) and an inverted exit code. `--seed` is now
+> threaded to `SweepSpec.confirmation_seed`.
+
 
 ---
 

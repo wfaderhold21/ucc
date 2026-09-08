@@ -15,7 +15,7 @@ as resolved.
 
 | # | Item | Verdict | Decision |
 |---|------|---------|----------|
-| 1 | Team-size range semantics (`[ts-inf]` overlap) | **DO** | Emit **non-overlapping bracketed ranges** derived from sorted `--team-sizes` (`[8-63]`, `[64-511]`, `[512-inf]`), largest bound `inf`. |
+| 1 | Team-size range semantics (`[ts-inf]` overlap) | **DO — superseded** | Emit **non-overlapping bracketed ranges** derived from sorted `--team-sizes` (`[8-63]`, `[64-511]`, `[512-inf]`), largest bound `inf`. **Superseded by `NO_REGRESSION_DESIGN.md` §2 (2026-08-07): an observation at team size N describes `[N-N]`, a singleton — no interpolation or open tail.** The code implements the singleton form. |
 | 2 | Msg-range boundary convention (shared endpoint) | **DEFER** | Keep the abutting `0-32`/`32-inf` idiom (matches UCC `test_parser.cc:56`); add a live-run check to confirm which side wins before trusting a boundary size. No code change now. |
 | 3 | Knob conflict across cells (global env knobs) | **DO (guard)** | Knobs cannot be team-size-scoped in one file (see #4). Gate knob emission to **single-team-size runs**; in multi-size runs, **warn + omit** conflicting knobs. Per-cell config dirs deferred. |
 | 4 | `UINT_RANGED` knob syntax | **DROP (resolved)** | **Answered:** syntax is documented at `src/utils/ucc_parser.h:303` — `[<munit>-<munit>:[mtype]:value,...]default_value`. It ranges over **msg-size + mem-type only, not team-size**, so it does **not** eliminate #3. No further investigation needed. |

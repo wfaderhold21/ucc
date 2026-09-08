@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 from ucc_tune_fingerprint import Fingerprint, collect as collect_fingerprint
-from ucc_tune_runner import RunSpec, bind_launcher_team_size, measure_paired
+from ucc_tune_runner import RunSpec, bind_launcher_team_size, measure, measure_paired
 from ucc_tune_space import (
     bytes_to_count,
     competition_env,
@@ -691,6 +691,83 @@ def validate_with_trimming(
             break
     return points
 
+def validate_screening(
+    results: list,
+    *,
+    margin_threshold: float = 0.05,
+    n_reps: int = 7,
+    n_iter: int = 1000,
+    n_warmup: int = 100,
+) -> list:    # list[ValidationPoint]
+    """Screening-mode Stage 4: median comparison of config vs default.
+
+    Cheaper than the paired `validate()`: measures each range endpoint with
+    `measure()` (no paired confirmation) and requires the median speedup to
+    clear the margin.  Used by the default fast path.
+    """
+    tune_tokens = _collect_tune_tokens(results)
+    knob_env, _ = _collect_knob_overrides(results)
+    tuned_env_base: dict = {}
+    for tune_var, tokens in tune_tokens.items():
+        tuned_env_base[tune_var] = "#".join(tokens)
+    tuned_env_base.update(knob_env)
+
+    def measure_or_none(rs: RunSpec):
+        try:
+            return measure(rs)
+        except RuntimeError as exc:
+            logger.warning("screening validation measurement failed: %s", exc)
+            return None
+
+    points: list[ValidationPoint] = []
+    for result in results:
+        if not result.tune_ranges:
+            continue
+        spec = result.spec
+        comp_env = competition_env(spec.component)
+        for tr in result.tune_ranges:
+            for size in sorted({tr.start_bytes, tr.end_bytes}):
+                count = bytes_to_count(size, spec.datatype)
+                rs_tuned = RunSpec(
+                    collective=spec.collective, mem_type=spec.mem_type,
+                    count=count, datatype=spec.datatype,
+                    reduction_op=spec.reduction_op,
+                    n_reps=n_reps, n_iter=n_iter, n_warmup=n_warmup,
+                    persistent=spec.persistent,
+                    extra_env={**comp_env, **tuned_env_base},
+                    mpi_launcher=list(spec.mpi_launcher),
+                    requested_team_size=spec.team_size,
+                    executed_team_size=spec.executed_team_size,
+                    perftest_path=spec.perftest_path,
+                    timeout_s=spec.timeout_s,
+                )
+                rs_default = dataclasses.replace(rs_tuned, extra_env=dict(comp_env))
+                tuned_result = measure_or_none(rs_tuned)
+                default_result = measure_or_none(rs_default)
+                default_median = default_result.median_us if default_result else None
+                tuned_median = tuned_result.median_us if tuned_result else None
+                if (default_median is None or tuned_median is None
+                        or default_median <= 0):
+                    passed, speedup, reason = False, None, "measurement failed or non-positive default"
+                else:
+                    speedup = (default_median - tuned_median) / default_median
+                    passed = speedup > margin_threshold
+                    reason = ("screening median speedup above margin"
+                              if passed else "screening median speedup within margin")
+                points.append(ValidationPoint(
+                    collective=spec.collective, mem_type=spec.mem_type,
+                    size_bytes=size, tuned_median_us=tuned_median,
+                    default_median_us=default_median, speedup=speedup,
+                    passed=passed, inside=True, policy_selected=True,
+                    evidence=None, reason=reason,
+                    component=spec.component, team_size=spec.team_size,
+                    requested_team_size=spec.team_size,
+                    executed_team_size=spec.executed_team_size,
+                    datatype=spec.datatype, reduction_op=spec.reduction_op,
+                ))
+    return points
+
+
 
 # ---------------------------------------------------------------------------
 # Tuning summary log
@@ -838,17 +915,19 @@ def run_tuning(
     alg_map: Optional[dict] = None,
     datatype: str = "float32",
     reduction_op: str = "sum",
-    n_reps: int = 15,
-    n_iter: int = 5000,
-    n_warmup: int = 500,
+    n_reps: int = 7,
+    n_iter: int = 1000,
+    n_warmup: int = 100,
     persistent: bool = True,
     margin_threshold: float = 0.05,
     min_pairs: int = 10,
     max_pairs: int = 20,
     boundary_resolution_bytes: int = 1024,
     max_boundary_probes: int = 4,
-    max_confirmation_points: int = 120,
-    per_cell_min_points: int = 15,
+    max_confirmation_points: int = 40,
+    per_cell_min_points: int = 10,
+    proof_mode: bool = False,
+    confirmation_seed: int = 0,
     mpi_launcher: Optional[list] = None,
     perftest_path: str = "ucc_perftest",
     ucc_info_path: str = "ucc_info",
@@ -935,6 +1014,8 @@ def run_tuning(
                     executed_team_size=executed_team_size,
                     perftest_path=perftest_path,
                     timeout_s=timeout_s,
+                    proof_mode=proof_mode,
+                    confirmation_seed=confirmation_seed,
                 )
                 done += 1
                 result = sweep_cell(spec)
@@ -994,26 +1075,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Grid multiplication factor (2 or 4).")
     p.add_argument("--datatype", default="float32")
     p.add_argument("--op", default="sum", dest="reduction_op")
-    p.add_argument("--n-reps", type=int, default=15,
+    p.add_argument("--n-reps", type=int, default=7,
                    help="Independent perftest repetitions per measurement.")
-    p.add_argument("--n-iter", type=int, default=5000,
+    p.add_argument("--n-iter", type=int, default=1000,
                    help="Perftest -n iterations per rep.")
-    p.add_argument("--n-warmup", type=int, default=500,
+    p.add_argument("--n-warmup", type=int, default=100,
                    help="Perftest -w warmup iterations per rep.")
     p.add_argument("--no-persistent", action="store_true",
                    help="Disable persistent mode (includes init/finalize overhead).")
     p.add_argument("--min-speedup", "--margin", type=float, default=0.05,
                    dest="min_speedup",
-                   help="Paired upper bound must prove at least this speedup.")
+                   help="Required speedup for an override to be emitted.")
     p.add_argument("--min-pairs", type=int, default=10)
     p.add_argument("--max-pairs", type=int, default=20)
     p.add_argument("--boundary-resolution-bytes", type=int, default=1024)
     p.add_argument("--max-boundary-probes", type=int, default=4)
-    p.add_argument("--max-confirmation-points", type=int, default=120)
-    p.add_argument("--per-cell-min-points", type=int, default=15,
+    p.add_argument("--max-confirmation-points", type=int, default=40)
+    p.add_argument("--per-cell-min-points", type=int, default=10,
                    help="Minimum confirmation points guaranteed per cell.")
     p.add_argument("--proof-mode", action="store_true",
-                   help="Use 256-byte boundary resolution and 12 probes.")
+                   help=("Run full paired confirmation, boundary refinement, and "
+                         "knob attribution (expensive). Default is fast screening only."))
     p.add_argument("--seed", type=int, default=0,
                    help="Recorded seed for balanced paired order.")
     p.add_argument("--launcher", default="mpirun -np {team_size}",
@@ -1134,24 +1216,35 @@ def main(argv=None) -> int:
         perftest_path=args.perftest,
         ucc_info_path=args.ucc_info,
         timeout_s=300,
+        proof_mode=args.proof_mode,
+        confirmation_seed=args.seed,
     )
 
     # Stage 4: validate
     validation_points: list = []
     if not args.no_validate:
         logger.info("Stage 4: validating generated config")
-        validation_points = validate_with_trimming(
-            results,
-            margin_threshold=args.min_speedup,
-            n_reps=max(args.min_pairs, args.n_reps),
-            n_iter=args.n_iter // 5,
-            n_warmup=args.n_warmup // 5,
-            max_confirmation_points=confirmation_points,
-            used_confirmation_points=sum(
-                result.proof_budget.used_points
-                for result in results if result.proof_budget
-            ),
-        )
+        if args.proof_mode:
+            validation_points = validate_with_trimming(
+                results,
+                margin_threshold=args.min_speedup,
+                n_reps=max(args.min_pairs, args.n_reps),
+                n_iter=args.n_iter // 5,
+                n_warmup=args.n_warmup // 5,
+                max_confirmation_points=confirmation_points,
+                used_confirmation_points=sum(
+                    result.proof_budget.used_points
+                    for result in results if result.proof_budget
+                ),
+            )
+        else:
+            validation_points = validate_screening(
+                results,
+                margin_threshold=args.min_speedup,
+                n_reps=args.n_reps,
+                n_iter=args.n_iter,
+                n_warmup=args.n_warmup,
+            )
         fail_count = sum(1 for v in validation_points if not v.passed)
         if fail_count:
             logger.warning(
@@ -1178,7 +1271,7 @@ def main(argv=None) -> int:
     )
 
     fail_validation = any(not v.passed for v in validation_points)
-    return 1 if fail_validation or results else 0
+    return 1 if fail_validation else 0
 
 
 if __name__ == "__main__":

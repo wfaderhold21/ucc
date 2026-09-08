@@ -51,7 +51,8 @@ class TestFormatting(unittest.TestCase):
         self.assertEqual(_fmt_bytes(1 << 20), "1M")
 
     def test_memory_mapping(self):
-        self.assertEqual(_mem_type_for_tune("cuda-mng"), "cuda-managed")
+        self.assertEqual(_mem_type_for_tune("cuda-mng"), "cuda_managed")
+        self.assertNotEqual(_mem_type_for_tune("cuda-mng"), "cuda-managed")
         with self.assertRaises(ValueError):
             _mem_type_for_tune("unknown")
 
@@ -176,7 +177,7 @@ class TestSweepCell(unittest.TestCase):
                                                confirm, _knobs):
         confirm.return_value = ("4", (_evidence(.8), _evidence(.8),
                                        _evidence(.8)))
-        result = sweep_cell(_spec(max_confirmation_points=4))
+        result = sweep_cell(_spec(proof_mode=True, max_confirmation_points=4))
         decision = result.size_decisions[0]
         self.assertEqual(decision.knob_overrides, {"K": "4"})
         self.assertEqual(len(decision.knob_hypotheses), 3)
@@ -191,7 +192,7 @@ class TestSweepCell(unittest.TestCase):
     def test_screening_nomination_needs_fresh_pair_win(self, measure, paired, _knob):
         measure.side_effect = [_run(8), _run(10)]
         paired.return_value = _evidence(.8)
-        result = sweep_cell(_spec())
+        result = sweep_cell(_spec(proof_mode=True))
         self.assertEqual(result.size_decisions[0].source, "fresh-paired-confirmation")
         self.assertTrue(result.size_decisions[0].should_override)
         self.assertEqual((result.tune_ranges[0].start_bytes,
@@ -202,14 +203,15 @@ class TestSweepCell(unittest.TestCase):
     def test_tie_emits_nothing(self, measure, paired):
         measure.side_effect = [_run(8), _run(10)]
         paired.return_value = _evidence(1)
-        result = sweep_cell(_spec())
+        result = sweep_cell(_spec(proof_mode=True))
         self.assertEqual(result.tune_ranges, [])
 
     @patch("ucc_tune_sweep._paired_compare")
     @patch("ucc_tune_sweep.measure")
     def test_partial_advertised_sweep_cannot_emit(self, measure, paired):
         measure.side_effect = [_run(8), RuntimeError("failed"), _run(10)]
-        result = sweep_cell(_spec(alg_list=[AlgInfo(0, "knomial", ""),
+        result = sweep_cell(_spec(proof_mode=True,
+                                  alg_list=[AlgInfo(0, "knomial", ""),
                                             AlgInfo(1, "ring", "")]))
         paired.assert_not_called()
         self.assertEqual(result.tune_ranges, [])
@@ -223,6 +225,29 @@ class TestSweepCell(unittest.TestCase):
         self.assertEqual(len(result.size_decisions), 1)
         self.assertEqual(result.size_decisions[0].actual_size_bytes, 4096)
         self.assertTrue(any("deduplicated" in warning for warning in result.warnings))
+
+
+class TestScreeningPath(unittest.TestCase):
+    @patch("ucc_tune_sweep._paired_compare")
+    @patch("ucc_tune_sweep.measure")
+    def test_margin_win_emits_without_paired_confirmation(self, measure, paired):
+        measure.side_effect = [_run(8), _run(10)]
+        result = sweep_cell(_spec())  # proof_mode defaults to False
+        paired.assert_not_called()
+        self.assertEqual(result.size_decisions[0].source, "screening-margin")
+        self.assertTrue(result.size_decisions[0].should_override)
+        self.assertIsNone(result.proof_budget)
+        self.assertEqual((result.tune_ranges[0].start_bytes,
+                          result.tune_ranges[0].end_bytes), (4096, 4096))
+
+    @patch("ucc_tune_sweep._paired_compare")
+    @patch("ucc_tune_sweep.measure")
+    def test_within_margin_emits_nothing(self, measure, paired):
+        measure.side_effect = [_run(10), _run(10.2)]
+        result = sweep_cell(_spec())
+        paired.assert_not_called()
+        self.assertEqual(result.tune_ranges, [])
+
 
 
 if __name__ == "__main__":

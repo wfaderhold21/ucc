@@ -17,8 +17,13 @@ from ucc_tune_stats import (CellKey, Decision, PairedEvidence, ProofBudget,
 
 logger = logging.getLogger(__name__)
 
+# UCC TUNE grammar accepts the stringified enum suffix (underscore), not the
+# hyphenated display name.  ucc_mem_type_from_str() (src/utils/ucc_coll_utils.c)
+# STR_TYPE_CHECKs "cuda_managed"; the hyphenated "cuda-managed" is only the
+# display name in ucc_mem_type_str() (src/components/mc/base/ucc_mc_base.c) and
+# is REJECTED by the score parser, which discards the entire TUNE value.
 _PERFTEST_TO_TUNE_MEM = {
-    "host": "host", "cuda": "cuda", "cuda-mng": "cuda-managed", "rocm": "rocm",
+    "host": "host", "cuda": "cuda", "cuda-mng": "cuda_managed", "rocm": "rocm",
 }
 
 
@@ -61,6 +66,7 @@ class SweepSpec:
     mpi_launcher: list = dataclasses.field(default_factory=lambda: ["mpirun", "-np", "1"])
     executed_team_size: Optional[int] = None
     perftest_path: str = "ucc_perftest"
+    proof_mode: bool = False
     timeout_s: int = 120
 
     def __post_init__(self) -> None:
@@ -340,7 +346,68 @@ def refine_boundaries(
     return [by_size[size] for size in sorted(by_size)], budget
 
 
+def _sweep_cell_screening(spec: SweepSpec) -> SweepResult:
+    """Fast screening-only path: nominal winner vs default by median margin.
+
+    No paired confirmation, boundary refinement, or knob attribution.  Emitted
+    ranges are conservative singletons (or small groups) gated only by the
+    screening margin.  This is the cheap discovery path; use --proof-mode for
+    statistically confirmed emission.
+    """
+    if not spec.alg_list:
+        return SweepResult(spec, [], [], [], None)
+    warnings: list[str] = []
+    decisions: list[SizeDecision] = []
+    actual_seen: set[int] = set()
+
+    for requested_size in spec.msg_sizes_bytes:
+        actual_size = bytes_to_count(requested_size, spec.datatype) * dtype_size(spec.datatype)
+        if actual_size in actual_seen:
+            warnings.append(f"aligned duplicate {requested_size} -> {actual_size} deduplicated")
+            continue
+        actual_seen.add(actual_size)
+        alg_results = _sweep_algs_at_size(spec, actual_size)
+        if not alg_results:
+            warnings.append(f"All algorithms failed at {_fmt_bytes(actual_size)}")
+            continue
+        default_result = _measure_safe(spec, actual_size, _default_env(spec), "default screening")
+        if len(alg_results) != len(spec.alg_list):
+            warnings.append(f"partial algorithm sweep at {_fmt_bytes(actual_size)}")
+        winner_name, winner_result = min(alg_results.items(), key=lambda item: item[1].median_us)
+        winner = next(alg for alg in spec.alg_list if alg.name == winner_name)
+        default_us = default_result.median_us if default_result else None
+        margin = ((default_us - winner_result.median_us) / default_us
+                  if default_us and default_us > 0 else 0.0)
+        should_override = default_result is not None and margin > spec.margin_threshold
+        policy = Decision.WIN if should_override else Decision.DEFAULT
+        decisions.append(SizeDecision(
+            actual_size, should_override, winner_name, winner.id,
+            winner_result.median_us, default_us, margin, {}, policy, None,
+            actual_size, "screening-margin",
+        ))
+        for name, result in alg_results.items():
+            if result.variance_warning:
+                warnings.append(f"High CV ({result.cv * 100:.1f}%) for {name} at {_fmt_bytes(actual_size)}")
+
+    ranges = coalesce_ranges(decisions, spec.msg_sizes_bytes,
+                             spec.boundary_resolution_bytes)
+    unsupported = tuple(
+        f"{spec.component}/{spec.collective} mem={spec.mem_type} "
+        f"team={spec.team_size} size={decision.actual_size_bytes}: "
+        f"{decision.policy.value} (screening-margin)"
+        for decision in decisions if decision.policy != Decision.WIN
+    )
+    return SweepResult(spec, decisions, ranges, warnings, None, unsupported)
+
+
 def sweep_cell(spec: SweepSpec) -> SweepResult:
+    """Dispatch to the screening (default) or paired-confirmation (proof) path."""
+    if spec.proof_mode:
+        return _sweep_cell_proof(spec)
+    return _sweep_cell_screening(spec)
+
+
+def _sweep_cell_proof(spec: SweepSpec) -> SweepResult:
     if not spec.alg_list:
         return SweepResult(spec, [], [], [], ProofBudget(spec.max_confirmation_points,
                                                          spec.max_pairs))

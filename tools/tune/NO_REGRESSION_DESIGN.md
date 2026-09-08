@@ -2,6 +2,11 @@
 
 Status: implementation-ready design; no tuner changes are included here.
 
+> **2026-09-08:** this machinery is now **opt-in** behind `--proof-mode`. The
+> default sweep is fast screening-only; the paired confirmation, boundary
+> refinement, Holm family, and three-arm knob attribution in this document run
+> only under `--proof-mode`.
+
 ## 1. Decision and evidence basis
 
 The current tuner remains useful for discovery, but its output must be treated

@@ -3,6 +3,12 @@
 **Branch:** `topic/autotune` · **UCC HEAD:** `281a0eb5` ("UTIL: fix ini max file line length (#1317)")
 **Written:** 2026-07-25 · **Supersedes the "What is next" section of `CHECKPOINT.md`**
 
+> **2026-09-08:** the §3.2 cluster sequence still stands, but the default cost
+> model changed — paired confirmation is now opt-in (`--proof-mode`); the
+> default sweep is fast screening-only with restored defaults (`--n-reps 7`,
+> `--n-iter 1000`, `--n-warmup 100`). The §2.2 `cuda_managed` fix was never
+> actually committed in the initial branch; it is now genuinely fixed in-tree.
+
 This document was produced by re-reading `CHECKPOINT.md` (dated 2026-06-24) and
 cross-checking every claim in it against the actual tree. It records where the
 project really stands, what drifted, what was fixed, and the ordered next steps.

@@ -308,7 +308,7 @@ class TestCliSafety(unittest.TestCase):
         self.assertEqual((args.boundary_resolution_bytes,
                           args.max_boundary_probes,
                           args.max_confirmation_points,
-                          args.per_cell_min_points), (1024, 4, 120, 15))
+                          args.per_cell_min_points), (1024, 4, 40, 10))
         self.assertEqual(args.team_sizes, "8")
 
     def test_proof_mode_flag_exists_without_unsafe_flag(self):
@@ -323,6 +323,25 @@ class TestCliSafety(unittest.TestCase):
             main(["--launcher", "jsrun -n 8"])
         fingerprint.assert_not_called()
 
+    @patch("ucc_offline_tune.write_summary")
+    @patch("ucc_offline_tune.emit_conf")
+    @patch("ucc_offline_tune.run_tuning")
+    @patch("ucc_offline_tune.run_ucc_info_algs")
+    @patch("ucc_offline_tune.collect_fingerprint")
+    def test_successful_run_returns_zero(self, collect, algs, run, emit, summary):
+        from ucc_offline_tune import main
+        collect.return_value = fingerprint()
+        algs.return_value = {"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}}
+        run.return_value = ([sweep_result(ranges=[tune_range()])], [])
+        emit.return_value = {"conf": Path("/tmp/c"), "sh": Path("/tmp/s"),
+                             "fingerprint": Path("/tmp/f"), "results": Path("/tmp/r")}
+        summary.return_value = Path("/tmp/summary")
+        self.assertEqual(
+            main(["--component", "tl/ucp", "--collective", "allreduce",
+                  "--no-validate"]),
+            0,
+        )
+
 
 class TestCellLaunchers(unittest.TestCase):
     @patch("ucc_offline_tune.sweep_cell")
@@ -335,6 +354,15 @@ class TestCellLaunchers(unittest.TestCase):
         self.assertEqual([spec.mpi_launcher for spec in specs],
                          [["mpirun", "-np", "8"], ["mpirun", "-np", "64"]])
         self.assertEqual([spec.executed_team_size for spec in specs], [8, 64])
+
+    @patch("ucc_offline_tune.sweep_cell")
+    def test_confirmation_seed_threaded_to_spec(self, sweep):
+        sweep.side_effect = lambda spec: SweepResult(spec, [], [], [])
+        run_tuning([("tl/ucp", "allreduce")], ["host"], [8], [4096],
+                   alg_map={"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}},
+                   mpi_launcher=["mpirun", "-np", "{team_size}"],
+                   confirmation_seed=42)
+        self.assertEqual(sweep.call_args.args[0].confirmation_seed, 42)
 
     def test_serialized_requested_and_executed_team_size(self):
         payload = _results_to_json([sweep_result()])[0]
@@ -353,18 +381,27 @@ class TestConfirmationBudget(unittest.TestCase):
         run_tuning([("tl/ucp", "allreduce")], ["host"], [8], [4096],
                    alg_map={"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}},
                    mpi_launcher=["mpirun", "-np", "{team_size}"])
-        self.assertEqual(sweep.call_args.args[0].max_confirmation_points, 120)
+        self.assertEqual(sweep.call_args.args[0].max_confirmation_points, 40)
 
     def test_four_cells_floor_then_divide_surplus(self):
-        # Worst-case consumption: each cell spends its full allocation, so
-        # the 120-point budget lands 30/30/30/30 across four cells.
+        # Exact fit: the 40-point budget with a 10-point per-cell floor lands
+        # 10/10/10/10 across four cells (no surplus to divide).
         budgets = []
         used = 0
         for done in range(4):
-            budget = _compute_cell_budget(4, done, 120, used, 15)
+            budget = _compute_cell_budget(4, done, 40, used, 10)
             budgets.append(budget)
             used += budget
-        self.assertEqual(budgets, [30, 30, 30, 30])
+        self.assertEqual(budgets, [10, 10, 10, 10])
+
+        # With surplus, the leftover is divided equally on top of the floor.
+        budgets = []
+        used = 0
+        for done in range(4):
+            budget = _compute_cell_budget(4, done, 48, used, 10)
+            budgets.append(budget)
+            used += budget
+        self.assertEqual(budgets, [12, 12, 12, 12])
 
 
 if __name__ == "__main__":
