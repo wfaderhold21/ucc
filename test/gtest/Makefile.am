@@ -139,6 +139,10 @@ gtest_LDFLAGS  += $(HIP_LDFLAGS)
 gtest_LDADD    += $(HIP_LIBS)
 endif
 
+if HAVE_DOCA_UROM
+gtest_SOURCES  += core/test_ec_doca.cc
+endif
+
 if HAVE_UCX
 gtest_CXXFLAGS += $(UCX_CXXFLAGS)
 gtest_CPPFLAGS += $(UCX_CPPFLAGS)

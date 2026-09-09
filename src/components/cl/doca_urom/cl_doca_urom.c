@@ -14,13 +14,18 @@ ucc_status_t ucc_cl_doca_urom_get_context_attr(const ucc_base_context_t *context
                                                ucc_base_ctx_attr_t *base_attr);
 
 ucc_status_t ucc_cl_doca_urom_mem_map(const ucc_base_context_t *context,
-                                      int type, void *memh, void *tl_h);
+                                      ucc_mem_map_mode_t mode,
+                                      ucc_mem_map_memh_t *memh,
+                                      ucc_mem_map_tl_t *tl_h);
 
 ucc_status_t ucc_cl_doca_urom_mem_unmap(const ucc_base_context_t *context,
-                                        int type, void *tl_h);
+                                        ucc_mem_map_mode_t mode,
+                                        ucc_mem_map_tl_t *tl_h);
 
 ucc_status_t ucc_cl_doca_urom_memh_pack(const ucc_base_context_t *context,
-                                        int type, void *memh, void **packed_buffer);
+                                        ucc_mem_map_mode_t mode,
+                                        ucc_mem_map_tl_t *tl_h,
+                                        void **packed_buffer);
 
 ucc_status_t ucc_cl_doca_urom_get_lib_properties(ucc_base_lib_properties_t *prop);
 

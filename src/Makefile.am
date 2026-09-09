@@ -18,6 +18,7 @@ endif
 
 if HAVE_DOCA_UROM
 cl_dirs += components/cl/doca_urom
+ec_dirs += components/ec/doca
 endif
 
 if HAVE_ROCM

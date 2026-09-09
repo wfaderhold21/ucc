@@ -64,6 +64,13 @@ typedef struct ucc_global_config {
 
     /* Check for asymmetric datatypes in rooted collectives */
     int                        check_asymmetric_dt;
+    /*
+     * Opt-in routing of CUDA / CUDA-managed reduce and copy work to the DOCA
+     * (BlueField DPU) execution component when it is loaded.  When clear
+     * (default) or the DOCA component is absent, the CUDA-stream executor is
+     * used (see the memory-type -> executor map in ucc_coll.c).
+     */
+    int                        use_doca_reduce;
 } ucc_global_config_t;
 
 extern ucc_global_config_t ucc_global_config;

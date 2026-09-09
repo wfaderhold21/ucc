@@ -43,6 +43,11 @@ static doca_error_t ucc_status_to_doca_error(ucc_status_t status)
     case UCC_ERR_TIMED_OUT:
         doca_err = DOCA_ERROR_TIME_OUT;
         break;
+    default:
+        /* UCC_ERR_IO_ERROR has no specific DOCA counterpart; report it
+         * (and any future UCC status) as unknown. */
+        doca_err = DOCA_ERROR_UNKNOWN;
+        break;
     }
 
     return doca_err;
@@ -558,19 +563,24 @@ ucc_cl_doca_urom_get_context_attr(const ucc_base_context_t *context,
 }
 
 ucc_status_t ucc_cl_doca_urom_mem_map(const ucc_base_context_t *context,
-                                      int type, void *memh, void *tl_h)
+                                      ucc_mem_map_mode_t mode,
+                                      ucc_mem_map_memh_t *memh,
+                                      ucc_mem_map_tl_t *tl_h)
 {
     return UCC_ERR_NOT_SUPPORTED;
 }
 
 ucc_status_t ucc_cl_doca_urom_mem_unmap(const ucc_base_context_t *context,
-                                        int type, void *tl_h)
+                                        ucc_mem_map_mode_t mode,
+                                        ucc_mem_map_tl_t *tl_h)
 {
     return UCC_ERR_NOT_SUPPORTED;
 }
 
 ucc_status_t ucc_cl_doca_urom_memh_pack(const ucc_base_context_t *context,
-                                        int type, void *memh, void **packed_buffer)
+                                        ucc_mem_map_mode_t mode,
+                                        ucc_mem_map_tl_t *tl_h,
+                                        void **packed_buffer)
 {
     return UCC_ERR_NOT_SUPPORTED;
 }

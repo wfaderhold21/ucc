@@ -12,6 +12,7 @@
 ucc_status_t ucc_ec_init(const ucc_ec_params_t *ec_params);
 
 ucc_status_t ucc_ec_available(ucc_ee_type_t ee_type);
+ucc_status_t ucc_ec_offload_supported(ucc_ee_type_t ee_type);
 
 ucc_status_t ucc_ec_get_attr(ucc_ec_attr_t *attr);
 

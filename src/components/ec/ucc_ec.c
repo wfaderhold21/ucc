@@ -93,6 +93,27 @@ ucc_status_t ucc_ec_available(ucc_ee_type_t ee_type)
     return UCC_OK;
 }
 
+/*
+ * Is the component's offload target currently reachable?  Components that
+ * declare no offload_supported op (CPU / CUDA / ROCm) have no conditional
+ * hardware dependency and are always "supported"; DOCA reports its command
+ * channel state.  Used by the collective routing (ucc_coll.c) so that
+ * USE_DOCA_REDUCE=1 falls back cleanly to the CUDA path when no DPU is
+ * present.
+ */
+ucc_status_t ucc_ec_offload_supported(ucc_ee_type_t ee_type)
+{
+    if (NULL == ec_ops[ee_type]) {
+        return UCC_ERR_NOT_FOUND;
+    }
+
+    if (NULL == ec_ops[ee_type]->offload_supported) {
+        return UCC_OK;
+    }
+
+    return ec_ops[ee_type]->offload_supported();
+}
+
 ucc_status_t ucc_ec_get_attr(ucc_ec_attr_t *attr)
 {
     if (attr->field_mask & UCC_EC_ATTR_FILED_MAX_EXECUTORS_BUFS) {

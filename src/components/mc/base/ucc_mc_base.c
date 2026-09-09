@@ -29,4 +29,5 @@ const char *ucc_memory_type_names[] = {
 
 const char *ucc_ee_type_names[] = {
     [UCC_EE_CUDA_STREAM] = "cuda stream",
-    [UCC_EE_CPU_THREAD]  = "cpu thread"};
+    [UCC_EE_CPU_THREAD]  = "cpu thread",
+    [UCC_EE_DOCA]        = "doca"};

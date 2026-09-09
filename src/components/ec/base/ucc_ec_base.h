@@ -49,6 +49,17 @@ typedef struct ucc_ec_ops {
     ucc_status_t (*destroy_event)(void *event);
     ucc_status_t (*event_post)(void *ee_context, void *event);
     ucc_status_t (*event_test)(void *event);
+    /*
+     * Optional.  Returns UCC_OK when the component's offload target is
+     * actually reachable (e.g. the DOCA command channel is connected to a
+     * DPU), or a non-OK status when it is not.  NULL (the default for
+     * components with no conditional hardware dependency, e.g. CPU / CUDA /
+     * ROCm stream) means "always supported".  The core collective routing
+     * (ucc_coll.c) uses this to decide whether to route to the component, so
+     * that USE_DOCA_REDUCE=1 cleanly falls back to the CUDA path when no DPU
+     * is present instead of erroring.
+     */
+    ucc_status_t (*offload_supported)(void);
 } ucc_ec_ops_t;
 
 typedef struct ucc_ee_executor {

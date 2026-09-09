@@ -295,7 +295,21 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_init,
         switch(coll_mem_type) {
         case UCC_MEMORY_TYPE_CUDA:
         case UCC_MEMORY_TYPE_CUDA_MANAGED:
-            coll_ee_type = UCC_EE_CUDA_STREAM;
+            /* Opt-in offload to the DOCA (BlueField DPU) executor.  Route
+             * only when the option is set, the component is loaded, AND the
+             * offload target is actually reachable (the DPU command channel
+             * connected, task 588 / C4).  When no DPU is present
+             * offload_supported reports NOT_SUPPORTED and the collective
+             * keeps the CUDA-stream path (Milestone B), which has its own
+             * working host-offload policy — i.e. USE_DOCA_REDUCE=1 with no
+             * DPU cleanly falls back instead of erroring. */
+            if (ucc_global_config.use_doca_reduce &&
+                UCC_OK == ucc_ec_available(UCC_EE_DOCA) &&
+                UCC_OK == ucc_ec_offload_supported(UCC_EE_DOCA)) {
+                coll_ee_type = UCC_EE_DOCA;
+            } else {
+                coll_ee_type = UCC_EE_CUDA_STREAM;
+            }
             break;
         case UCC_MEMORY_TYPE_ROCM:
             coll_ee_type = UCC_EE_ROCM_STREAM;

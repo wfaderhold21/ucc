@@ -133,5 +133,11 @@ ucc_config_field_t ucc_global_config_table[] = {
      ucc_offsetof(ucc_global_config_t, modules),
      UCC_CONFIG_TYPE_ALLOW_LIST},
 
+    {"USE_DOCA_REDUCE", "n",
+     "Route CUDA / CUDA-managed reduce and copy work to the DOCA (BlueField "
+     "DPU) execution component when it is loaded.  When disabled (default) "
+     "or the component is absent, the CUDA-stream executor is used.",
+     ucc_offsetof(ucc_global_config_t, use_doca_reduce), UCC_CONFIG_TYPE_BOOL},
+
     {NULL}
 };
