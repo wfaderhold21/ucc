@@ -258,6 +258,37 @@ class TestScreeningPath(unittest.TestCase):
         self.assertEqual(result.tune_ranges, [])
 
 
+class TestReadbackRecording(unittest.TestCase):
+    @staticmethod
+    def _run_rb(us, alg=None, comp=None, cv=0.01):
+        sample = SingleRunSample(1024, 4096, us, us, us)
+        sample.selected_alg = alg
+        sample.selected_component = comp
+        return RunResult(MagicMock(), [sample], us, 0, cv, 1, 0, 0, cv > .1,
+                         selected_component=comp, selected_alg=alg)
+
+    @patch("ucc_tune_sweep.measure")
+    def test_default_readback_recorded_on_decision(self, measure):
+        measure.side_effect = [
+            self._run_rb(8, alg="knomial", comp="tl/ucp"),   # forced knomial
+            self._run_rb(10, alg="knomial", comp="tl/ucp"),  # default arm
+        ]
+        result = sweep_cell(_spec())
+        decision = result.size_decisions[0]
+        self.assertEqual(decision.default_selected_alg, "knomial")
+        self.assertEqual(decision.default_selected_component, "tl/ucp")
+        self.assertEqual(decision.winner_cv, 0.01)
+        self.assertEqual(decision.default_cv, 0.01)
+
+    @patch("ucc_tune_sweep.measure")
+    def test_readback_mismatch_warns(self, measure):
+        measure.side_effect = [
+            self._run_rb(8, alg="ring", comp="tl/ucp"),      # forced knomial, wrong readback
+            self._run_rb(10, alg="knomial", comp="tl/ucp"),  # default arm
+        ]
+        result = sweep_cell(_spec())
+        self.assertTrue(any("readback mismatch" in w for w in result.warnings))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,18 +2,23 @@
 """Unit tests for ucc_tune_runner (no perftest binary required)."""
 
 import statistics
+import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
 from ucc_tune_runner import (
     RunSpec,
     SingleRunSample,
+    _alg_name_from_fn,
     _build_cmd,
+    _parse_memunits,
     _parse_output,
+    _run_once,
     _tukey_clean,
     bind_launcher_team_size,
     measure,
     measure_paired,
+    parse_score_map,
 )
 
 
@@ -135,6 +140,188 @@ class TestParseOutput(unittest.TestCase):
         # Should not mistake "Total time: 45.6 ms" for a data line.
         self.assertIsNotNone(s)
         self.assertEqual(s.count, 512)
+
+
+_LOG_PREFIX = ("[1789057892.645121] [clx-gaia-slurm-login-01:3323572:0] "
+               "ucc_coll_score_map.c:225  UCC  INFO  ")
+
+
+def _log(msg):
+    return _LOG_PREFIX + msg
+
+
+class TestParseMemunits(unittest.TestCase):
+    def test_suffixes_and_inf(self):
+        self.assertEqual(_parse_memunits("4K"), 4096)   # uppercase (real UCC)
+        self.assertEqual(_parse_memunits("4k"), 4096)
+        self.assertEqual(_parse_memunits("16"), 16)
+        self.assertEqual(_parse_memunits("1M"), 1 << 20)
+        self.assertEqual(_parse_memunits("2g"), 2 << 30)
+        self.assertEqual(_parse_memunits("inf"), float("inf"))
+
+    def test_rejects_garbage(self):
+        with self.assertRaises(ValueError):
+            _parse_memunits("4x")
+
+
+class TestParseScoreMap(unittest.TestCase):
+    INFO_MAP = "\n".join([
+        _log("===== COLL_SCORE_MAP (team_id 3, size 8) ====="),
+        _log("Allreduce:"),
+        _log("\tHost: {0..4095}:TL_UCP:10 {4K..inf}:TL_UCP:10"),
+        _log("\tCudaManaged: {0..inf}:TL_UCP:10"),
+        _log("Reduce_scatter:"),
+        _log("\tHost: {0..inf}:TL_UCP:10"),
+        _log("================================================"),
+    ])
+
+    def test_info_level_component_only(self):
+        self.assertEqual(parse_score_map(self.INFO_MAP, "allreduce", "host", 1024),
+                         ("tl/ucp", None))
+
+    def test_upper_range_end_inf(self):
+        self.assertEqual(parse_score_map(self.INFO_MAP, "allreduce", "host", 8192),
+                         ("tl/ucp", None))
+
+    def test_managed_mem_type_spelling(self):
+        self.assertEqual(parse_score_map(self.INFO_MAP, "allreduce", "cuda-mng", 4096),
+                         ("tl/ucp", None))
+
+    def test_capitalised_collective_and_underscored(self):
+        self.assertEqual(parse_score_map(self.INFO_MAP, "reduce_scatter", "host", 4096),
+                         ("tl/ucp", None))
+
+    def test_debug_level_carries_fn_name(self):
+        debug_map = "\n".join([
+            _log("===== COLL_SCORE_MAP (team_id 3, size 8) ====="),
+            _log("Allreduce:"),
+            _log("\tHost: {0..4095}:TL_UCP:10=ucc_tl_ucp_allreduce_sra_knomial_init"),
+            _log("================================================"),
+        ])
+        self.assertEqual(parse_score_map(debug_map, "allreduce", "host", 1024),
+                         ("tl/ucp", "ucc_tl_ucp_allreduce_sra_knomial_init"))
+
+    def test_no_block_returns_none(self):
+        self.assertIsNone(parse_score_map("no score map here", "allreduce", "host", 1024))
+
+    def test_missing_collective_returns_none(self):
+        self.assertIsNone(parse_score_map(self.INFO_MAP, "bcast", "host", 1024))
+
+
+class TestAlgNameFromFn(unittest.TestCase):
+    ALGS = ["knomial", "sra_knomial", "ring", "sliding_window"]
+
+    def test_prefers_longest_token_match(self):
+        self.assertEqual(
+            _alg_name_from_fn("ucc_tl_ucp_allreduce_sra_knomial_init", self.ALGS),
+            "sra_knomial")
+
+    def test_plain_knomial(self):
+        self.assertEqual(
+            _alg_name_from_fn("ucc_tl_ucp_allreduce_knomial_init", self.ALGS),
+            "knomial")
+
+    def test_ring(self):
+        self.assertEqual(
+            _alg_name_from_fn("ucc_tl_ucp_allreduce_ring_init", self.ALGS),
+            "ring")
+
+    def test_unknown_symbol_returns_none(self):
+        self.assertIsNone(
+            _alg_name_from_fn("ucc_tl_ucp_allreduce_unknown_init", self.ALGS))
+        self.assertIsNone(_alg_name_from_fn("?", self.ALGS))
+
+    def test_empty_inputs_return_none(self):
+        self.assertIsNone(_alg_name_from_fn(None, self.ALGS))
+        self.assertIsNone(_alg_name_from_fn("ucc_tl_ucp_allreduce_ring_init", []))
+
+
+class TestRunOnceReadback(unittest.TestCase):
+    SCORE_MAP = "\n".join([
+        _log("===== COLL_SCORE_MAP (team_id 3, size 8) ====="),
+        _log("Allreduce:"),
+        _log("\tHost: {0..4095}:TL_UCP:10 {4K..inf}:TL_UCP:10"),
+        _log("================================================"),
+    ])
+    TIMING = "        1024        4096       12.34       11.00       14.56\n"
+
+    @staticmethod
+    def _proc(stdout, stderr, returncode=0):
+        return subprocess.CompletedProcess(["mpirun"], returncode, stdout, stderr)
+
+    @patch("ucc_tune_runner.subprocess.run")
+    def test_injects_info_level_and_records_component(self, run):
+        run.return_value = self._proc(self.TIMING, self.SCORE_MAP)
+        spec = RunSpec("allreduce", count=1024, mpi_launcher=["mpirun", "-np", "1"])
+        sample = _run_once(spec)
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample.selected_component, "tl/ucp")
+        self.assertIsNone(sample.selected_alg)
+        self.assertEqual(run.call_args.kwargs["env"]["UCC_LOG_LEVEL"], "info")
+
+    @patch("ucc_tune_runner.subprocess.run")
+    def test_debug_level_maps_algorithm(self, run):
+        debug_map = "\n".join([
+            _log("===== COLL_SCORE_MAP (team_id 3, size 8) ====="),
+            _log("Allreduce:"),
+            _log("\tHost: {0..4095}:TL_UCP:10=ucc_tl_ucp_allreduce_knomial_init "
+                 "{4K..inf}:TL_UCP:10=ucc_tl_ucp_allreduce_sra_knomial_init"),
+            _log("================================================"),
+        ])
+        run.return_value = self._proc(self.TIMING, debug_map)
+        spec = RunSpec(
+            "allreduce", count=1024, mpi_launcher=["mpirun", "-np", "1"],
+            readback_log_level="debug",
+            alg_names=["knomial", "sra_knomial", "ring"],
+        )
+        sample = _run_once(spec)
+        self.assertEqual(sample.selected_component, "tl/ucp")
+        self.assertEqual(sample.selected_alg, "sra_knomial")
+
+    @patch("ucc_tune_runner.subprocess.run")
+    def test_readback_off_no_injection(self, run):
+        run.return_value = self._proc(self.TIMING, self.SCORE_MAP)
+        spec = RunSpec("allreduce", count=1024, mpi_launcher=["mpirun", "-np", "1"],
+                       readback_log_level=None)
+        sample = _run_once(spec)
+        self.assertIsNotNone(sample)
+        self.assertIsNone(sample.selected_component)
+        self.assertNotIn("UCC_LOG_LEVEL", run.call_args.kwargs["env"])
+
+    @patch("ucc_tune_runner.subprocess.run")
+    def test_extra_env_wins_over_readback_level(self, run):
+        run.return_value = self._proc(self.TIMING, "")
+        spec = RunSpec("allreduce", count=1024, mpi_launcher=["mpirun", "-np", "1"],
+                       extra_env={"UCC_LOG_LEVEL": "warn"})
+        _run_once(spec)
+        self.assertEqual(run.call_args.kwargs["env"]["UCC_LOG_LEVEL"], "warn")
+
+
+class TestMeasureReadback(unittest.TestCase):
+    @patch("ucc_tune_runner._run_once")
+    def test_readback_mode_aggregated(self, mock_run):
+        samples = []
+        for i in range(5):
+            s = SingleRunSample(count=1024, size_bytes=4096,
+                                avg_us=10.0 + i * 0.01, min_us=9.0, max_us=11.0)
+            s.selected_component = "tl/ucp"
+            s.selected_alg = "knomial"
+            samples.append(s)
+        mock_run.side_effect = samples
+        result = measure(RunSpec("allreduce", n_reps=5,
+                                 mpi_launcher=["mpirun", "-np", "1"]))
+        self.assertEqual(result.selected_component, "tl/ucp")
+        self.assertEqual(result.selected_alg, "knomial")
+
+    @patch("ucc_tune_runner._run_once")
+    def test_readback_none_when_all_absent(self, mock_run):
+        mock_run.side_effect = [
+            SingleRunSample(1024, 4096, 10.0, 9.0, 11.0) for _ in range(3)
+        ]
+        result = measure(RunSpec("allreduce", n_reps=3,
+                                 mpi_launcher=["mpirun", "-np", "1"]))
+        self.assertIsNone(result.selected_component)
+        self.assertIsNone(result.selected_alg)
 
 
 class TestTukeyClean(unittest.TestCase):

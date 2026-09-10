@@ -356,6 +356,10 @@ def _results_to_json(results: list) -> list:
                     "source":            d.source,
                     "paired_evidence":   d.evidence.to_dict() if d.evidence else None,
                     "knob_hypotheses":   [h.to_dict() for h in d.knob_hypotheses],
+                    "default_selected_alg":       d.default_selected_alg,
+                    "default_selected_component": d.default_selected_component,
+                    "winner_cv":                  d.winner_cv,
+                    "default_cv":                 d.default_cv,
                 }
                 for d in r.size_decisions
             ],
@@ -902,6 +906,198 @@ def _compute_cell_budget(
     per_cell = per_cell_min + surplus // remaining
     return min(per_cell, pool)
 
+
+# ---------------------------------------------------------------------------
+# Cost model (ROADMAP A2)
+# ---------------------------------------------------------------------------
+
+def compute_cost_model(
+    pairs: list,               # [(component, collective), ...]
+    alg_map: dict,
+    mem_types: list,
+    team_sizes: list,
+    sizes: list,
+    n_reps: int,
+    skip_asymmetric: bool = True,
+) -> dict:
+    """Compute the planned screening invocation count (ROADMAP §3).
+
+    Per size the screening path measures every advertised algorithm plus the
+    default arm, each ``n_reps`` independent perftest launches:
+
+        invocations = cells x sizes x (n_algs + 1) x n_reps
+
+    Knob work, boundary refinement, and Stage-4 validation are not part of the
+    screening path and are excluded (validation is data-dependent).
+    """
+    cells: list[dict] = []
+    total = 0
+    skipped_cells = 0
+    for comp, coll in pairs:
+        if skip_asymmetric and coll in _ASYMMETRIC_COLLS:
+            skipped_cells += len(mem_types) * len(team_sizes)
+            continue
+        n_algs = len(alg_map.get(comp, {}).get(coll, []))
+        for mem_type in mem_types:
+            for team_size in team_sizes:
+                invocations = len(sizes) * (n_algs + 1) * n_reps
+                cells.append({
+                    "component": comp, "collective": coll,
+                    "mem_type": mem_type, "team_size": team_size,
+                    "n_algs": n_algs, "invocations": invocations,
+                })
+                total += invocations
+    return {
+        "cells": len(cells),
+        "skipped_cells": skipped_cells,
+        "sizes": len(sizes),
+        "n_reps": n_reps,
+        "total_invocations": total,
+        "cells_detail": cells,
+    }
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = int(round(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def print_cost_model(model: dict, launch_overhead: float) -> None:
+    """Print the planned invocation count and estimated wall-clock."""
+    total = model["total_invocations"]
+    wall = total * launch_overhead
+    print("Planned sweep cost (screening path)")
+    print("=" * 60)
+    print(f"cells:            {model['cells']}")
+    print(f"skipped cells:    {model['skipped_cells']}")
+    print(f"sizes per cell:   {model['sizes']}")
+    print(f"repetitions:      {model['n_reps']}")
+    print(f"total invocations: {total}")
+    print(f"est. wall-clock:  {_fmt_duration(wall)} "
+          f"(at {launch_overhead:g} s/launch)")
+    print("  (Stage-4 validation and knob work excluded; the latter is "
+          "data-dependent.)")
+    print()
+    print("per-cell breakdown:")
+    for cell in model["cells_detail"]:
+        print(f"  {cell['component']}/{cell['collective']} "
+              f"mem={cell['mem_type']} team={cell['team_size']}: "
+              f"{cell['n_algs']} algs -> {cell['invocations']} invocations")
+
+
+# ---------------------------------------------------------------------------
+# Findings (ROADMAP A3)
+# ---------------------------------------------------------------------------
+
+def _build_findings(results: list) -> list:
+    """Build the ranked lead list from sweep results (ROADMAP A3).
+
+    Each emitted message range is one lead: its cell, inclusive byte range,
+    UCC's default-selected algorithm (from A1 readback), the winning
+    algorithm, the median screening margin, the number of measured points, and
+    the winning arm's CV.  Sorted by opportunity: speedup, then coverage.
+    """
+    leads: list[dict] = []
+    for result in results:
+        spec = result.spec
+        cell = dataclasses.asdict(_spec_cell_key(spec))
+        for tr in result.tune_ranges:
+            points = tr.evidence_points
+            margins = [d.margin for d in points if d.margin and d.margin > 0]
+            cvs = [d.winner_cv for d in points if d.winner_cv is not None]
+            default_algs = [d.default_selected_alg
+                            for d in points if d.default_selected_alg]
+            default_comps = [d.default_selected_component
+                             for d in points if d.default_selected_component]
+            leads.append({
+                "cell_key": cell,
+                "component": spec.component,
+                "collective": spec.collective,
+                "mem_type": spec.mem_type,
+                "team_size": spec.team_size,
+                "message_range": {
+                    "start_bytes": tr.start_bytes,
+                    "end_bytes": tr.end_bytes,
+                },
+                "default_algorithm": default_algs[0] if default_algs else None,
+                "default_component": default_comps[0] if default_comps else None,
+                "winning_algorithm": tr.alg_name,
+                "speedup": statistics.median(margins) if margins else 0.0,
+                "n_points": len(points),
+                "cv": statistics.median(cvs) if cvs else None,
+                "coverage_bytes": tr.end_bytes - tr.start_bytes + 1,
+            })
+    leads.sort(key=lambda lead: (
+        -lead["speedup"], -lead["coverage_bytes"],
+        lead["collective"], lead["team_size"],
+    ))
+    for rank, lead in enumerate(leads, 1):
+        lead["rank"] = rank
+    return leads
+
+
+def write_findings(
+    output_dir: Path,
+    results: list,
+    fingerprint: Fingerprint,
+) -> dict:
+    """Write findings.json + findings.md: ranked leads for human triage."""
+    leads = _build_findings(results)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "findings.json"
+    md_path = output_dir / "findings.md"
+
+    json_path.write_text(json.dumps({
+        "status": "provisional-leads-not-for-deployment",
+        "generated": fingerprint.timestamp,
+        "fingerprint": dataclasses.asdict(fingerprint),
+        "leads": leads,
+    }, indent=2, sort_keys=True))
+
+    lines = [
+        "# UCC Offline Tuner — Findings",
+        "",
+        "Status: **leads for human triage — NOT a deployable config.**",
+        "",
+        fingerprint.summary(),
+        "",
+        "## Ranked leads",
+        "",
+    ]
+    if not leads:
+        lines.append("(none — no cell emitted a message-range override)")
+    for lead in leads:
+        rng = lead["message_range"]
+        default = lead["default_algorithm"] or "(unknown — use --readback-level debug)"
+        cv = f"{lead['cv'] * 100:.1f}%" if lead["cv"] is not None else "n/a"
+        lines.append(
+            f"{lead['rank']}. {lead['component']}/{lead['collective']} "
+            f"mem={lead['mem_type']} team={lead['team_size']} "
+            f"[{_fmt_bytes(rng['start_bytes'])}, {_fmt_bytes(rng['end_bytes'])}]: "
+            f"default={default} -> {lead['winning_algorithm']}, "
+            f"speedup={lead['speedup'] * 100:.1f}%, "
+            f"n={lead['n_points']}, CV={cv}"
+        )
+    lines += [
+        "",
+        "## Legend",
+        "",
+        "- speedup: median screening margin across the range's measured points",
+        "- n: number of measured size points in the range",
+        "- CV: median coefficient-of-variation of the winning algorithm's timing",
+        "- default: algorithm UCC's default arm selected (score-map readback;",
+        "  empty unless run with --readback-level debug)",
+    ]
+    md_path.write_text("\n".join(lines) + "\n")
+    return {"json": json_path, "md": md_path}
+
+
 # ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
@@ -934,6 +1130,7 @@ def run_tuning(
     ucc_info_path: str = "ucc_info",
     timeout_s: int = 120,
     extra_ucc_info_env: Optional[dict] = None,
+    readback_log_level: Optional[str] = "info",
 ) -> tuple[list, list]:   # (results, skipped_messages)
     """
     Stage 1–3: enumerate algorithms, sweep all cells, return SweepResults.
@@ -1018,6 +1215,7 @@ def run_tuning(
                     proof_mode=proof_mode,
                     skip_knobs=skip_knobs,
                     confirmation_seed=confirmation_seed,
+                    readback_log_level=readback_log_level,
                 )
                 done += 1
                 result = sweep_cell(spec)
@@ -1102,6 +1300,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="In --proof-mode, skip knob attribution (algorithm-only).")
     p.add_argument("--seed", type=int, default=0,
                    help="Recorded seed for balanced paired order.")
+    p.add_argument("--readback-level", default="info",
+                   choices=["off", "info", "debug"],
+                   help=("Score-map readback (ROADMAP A1): parse which "
+                         "component/algorithm UCC selected per arm. 'info' "
+                         "records the component; 'debug' additionally records "
+                         "the algorithm via the init-function symbol; 'off' "
+                         "disables readback."))
     p.add_argument("--launcher", default="mpirun -np {team_size}",
                    help=("Launcher prefix with exactly one rank option. Its integer "
                          "value is rebound per cell; {team_size} is recommended."))
@@ -1115,6 +1320,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--force-asymmetric", action="store_true",
                    help=("Include asymmetric/*v/rooted collectives in the sweep "
                          "(default: skip them as tuning is dubious)."))
+    p.add_argument("--dry-run", action="store_true",
+                   help=("Print the planned invocation count and estimated "
+                         "wall-clock (ROADMAP A2), then exit without launching "
+                         "any perftest measurement."))
+    p.add_argument("--launch-overhead", type=float, default=3.0,
+                   help=("Estimated per-launch wall-clock seconds (mpirun/srun "
+                         "launch + perftest init) used for the --dry-run "
+                         "wall-clock estimate."))
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -1195,6 +1408,14 @@ def main(argv=None) -> int:
         len(sizes),
     )
 
+    if args.dry_run:
+        model = compute_cost_model(
+            pairs, alg_map, mem_types, team_sizes, sizes, args.n_reps,
+            skip_asymmetric=not args.force_asymmetric,
+        )
+        print_cost_model(model, args.launch_overhead)
+        return 0
+
     # Stages 1–3: sweep (alg_map passed to avoid duplicate ucc_info call)
     results, skipped = run_tuning(
         component_collective_pairs=pairs,
@@ -1223,6 +1444,7 @@ def main(argv=None) -> int:
         proof_mode=args.proof_mode,
         skip_knobs=args.no_knobs,
         confirmation_seed=args.seed,
+        readback_log_level=None if args.readback_level == "off" else args.readback_level,
     )
 
     # Stage 4: validate
@@ -1264,11 +1486,14 @@ def main(argv=None) -> int:
         output_dir, results, validation_points, fingerprint, skipped
     )
     paths["summary"] = summary_path
+    findings_paths = write_findings(output_dir, results, fingerprint)
+    paths.update(findings_paths)
 
     logger.info("Done.")
     logger.info("  Config  : %s", paths["conf"])
     logger.info("  Shell   : %s", paths["sh"])
     logger.info("  Summary : %s", paths["summary"])
+    logger.info("  Findings: %s", paths["md"])
     logger.info("")
     logger.info(
         "PROVISIONAL ONLY: no accepted config was written because this local "

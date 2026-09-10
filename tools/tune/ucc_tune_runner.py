@@ -160,6 +160,15 @@ class RunSpec:
     # CV threshold above which a variance warning is raised.
     cv_warn_threshold: float = 0.10
 
+    # Score-map readback (ROADMAP A1).  When non-None, _run_once injects
+    # UCC_LOG_LEVEL=<level> (unless extra_env already sets it) and parses the
+    # team-create score map to record which component/algorithm UCC selected.
+    # "info" records the component; "debug" additionally records the algorithm
+    # via the init-function symbol.  alg_names maps those symbols back to the
+    # algorithm names from ucc_info -A.
+    readback_log_level: Optional[str] = "info"
+    alg_names: list = dataclasses.field(default_factory=list)
+
 
 @dataclasses.dataclass
 class SingleRunSample:
@@ -169,6 +178,11 @@ class SingleRunSample:
     avg_us: float
     min_us: float
     max_us: float
+
+    # Score-map readback (ROADMAP A1): the component/algorithm UCC actually
+    # selected for this arm, parsed from the team-create score-map log.
+    selected_component: Optional[str] = None
+    selected_alg: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -187,6 +201,10 @@ class RunResult:
     failed_count: int           # reps that failed to run or parse
 
     variance_warning: bool      # True if cv > spec.cv_warn_threshold
+
+    # Mode across successful reps of the score-map readback (ROADMAP A1).
+    selected_component: Optional[str] = None
+    selected_alg: Optional[str] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -233,6 +251,133 @@ def _parse_output(stdout: str, collective: str) -> Optional[SingleRunSample]:
         )
     logger.debug("No data line found in perftest output:\n%s", stdout[:1000])
     return None
+
+
+# ---------------------------------------------------------------------------
+# Score-map readback (ROADMAP A1)
+# ---------------------------------------------------------------------------
+
+# UCC prints the resolved score map once at team create (ucc_team.c:471) when
+# UCC_LOG_LEVEL >= info.  Every line carries the standard UCC log prefix:
+#
+#   [ts] [host:pid:tid] ucc_coll_score_map.c:225  UCC  INFO  Allreduce:
+#   [ts] [host:pid:tid] ucc_coll_score_map.c:225  UCC  INFO  \tHost: {0..4095}:TL_UCP:10 {4K..inf}:TL_UCP:10
+#
+# At debug level each entry also carries the selected init function's symbol
+# (get_fn_name in ucc_coll_score_map.c, via dladdr):
+#   {0..4095}:TL_UCP:10=ucc_tl_ucp_allreduce_knomial_init
+#
+# Collective names come from ucc_coll_type_str() (capitalised "Allreduce",
+# "Reduce_scatter"); memory types from ucc_mem_type_str() ("Host", "Cuda",
+# "CudaManaged", "Rocm"); the component is log_component.name ("TL_UCP",
+# "CL_BASIC").  Ranges use ucs_memunits_range_str() with a ".." separator and
+# uppercase memunits suffixes ("0..4095", "4K..inf", "0..inf").
+
+# UCC log prefix: "[<ts>] [<host>:<pid>:<tid>] <file>:<line>  UCC  <LEVEL>  "
+_LOG_PREFIX_RE = re.compile(r"^\[[^\]]*\]\s+\[[^\]]*\]\s+\S+:\d+\s+UCC\s+\S+\s+")
+
+_COLL_SCORE_MAP_START_RE = re.compile(r"^=+\s*COLL_SCORE_MAP\b")
+_COLL_SCORE_MAP_END_RE = re.compile(r"^=+\s*$")
+_SCORE_MAP_COLL_RE = re.compile(r"^([A-Za-z_]+):\s*$")
+_SCORE_MAP_MEM_RE = re.compile(r"^\s*([A-Za-z_]+):\s*(.*)$")
+_SCORE_MAP_ENTRY_RE = re.compile(r"\{([^}]+)\}:([^:]+):([^:=\s]+)(?:=(\S+))?")
+
+_MEMUNITS_SUFFIX = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
+
+_MEM_TYPE_LOG_TO_PERFTEST = {
+    "host": "host",
+    "cuda": "cuda",
+    "cudamanaged": "cuda-mng",
+    "rocm": "rocm",
+    "rocmmanaged": "rocm-mng",
+}
+
+
+def _strip_log_prefix(line: str) -> str:
+    """Strip the UCC log prefix, leaving the bare message (idempotent)."""
+    return _LOG_PREFIX_RE.sub("", line, count=1)
+
+
+def _normalize_component(name: str) -> str:
+    """Normalize a UCC log_component.name ("TL_UCP") to the tuner spelling ("tl/ucp")."""
+    return name.strip().lower().replace("_", "/")
+
+
+def _parse_memunits(token: str) -> float:
+    """Parse a UCC/UCX memunits token ("inf", "4K", "16", "1M") to a byte count."""
+    token = token.strip().lower()
+    if token == "inf":
+        return math.inf
+    m = re.fullmatch(r"(\d+)([kmgt]?)", token)
+    if m is None:
+        raise ValueError(f"unparseable memunits token {token!r}")
+    return int(m.group(1)) * _MEMUNITS_SUFFIX[m.group(2)]
+
+
+def parse_score_map(
+    output: str,
+    collective: str,
+    mem_type: str,
+    size_bytes: int,
+) -> Optional[tuple[str, Optional[str]]]:
+    """Return (component, fn_name) for the score-map entry covering size_bytes.
+
+    ``collective`` and ``mem_type`` use the perftest spelling ("allreduce",
+    "cuda-mng"); ``size_bytes`` is the actual measured byte size.  Returns None
+    when the score map is absent or no entry covers the size.
+    """
+    in_block = False
+    coll: Optional[str] = None
+    for raw_line in output.splitlines():
+        line = _strip_log_prefix(raw_line)
+        if not in_block:
+            if _COLL_SCORE_MAP_START_RE.match(line):
+                in_block = True
+            continue
+        if _COLL_SCORE_MAP_END_RE.match(line):
+            break
+        m = _SCORE_MAP_COLL_RE.match(line)
+        if m:
+            coll = m.group(1).lower()
+            continue
+        m = _SCORE_MAP_MEM_RE.match(line)
+        if m is None:
+            continue
+        mem_token = m.group(1).strip().lower()
+        mem = _MEM_TYPE_LOG_TO_PERFTEST.get(mem_token, mem_token)
+        if coll != collective or mem != mem_type:
+            continue
+        for entry in m.group(2).split():
+            em = _SCORE_MAP_ENTRY_RE.match(entry)
+            if em is None:
+                continue
+            parts = em.group(1).split("..")
+            if len(parts) == 1:
+                start = end = _parse_memunits(parts[0])
+            else:
+                start, end = _parse_memunits(parts[0]), _parse_memunits(parts[1])
+            if start <= size_bytes <= end:
+                return _normalize_component(em.group(2)), em.group(4)
+    return None
+
+
+def _alg_name_from_fn(fn_name: Optional[str], alg_names: list) -> Optional[str]:
+    """Map a UCC init-function symbol to a known algorithm name, or None.
+
+    The score-map debug print appends the init function's symbol, e.g.
+    "ucc_tl_ucp_allreduce_sra_knomial_init".  The algorithm name is the longest
+    known name appearing as an underscore-delimited token sequence in the
+    symbol, so "sra_knomial" is preferred over "knomial".  A "?" symbol (dladdr
+    failure) or an unknown symbol maps to None.
+    """
+    if not fn_name or not alg_names:
+        return None
+    matches = [name for name in alg_names
+               if (f"_{name}_" in fn_name
+                   or fn_name.endswith(f"_{name}_init")
+                   or fn_name.endswith(f"_{name}_start")
+                   or fn_name == name)]
+    return max(matches, key=len) if matches else None
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +428,9 @@ def _run_once(spec: RunSpec) -> Optional[SingleRunSample]:
             f"{spec.requested_team_size}, bound {spec.executed_team_size}")
     env = os.environ.copy()
     env.update(spec.extra_env)
+    if spec.readback_log_level is not None:
+        # extra_env wins if the caller pinned UCC_LOG_LEVEL explicitly.
+        env.setdefault("UCC_LOG_LEVEL", spec.readback_log_level)
 
     cmd = list(spec.mpi_launcher) + _build_cmd(spec)
     logger.debug("cmd: %s", " ".join(cmd))
@@ -317,6 +465,17 @@ def _run_once(spec: RunSpec) -> Optional[SingleRunSample]:
     sample = _parse_output(proc.stdout, spec.collective)
     if sample is None:
         logger.warning("Could not parse perftest output:\n%s", proc.stdout[:500])
+        return sample
+    if spec.readback_log_level is not None:
+        hit = parse_score_map(
+            proc.stderr + "\n" + proc.stdout,
+            spec.collective, spec.mem_type, sample.size_bytes,
+        )
+        if hit is not None:
+            component, fn_name = hit
+            sample.selected_component = component
+            if fn_name:
+                sample.selected_alg = _alg_name_from_fn(fn_name, spec.alg_names)
     return sample
 
 
@@ -343,6 +502,17 @@ def _tukey_clean(values: list, k: float) -> tuple[list, int]:
             dropped, len(values), iqr, lo, hi,
         )
     return clean, dropped
+
+
+def _mode(values) -> Optional[str]:
+    """Most common non-None value, or None when all values are None/empty."""
+    counts: dict = {}
+    for value in values:
+        if value is not None:
+            counts[value] = counts.get(value, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=counts.get)
 
 
 def measure(spec: RunSpec) -> RunResult:
@@ -404,6 +574,8 @@ def measure(spec: RunSpec) -> RunResult:
         dropped_count=dropped,
         failed_count=failed,
         variance_warning=cv > spec.cv_warn_threshold,
+        selected_component=_mode(s.selected_component for s in samples),
+        selected_alg=_mode(s.selected_alg for s in samples),
     )
 
     if result.variance_warning:

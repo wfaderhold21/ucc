@@ -9,3 +9,6 @@ ucc_tuned_env.sh
 fingerprint.json
 results.json
 knob_conflicts.txt
+findings.json
+findings.md
+tuning_summary.txt

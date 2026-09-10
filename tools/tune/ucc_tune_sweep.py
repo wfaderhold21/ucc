@@ -69,6 +69,7 @@ class SweepSpec:
     proof_mode: bool = False
     skip_knobs: bool = False
     timeout_s: int = 120
+    readback_log_level: Optional[str] = "info"
 
     def __post_init__(self) -> None:
         if self.executed_team_size is None:
@@ -102,6 +103,13 @@ class SizeDecision:
     actual_size_bytes: Optional[int] = None
     source: str = "screening"
     knob_hypotheses: list = dataclasses.field(default_factory=list)
+
+    # Score-map readback (ROADMAP A1): what UCC's default arm actually
+    # selected, and the measurement CV of the winning/default arms (A3).
+    default_selected_alg: Optional[str] = None
+    default_selected_component: Optional[str] = None
+    winner_cv: Optional[float] = None
+    default_cv: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.actual_size_bytes is None:
@@ -203,6 +211,8 @@ def _run_spec_for(spec: SweepSpec, size_bytes: int, extra_env: dict) -> RunSpec:
         requested_team_size=spec.team_size,
         executed_team_size=spec.executed_team_size,
         timeout_s=spec.timeout_s,
+        readback_log_level=spec.readback_log_level,
+        alg_names=[alg.name for alg in spec.alg_list],
     )
 
 
@@ -385,10 +395,20 @@ def _sweep_cell_screening(spec: SweepSpec) -> SweepResult:
             actual_size, should_override, winner_name, winner.id,
             winner_result.median_us, default_us, margin, {}, policy, None,
             actual_size, "screening-margin",
+            default_selected_alg=(
+                default_result.selected_alg if default_result else None),
+            default_selected_component=(
+                default_result.selected_component if default_result else None),
+            winner_cv=winner_result.cv,
+            default_cv=default_result.cv if default_result else None,
         ))
         for name, result in alg_results.items():
             if result.variance_warning:
                 warnings.append(f"High CV ({result.cv * 100:.1f}%) for {name} at {_fmt_bytes(actual_size)}")
+            if result.selected_alg and result.selected_alg != name:
+                warnings.append(
+                    f"readback mismatch at {_fmt_bytes(actual_size)}: "
+                    f"forced @{name} but UCC selected {result.selected_alg}")
 
     ranges = coalesce_ranges(decisions, spec.msg_sizes_bytes,
                              spec.boundary_resolution_bytes)
@@ -456,10 +476,20 @@ def _sweep_cell_proof(spec: SweepSpec) -> SweepResult:
             actual_size, policy == Decision.WIN, winner_name, winner.id,
             winner_result.median_us, default_us, margin, {}, policy, evidence,
             actual_size, source,
+            default_selected_alg=(
+                default_result.selected_alg if default_result else None),
+            default_selected_component=(
+                default_result.selected_component if default_result else None),
+            winner_cv=winner_result.cv,
+            default_cv=default_result.cv if default_result else None,
         ))
         for name, result in alg_results.items():
             if result.variance_warning:
                 warnings.append(f"High CV ({result.cv * 100:.1f}%) for {name} at {_fmt_bytes(actual_size)}")
+            if result.selected_alg and result.selected_alg != name:
+                warnings.append(
+                    f"readback mismatch at {_fmt_bytes(actual_size)}: "
+                    f"forced @{name} but UCC selected {result.selected_alg}")
 
     def confirm_boundary(size: int, candidate: str, candidate_id: int) -> SizeDecision:
         evidence = _paired_compare(

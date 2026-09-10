@@ -8,16 +8,17 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from ucc_offline_tune import (
-    ValidationPoint, _build_arg_parser, _collect_knob_overrides,
-    _collect_tune_tokens, _results_to_json, _validation_probe_sizes,
-    _validation_covers_results, emit_conf, trim_failed_ranges, validate,
-    validate_with_trimming, run_tuning, _compute_cell_budget,
+    ValidationPoint, _build_arg_parser, _build_findings, _collect_knob_overrides,
+    _collect_tune_tokens, _fmt_duration, _results_to_json,
+    _validation_probe_sizes, _validation_covers_results, compute_cost_model,
+    emit_conf, print_cost_model, trim_failed_ranges, validate,
+    validate_with_trimming, run_tuning, write_findings, _compute_cell_budget,
 )
 from ucc_tune_fingerprint import Fingerprint
 from ucc_tune_runner import PairedRunResult
 from ucc_tune_space import AlgInfo
-from ucc_tune_stats import ArmSample, classify_evidence
-from ucc_tune_sweep import SweepResult, SweepSpec, TuneRange
+from ucc_tune_stats import ArmSample, Decision, classify_evidence
+from ucc_tune_sweep import SizeDecision, SweepResult, SweepSpec, TuneRange
 
 
 def fingerprint():
@@ -323,12 +324,14 @@ class TestCliSafety(unittest.TestCase):
             main(["--launcher", "jsrun -n 8"])
         fingerprint.assert_not_called()
 
+    @patch("ucc_offline_tune.write_findings")
     @patch("ucc_offline_tune.write_summary")
     @patch("ucc_offline_tune.emit_conf")
     @patch("ucc_offline_tune.run_tuning")
     @patch("ucc_offline_tune.run_ucc_info_algs")
     @patch("ucc_offline_tune.collect_fingerprint")
-    def test_successful_run_returns_zero(self, collect, algs, run, emit, summary):
+    def test_successful_run_returns_zero(self, collect, algs, run, emit,
+                                         summary, findings):
         from ucc_offline_tune import main
         collect.return_value = fingerprint()
         algs.return_value = {"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}}
@@ -336,6 +339,7 @@ class TestCliSafety(unittest.TestCase):
         emit.return_value = {"conf": Path("/tmp/c"), "sh": Path("/tmp/s"),
                              "fingerprint": Path("/tmp/f"), "results": Path("/tmp/r")}
         summary.return_value = Path("/tmp/summary")
+        findings.return_value = {"json": Path("/tmp/fj"), "md": Path("/tmp/fm")}
         self.assertEqual(
             main(["--component", "tl/ucp", "--collective", "allreduce",
                   "--no-validate"]),
@@ -402,6 +406,112 @@ class TestConfirmationBudget(unittest.TestCase):
             budgets.append(budget)
             used += budget
         self.assertEqual(budgets, [12, 12, 12, 12])
+
+
+class TestCostModel(unittest.TestCase):
+    ALG_MAP = {
+        "tl/ucp": {
+            "allreduce": [AlgInfo(0, "knomial", "a"), AlgInfo(1, "sra_knomial", "b"),
+                          AlgInfo(2, "ring", "c"), AlgInfo(3, "dbt", "d"),
+                          AlgInfo(4, "sliding_window", "e")],
+            "bcast": [AlgInfo(0, "knomial", "a")],
+        },
+    }
+
+    def test_screening_formula(self):
+        # 2 collectives x 2 mem_types x 2 team_sizes = 8 cells.
+        # allreduce: 5 algs -> 6 arms; bcast: 1 alg -> 2 arms.
+        # sizes = [8, 16, 32] -> 3 sizes; n_reps = 7.
+        model = compute_cost_model(
+            [("tl/ucp", "allreduce"), ("tl/ucp", "bcast")],
+            self.ALG_MAP, ["host", "cuda"], [8, 64], [8, 16, 32], 7,
+            skip_asymmetric=False,
+        )
+        # allreduce cells: 4 cells x 3 sizes x 6 arms x 7 = 504
+        # bcast cells:     4 cells x 3 sizes x 2 arms x 7 = 168
+        self.assertEqual(model["total_invocations"], 504 + 168)
+        self.assertEqual(model["cells"], 8)
+        self.assertEqual(model["sizes"], 3)
+
+    def test_asymmetric_collectives_skipped(self):
+        model = compute_cost_model(
+            [("tl/ucp", "allreduce"), ("tl/ucp", "bcast")],
+            self.ALG_MAP, ["host"], [8], [8, 16], 3,
+            skip_asymmetric=True,
+        )
+        # bcast is asymmetric (rooted) and skipped by default.
+        self.assertEqual(model["cells"], 1)
+        self.assertEqual(model["skipped_cells"], 1)
+        # allreduce: 1 cell x 2 sizes x 6 arms x 3 = 36
+        self.assertEqual(model["total_invocations"], 36)
+
+    def test_fmt_duration(self):
+        self.assertEqual(_fmt_duration(45), "45s")
+        self.assertEqual(_fmt_duration(90), "1m 30s")
+        self.assertEqual(_fmt_duration(3661), "1h 1m 1s")
+
+    def test_print_cost_model_mentions_total(self):
+        import contextlib
+        import io
+        model = compute_cost_model(
+            [("tl/ucp", "allreduce")], self.ALG_MAP, ["host"], [8], [8, 16], 3,
+            skip_asymmetric=False,
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_cost_model(model, 2.0)
+        self.assertIn("total invocations", buf.getvalue())
+        self.assertIn("est. wall-clock", buf.getvalue())
+
+
+class TestFindings(unittest.TestCase):
+    def _decision(self, size, margin, alg="sra_knomial", default_alg="knomial",
+                  cv=0.03):
+        return SizeDecision(
+            size_bytes=size, should_override=True, winner_name=alg, winner_id=1,
+            winner_median_us=8.0, default_median_us=10.0, margin=margin,
+            knob_overrides={}, policy=Decision.WIN, evidence=None,
+            actual_size_bytes=size, source="screening-margin",
+            default_selected_alg=default_alg,
+            default_selected_component="tl/ucp",
+            winner_cv=cv,
+        )
+
+    def _result(self, ranges):
+        spec = SweepSpec(
+            component="tl/ucp", collective="allreduce", mem_type="host",
+            team_size=8, msg_sizes_bytes=[4096, 8192], alg_list=[],
+        )
+        return SweepResult(spec, [], ranges, [])
+
+    def test_ranked_by_speedup(self):
+        r1 = TuneRange(4096, 4096, "sra_knomial", 1, {},
+                       (self._decision(4096, 0.12),))
+        r2 = TuneRange(8192, 8192, "knomial", 0, {},
+                       (self._decision(8192, 0.20),))
+        leads = _build_findings([self._result([r1, r2])])
+        self.assertEqual(len(leads), 2)
+        self.assertEqual(leads[0]["winning_algorithm"], "knomial")
+        self.assertAlmostEqual(leads[0]["speedup"], 0.20)
+        self.assertEqual(leads[0]["default_algorithm"], "knomial")
+        self.assertEqual(leads[1]["winning_algorithm"], "sra_knomial")
+        self.assertEqual(leads[1]["rank"], 2)
+
+    def test_empty_results(self):
+        self.assertEqual(_build_findings([]), [])
+        self.assertEqual(_build_findings([self._result([])]), [])
+
+    def test_write_findings_files(self):
+        r = TuneRange(4096, 8192, "sra_knomial", 1, {},
+                      (self._decision(4096, 0.12), self._decision(8192, 0.15)))
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = write_findings(Path(tmp), [self._result([r])], fingerprint())
+            self.assertTrue(paths["json"].exists())
+            self.assertTrue(paths["md"].exists())
+            data = json.loads(paths["json"].read_text())
+            self.assertEqual(data["leads"][0]["winning_algorithm"], "sra_knomial")
+            self.assertEqual(data["status"], "provisional-leads-not-for-deployment")
+            self.assertIn("human triage", paths["md"].read_text())
 
 
 if __name__ == "__main__":
