@@ -23,6 +23,7 @@
 #include "fanout/fanout.h"
 #include "fanin/fanin.h"
 #include "scatterv/scatterv.h"
+#include "scatter/scatter.h"
 
 const char *ucc_tl_ucp_alltoall_onesided_names[] = {
     [UCC_TL_UCP_ALLTOALL_ONESIDED_PUT]   = "put",
@@ -455,6 +456,8 @@ __attribute__((constructor)) static void tl_ucp_iface_init(void)
         ucc_tl_ucp_reduce_scatter_algs;
     ucc_tl_ucp.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_REDUCE_SCATTERV)] =
         ucc_tl_ucp_reduce_scatterv_algs;
+    ucc_tl_ucp.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_SCATTER)] =
+        ucc_tl_ucp_scatter_algs;
     ucc_tl_ucp.super.alg_info[ucc_ilog2(UCC_COLL_TYPE_SCATTERV)] =
         ucc_tl_ucp_scatterv_algs;
 

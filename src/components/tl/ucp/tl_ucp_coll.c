@@ -23,6 +23,7 @@
 #include "fanin/fanin.h"
 #include "fanout/fanout.h"
 #include "scatterv/scatterv.h"
+#include "scatter/scatter.h"
 
 const ucc_tl_ucp_default_alg_desc_t
     ucc_tl_ucp_default_alg_descs[UCC_TL_UCP_N_DEFAULT_ALG_SELECT_STR] = {
@@ -147,6 +148,9 @@ ucc_status_t ucc_tl_ucp_coll_init(ucc_base_coll_args_t *coll_args,
     case UCC_COLL_TYPE_FANOUT:
         status = ucc_tl_ucp_fanout_init(task);
         break;
+    case UCC_COLL_TYPE_SCATTER:
+        status = ucc_tl_ucp_scatter_init(task);
+        break;
     case UCC_COLL_TYPE_SCATTERV:
         status = ucc_tl_ucp_scatterv_init(task);
         break;
@@ -192,10 +196,12 @@ static inline int alg_id_from_str(ucc_coll_type_t coll_type, const char *str)
         return ucc_tl_ucp_reduce_scatter_alg_from_str(str);
     case UCC_COLL_TYPE_REDUCE_SCATTERV:
         return ucc_tl_ucp_reduce_scatterv_alg_from_str(str);
-    case UCC_COLL_TYPE_FANIN:
-        return ucc_tl_ucp_fanin_alg_from_str(str);
     case UCC_COLL_TYPE_FANOUT:
         return ucc_tl_ucp_fanout_alg_from_str(str);
+    case UCC_COLL_TYPE_SCATTER:
+        return ucc_tl_ucp_scatter_alg_from_str(str);
+    case UCC_COLL_TYPE_FANIN:
+        return ucc_tl_ucp_fanin_alg_from_str(str);
     default:
         break;
     }
@@ -384,6 +390,19 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
             break;
         case UCC_TL_UCP_GATHER_ALG_ONESIDED:
             *init = ucc_tl_ucp_gather_onesided_init;
+            break;
+        default:
+            status = UCC_ERR_INVALID_PARAM;
+            break;
+        };
+        break;
+    case UCC_COLL_TYPE_SCATTER:
+        switch (alg_id) {
+        case UCC_TL_UCP_SCATTER_ALG_KNOMIAL:
+            *init = ucc_tl_ucp_scatter_knomial_init;
+            break;
+        case UCC_TL_UCP_SCATTER_ALG_ONESIDED:
+            *init = ucc_tl_ucp_scatter_onesided_init;
             break;
         default:
             status = UCC_ERR_INVALID_PARAM;

@@ -277,6 +277,7 @@ extern ucc_config_field_t ucc_tl_ucp_lib_config_table[];
      UCC_COLL_TYPE_REDUCE |                                                    \
      UCC_COLL_TYPE_REDUCE_SCATTER |                                            \
      UCC_COLL_TYPE_REDUCE_SCATTERV |                                           \
+     UCC_COLL_TYPE_SCATTER |                                                   \
      UCC_COLL_TYPE_SCATTERV)
 
 #define UCC_TL_UCP_TEAM_LIB(_team)                                             \

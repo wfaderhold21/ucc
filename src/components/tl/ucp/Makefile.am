@@ -105,7 +105,9 @@ reduce_scatterv =                          \
 
 scatter =                     \
 	scatter/scatter.h         \
-	scatter/scatter_knomial.c
+	scatter/scatter.c         \
+	scatter/scatter_knomial.c \
+	scatter/scatter_onesided.c
 
 scatterv =                     \
 	scatterv/scatterv.h        \
