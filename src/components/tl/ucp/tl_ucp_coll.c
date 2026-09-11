@@ -178,6 +178,8 @@ static inline int alg_id_from_str(ucc_coll_type_t coll_type, const char *str)
         return ucc_tl_ucp_alltoall_alg_from_str(str);
     case UCC_COLL_TYPE_ALLTOALLV:
         return ucc_tl_ucp_alltoallv_alg_from_str(str);
+    case UCC_COLL_TYPE_BARRIER:
+        return ucc_tl_ucp_barrier_alg_from_str(str);
     case UCC_COLL_TYPE_BCAST:
         return ucc_tl_ucp_bcast_alg_from_str(str);
     case UCC_COLL_TYPE_REDUCE:
@@ -208,6 +210,19 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
     }
 
     switch (coll_type) {
+    case UCC_COLL_TYPE_BARRIER:
+        switch (alg_id) {
+        case UCC_TL_UCP_BARRIER_ALG_KNOMIAL:
+            *init = ucc_tl_ucp_barrier_knomial_init;
+            break;
+        case UCC_TL_UCP_BARRIER_ALG_ONESIDED:
+            *init = ucc_tl_ucp_barrier_onesided_init;
+            break;
+        default:
+            status = UCC_ERR_INVALID_PARAM;
+            break;
+        };
+        break;
     case UCC_COLL_TYPE_ALLGATHER:
         switch (alg_id) {
         case UCC_TL_UCP_ALLGATHER_ALG_KNOMIAL:

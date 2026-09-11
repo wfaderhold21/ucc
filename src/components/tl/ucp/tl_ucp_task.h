@@ -240,6 +240,10 @@ typedef struct ucc_tl_ucp_task {
             long                           expected;
             ucc_tl_ucp_onesided_window_t   window;
         } fanout_onesided;
+        struct {
+            ucc_rank_t                     rounds;
+            ucc_rank_t                     round;
+        } barrier_onesided;
         char                        plugin_data[UCC_TL_UCP_TASK_PLUGIN_MAX_DATA];
     };
     uint32_t flush_posted;
