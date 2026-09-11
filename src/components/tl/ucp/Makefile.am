@@ -62,13 +62,15 @@ bcast =                       \
 	bcast/bcast_sag_knomial.c \
 	bcast/bcast_dbt.c
 
-fanin =           \
-	fanin/fanin.h \
-	fanin/fanin.c
+fanin =                    \
+	fanin/fanin.h            \
+	fanin/fanin.c            \
+	fanin/fanin_onesided.c
 
-fanout =            \
-	fanout/fanout.h \
-	fanout/fanout.c
+fanout =                     \
+	fanout/fanout.h            \
+	fanout/fanout.c            \
+	fanout/fanout_onesided.c
 
 gather =                    \
 	gather/gather.h         \

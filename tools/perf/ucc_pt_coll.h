@@ -133,6 +133,22 @@ public:
     void free_args(ucc_pt_test_args_t &args) override;
 };
 
+class ucc_pt_coll_fanin: public ucc_pt_coll {
+public:
+    ucc_pt_coll_fanin(ucc_pt_comm *communicator,
+                      ucc_pt_generator_base *generator);
+    ucc_status_t init_args(ucc_pt_test_args_t &args) override;
+    void free_args(ucc_pt_test_args_t &args) override;
+};
+
+class ucc_pt_coll_fanout: public ucc_pt_coll {
+public:
+    ucc_pt_coll_fanout(ucc_pt_comm *communicator,
+                       ucc_pt_generator_base *generator);
+    ucc_status_t init_args(ucc_pt_test_args_t &args) override;
+    void free_args(ucc_pt_test_args_t &args) override;
+};
+
 class ucc_pt_coll_bcast: public ucc_pt_coll {
 public:
     ucc_pt_coll_bcast(ucc_datatype_t dt, ucc_memory_type mt, int root_shift,

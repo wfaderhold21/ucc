@@ -186,6 +186,10 @@ static inline int alg_id_from_str(ucc_coll_type_t coll_type, const char *str)
         return ucc_tl_ucp_reduce_scatter_alg_from_str(str);
     case UCC_COLL_TYPE_REDUCE_SCATTERV:
         return ucc_tl_ucp_reduce_scatterv_alg_from_str(str);
+    case UCC_COLL_TYPE_FANIN:
+        return ucc_tl_ucp_fanin_alg_from_str(str);
+    case UCC_COLL_TYPE_FANOUT:
+        return ucc_tl_ucp_fanout_alg_from_str(str);
     default:
         break;
     }
@@ -348,6 +352,32 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
         switch (alg_id) {
         case UCC_TL_UCP_REDUCE_SCATTERV_ALG_RING:
             *init = ucc_tl_ucp_reduce_scatterv_ring_init;
+            break;
+        default:
+            status = UCC_ERR_INVALID_PARAM;
+            break;
+        };
+        break;
+    case UCC_COLL_TYPE_FANIN:
+        switch (alg_id) {
+        case UCC_TL_UCP_FANIN_ALG_KNOMIAL:
+            *init = ucc_tl_ucp_fanin_knomial_init;
+            break;
+        case UCC_TL_UCP_FANIN_ALG_ONESIDED:
+            *init = ucc_tl_ucp_fanin_onesided_init;
+            break;
+        default:
+            status = UCC_ERR_INVALID_PARAM;
+            break;
+        };
+        break;
+    case UCC_COLL_TYPE_FANOUT:
+        switch (alg_id) {
+        case UCC_TL_UCP_FANOUT_ALG_KNOMIAL:
+            *init = ucc_tl_ucp_fanout_knomial_init;
+            break;
+        case UCC_TL_UCP_FANOUT_ALG_ONESIDED:
+            *init = ucc_tl_ucp_fanout_onesided_init;
             break;
         default:
             status = UCC_ERR_INVALID_PARAM;

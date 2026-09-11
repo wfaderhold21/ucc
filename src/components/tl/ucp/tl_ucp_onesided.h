@@ -36,16 +36,25 @@
  * Slot layout (UCC_TL_UCP_ONESIDED_N_SLOTS slots, slot 0 = first long of
  * the global work buffer):
  *   [0]              put-family sync: alltoallv, allgather-put, scatter,
- *                    gather, fanin, fanout, bcast-linear
- *   [1]              scratch sync: reduce family, gather-get, gatherv
- *   [2 .. 2+log2(N)) barrier rounds / tree levels
- *   [2+log2(N) .. ]  bcast knomial levels, allgather-rd levels
+ *                    gather, fanout, bcast-linear. Every rank's local slot 0
+ *                    grows by exactly 1 per round (fanout via the root's
+ *                    signal + self-signal), so the per-rank base stays in
+ *                    lockstep across interleaved rounds.
+ *   [1]              fanin. The root's local slot 1 grows by (size-1) per
+ *                    round and non-roots' never changes, so it must not share
+ *                    slot 0 with the put-family.
+ *   [2]              scratch sync: reduce family, gather-get, gatherv
+ *   [3 .. 3+log2(N)) barrier rounds / tree levels
+ *   [3+log2(N) .. ]  bcast knomial levels, allgather-rd levels
  */
 
 typedef enum {
     UCC_TL_UCP_ONESIDED_REQ_GWB        = UCC_BIT(0), /* needs global work buffer   */
     UCC_TL_UCP_ONESIDED_REQ_SRC_GLOBAL = UCC_BIT(1), /* needs global src memh      */
     UCC_TL_UCP_ONESIDED_REQ_DST_GLOBAL = UCC_BIT(2), /* needs global dst memh      */
+    UCC_TL_UCP_ONESIDED_REQ_NO_DATA    = UCC_BIT(3), /* pure-signal: no data buffers,
+                                                     * mem-mapped/predefined-dt
+                                                     * preconditions not required */
 } ucc_tl_ucp_onesided_req_t;
 
 /*

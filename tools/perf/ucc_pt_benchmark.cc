@@ -87,6 +87,12 @@ ucc_pt_benchmark::ucc_pt_benchmark(ucc_pt_benchmark_config cfg,
         coll = new ucc_pt_coll_bcast(cfg.dt, cfg.mt, cfg.root_shift,
                                      cfg.persistent, comm, generator);
         break;
+    case UCC_PT_OP_TYPE_FANIN:
+        coll = new ucc_pt_coll_fanin(comm, generator);
+        break;
+    case UCC_PT_OP_TYPE_FANOUT:
+        coll = new ucc_pt_coll_fanout(comm, generator);
+        break;
     case UCC_PT_OP_TYPE_GATHER:
         coll = new ucc_pt_coll_gather(cfg.dt, cfg.mt, cfg.inplace,
                                       cfg.persistent, cfg.root_shift, comm, generator);

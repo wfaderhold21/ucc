@@ -232,6 +232,14 @@ typedef struct ucc_tl_ucp_task {
             long                           expected;
             ucc_tl_ucp_onesided_window_t   window;
         } alltoallv_onesided;
+        struct {
+            long                           expected;
+            ucc_tl_ucp_onesided_window_t   window;
+        } fanin_onesided;
+        struct {
+            long                           expected;
+            ucc_tl_ucp_onesided_window_t   window;
+        } fanout_onesided;
         char                        plugin_data[UCC_TL_UCP_TASK_PLUGIN_MAX_DATA];
     };
     uint32_t flush_posted;

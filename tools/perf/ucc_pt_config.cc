@@ -52,6 +52,8 @@ const std::map<std::string, ucc_pt_op_type_t> ucc_pt_op_map = {
     {"alltoallv", UCC_PT_OP_TYPE_ALLTOALLV},
     {"barrier", UCC_PT_OP_TYPE_BARRIER},
     {"bcast", UCC_PT_OP_TYPE_BCAST},
+    {"fanin", UCC_PT_OP_TYPE_FANIN},
+    {"fanout", UCC_PT_OP_TYPE_FANOUT},
     {"gather", UCC_PT_OP_TYPE_GATHER},
     {"gatherv", UCC_PT_OP_TYPE_GATHERV},
     {"reduce", UCC_PT_OP_TYPE_REDUCE},

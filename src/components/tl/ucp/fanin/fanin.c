@@ -13,6 +13,10 @@ ucc_base_coll_alg_info_t
             {.id   = UCC_TL_UCP_FANIN_ALG_KNOMIAL,
              .name = "knomial",
              .desc = "fanin over knomial tree with arbitrary radix"},
+        [UCC_TL_UCP_FANIN_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_FANIN_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "one-sided fanin (warm-up, counter signal, no data)"},
         [UCC_TL_UCP_FANIN_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 
@@ -39,5 +43,18 @@ ucc_status_t ucc_tl_ucp_fanin_init(ucc_tl_ucp_task_t *task)
 
     CALC_KN_TREE_DIST(team_size, task->reduce_kn.radix,
                       task->reduce_kn.max_dist);
+    return status;
+}
+
+ucc_status_t ucc_tl_ucp_fanin_knomial_init(ucc_base_coll_args_t *coll_args,
+                                           ucc_base_team_t      *team,
+                                           ucc_coll_task_t     **task_h)
+{
+    ucc_tl_ucp_task_t *task;
+    ucc_status_t       status;
+
+    task   = ucc_tl_ucp_init_task(coll_args, team);
+    status = ucc_tl_ucp_fanin_init(task);
+    *task_h = &task->super;
     return status;
 }

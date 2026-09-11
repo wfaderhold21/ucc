@@ -85,6 +85,8 @@ gtest_SOURCES =                           \
 	core/test_utils.cc                    \
 	core/test_mem_map.cc                  \
 	coll/test_barrier.cc                  \
+	coll/test_fanin.cc                    \
+	coll/test_fanout.cc                   \
 	coll/test_alltoall.cc                 \
 	coll/test_alltoallv.cc                \
 	coll/test_allgather.cc                \

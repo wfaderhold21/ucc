@@ -48,16 +48,18 @@ ucc_status_t ucc_tl_ucp_onesided_check_args(ucc_base_coll_args_t *coll_args,
         tl_debug(UCC_TL_TEAM_LIB(team), "in-place is not supported");
         return UCC_ERR_NOT_SUPPORTED;
     }
-    if (!ucc_coll_args_is_predefined_dt(args, UCC_RANK_INVALID)) {
-        tl_debug(UCC_TL_TEAM_LIB(team),
-                 "user-defined datatype is not supported");
-        return UCC_ERR_NOT_SUPPORTED;
-    }
-    if (!(args->mask & UCC_COLL_ARGS_FIELD_FLAGS) ||
-        !(args->flags & UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS)) {
-        tl_debug(UCC_TL_TEAM_LIB(team),
-                 "non memory-mapped buffers are not supported");
-        return UCC_ERR_NOT_SUPPORTED;
+    if (!(reqs & UCC_TL_UCP_ONESIDED_REQ_NO_DATA)) {
+        if (!ucc_coll_args_is_predefined_dt(args, UCC_RANK_INVALID)) {
+            tl_debug(UCC_TL_TEAM_LIB(team),
+                     "user-defined datatype is not supported");
+            return UCC_ERR_NOT_SUPPORTED;
+        }
+        if (!(args->mask & UCC_COLL_ARGS_FIELD_FLAGS) ||
+            !(args->flags & UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS)) {
+            tl_debug(UCC_TL_TEAM_LIB(team),
+                     "non memory-mapped buffers are not supported");
+            return UCC_ERR_NOT_SUPPORTED;
+        }
     }
     if (reqs & UCC_TL_UCP_ONESIDED_REQ_GWB) {
         if (!(args->mask & UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER)) {
