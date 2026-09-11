@@ -81,6 +81,15 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
     self->seq_num         = 0;
     self->status          = UCC_INPROGRESS;
     self->tuning_str      = "";
+    /* The team block comes from ucs_class_malloc (not zeroed), and a
+     * previous team may have committed non-zero slot bases into the same
+     * block. Zero the bases so a freshly created team starts from a clean
+     * state (its work buffer is freshly registered on every context, so a
+     * fresh team must expect signals to start from 0, not from a reused
+     * block's stale base). */
+    for (i = 0; i < UCC_TL_UCP_ONESIDED_N_SLOTS; i++) {
+        self->onesided_slot_base[i] = 0;
+    }
     self->topo            = NULL;
     self->opt_radix       = UCC_UUNITS_AUTO_RADIX;
     self->opt_radix_host  = UCC_UUNITS_AUTO_RADIX;

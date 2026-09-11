@@ -121,6 +121,8 @@ sources =                 \
 	tl_ucp_dpu_offload.c  \
 	tl_ucp_copy.c         \
 	tl_ucp_sendrecv.c     \
+	tl_ucp_onesided.h     \
+	tl_ucp_onesided.c     \
 	$(allgather)          \
 	$(allgatherv)         \
 	$(alltoall)           \

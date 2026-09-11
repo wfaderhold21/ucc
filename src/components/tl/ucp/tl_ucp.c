@@ -110,8 +110,14 @@ ucc_config_field_t ucc_tl_ucp_lib_config_table[] = {
     {"ALLTOALL_ONESIDED_ALG", "auto",
      "Algorithm to be used with onesided Alltoall",
      ucc_offsetof(ucc_tl_ucp_lib_config_t, alltoall_onesided_alg),
-     UCC_CONFIG_TYPE_ENUM(ucc_tl_ucp_alltoall_onesided_names)},
+    UCC_CONFIG_TYPE_ENUM(ucc_tl_ucp_alltoall_onesided_names)},
 
+    {"ONESIDED_PERCENT_BW", "100",
+     "Shared percentage (1-100) of NIC bandwidth to use for congestion "
+     "avoidance in one-sided linear algorithms (alltoall, allgather, bcast, "
+     "scatter, gather, ...)",
+     ucc_offsetof(ucc_tl_ucp_lib_config_t, onesided_percent_bw),
+     UCC_CONFIG_TYPE_UINT},
     {"KN_RADIX", "0",
      "Radix of all algorithms based on knomial pattern. When set to a "
      "positive value it is used as a convenience parameter to set all "

@@ -31,6 +31,16 @@ typedef struct ucc_tl_ucp_allreduce_sw_host_allgather
 typedef struct ucc_tl_ucp_dpu_offload_buf_info
     ucc_tl_ucp_dpu_offload_buf_info_t;
 
+/*
+ * Pacing / flow-control window for one-sided linear algorithms: bounds the
+ * number of outstanding RMA ops while posting to every peer. Defined here
+ * (not in tl_ucp_onesided.h) because the task state embeds it by value.
+ */
+typedef struct ucc_tl_ucp_onesided_window {
+    uint32_t tokens;   /* max outstanding RMA ops */
+    int64_t  npolls;   /* progress polls before yielding back to the queue */
+} ucc_tl_ucp_onesided_window_t;
+
 enum ucc_tl_ucp_task_flags {
     /*indicates whether subset field of tl_ucp_task is set*/
     UCC_TL_UCP_TASK_FLAG_SUBSET = UCC_BIT(0),
@@ -216,15 +226,27 @@ typedef struct ucc_tl_ucp_task {
             int                     phase;
         } alltoall_bruck;
         struct {
-            uint32_t                tokens;
-            uint32_t                npolls;
+            ucc_tl_ucp_onesided_window_t window;
         } alltoall_onesided;
+        struct {
+            long                           expected;
+            ucc_tl_ucp_onesided_window_t   window;
+        } alltoallv_onesided;
         char                        plugin_data[UCC_TL_UCP_TASK_PLUGIN_MAX_DATA];
     };
     uint32_t flush_posted;
     uint32_t flush_completed;
 } ucc_tl_ucp_task_t;
 
+/*
+ * NOTE (I6): this reset relies on the tagged/onesided union aliasing —
+ * tagged.{send_posted, send_completed, recv_posted, recv_completed} occupy
+ * the same four words as onesided.{put_posted, put_completed,
+ * get_posted, get_completed}. Zeroing the tagged side therefore zeroes the
+ * one-sided counters. If fields are added to either side of the union, this
+ * aliasing MUST be preserved or this reset MUST be updated. flush_* counters
+ * live outside the union and are reset explicitly.
+ */
 static inline void ucc_tl_ucp_task_reset(ucc_tl_ucp_task_t *task,
                                          ucc_status_t status)
 {

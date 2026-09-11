@@ -14,6 +14,7 @@ ucc_pt_coll_alltoallv::ucc_pt_coll_alltoallv(ucc_datatype_t dt,
                                              ucc_memory_type mt,
                                              bool is_inplace,
                                              bool is_persistent,
+                                             ucc_pt_map_type_t map_type,
                                              ucc_pt_comm *communicator,
                                              ucc_pt_generator_base *generator)
                                              : ucc_pt_coll(communicator, generator)
@@ -42,19 +43,127 @@ ucc_pt_coll_alltoallv::ucc_pt_coll_alltoallv(ucc_datatype_t dt,
     }
 
     coll_args.mask                = UCC_COLL_ARGS_FIELD_FLAGS;
+    coll_args.flags               = 0;
     coll_args.coll_type           = UCC_COLL_TYPE_ALLTOALLV;
     coll_args.dst.info_v.datatype = dt;
     coll_args.dst.info_v.mem_type = mt;
     coll_args.dst.info_v.buffer   = dst_header->addr;
-    coll_args.flags               = UCC_COLL_ARGS_FLAG_CONTIG_SRC_BUFFER |
-                                    UCC_COLL_ARGS_FLAG_CONTIG_DST_BUFFER;
-    if (is_inplace) {
-        coll_args.flags |= UCC_COLL_ARGS_FLAG_IN_PLACE;
-    } else {
+
+    if (!is_inplace) {
         coll_args.src.info_v.buffer   = src_header->addr;
         coll_args.src.info_v.datatype = dt;
         coll_args.src.info_v.mem_type = mt;
+    }
 
+    if (map_type == UCC_PT_MAP_TYPE_LOCAL) {
+        ucc_context_h        ctx = comm->get_context();
+        ucc_mem_map_t        segments[1];
+        ucc_mem_map_params_t mem_map_params;
+        size_t               dst_memh_size, src_memh_size;
+
+        mem_map_params.n_segments = 1;
+        mem_map_params.segments   = segments;
+
+        mem_map_params.segments[0].address = dst_header->addr;
+        mem_map_params.segments[0].len     = dst_count_max * ucc_dt_size(dt);
+        UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                  &mem_map_params, &dst_memh_size, &dst_memh),
+                      exit, st);
+        coll_args.dst_memh.local_memh = dst_memh;
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH;
+
+        if (!is_inplace) {
+            mem_map_params.segments[0].address = src_header->addr;
+            mem_map_params.segments[0].len     = src_count_max * ucc_dt_size(dt);
+            UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                      &mem_map_params, &src_memh_size, &src_memh),
+                          exit, st);
+            coll_args.src_memh.local_memh = src_memh;
+            coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH;
+        }
+    } else if (map_type == UCC_PT_MAP_TYPE_GLOBAL) {
+        ucc_context_h        ctx = comm->get_context();
+        ucc_mem_map_t        segments[1];
+        ucc_mem_map_params_t mem_map_params;
+        uint64_t             dst_memh_size, src_memh_size;
+        uint64_t             dst_memh_size_max, src_memh_size_max;
+
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_FLAGS;
+        coll_args.flags |= UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS;
+        mem_map_params.n_segments = 1;
+        mem_map_params.segments   = segments;
+
+        mem_map_params.segments[0].address = dst_header->addr;
+        mem_map_params.segments[0].len     = dst_count_max * ucc_dt_size(dt);
+        UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                  &mem_map_params, &dst_memh_size, &dst_memh),
+                      exit, st);
+
+        // Synchronize memh size across all ranks to ensure consistent buffer allocation
+        comm->allreduce(&dst_memh_size, &dst_memh_size_max, 1, UCC_OP_MAX, UCC_DT_UINT64);
+
+        dst_memh_global = new ucc_mem_map_mem_h[comm->get_size()];
+        for (int i = 0; i < comm->get_size(); i++) {
+            dst_memh_global[i] = new char[dst_memh_size_max];
+            if (i == comm->get_rank()) {
+                memcpy(dst_memh_global[i], dst_memh, dst_memh_size);
+            }
+            comm->bcast(dst_memh_global[i], dst_memh_size_max, i);
+        }
+        for (int i = 0; i < comm->get_size(); i++) {
+            ucc_mem_map(ctx, UCC_MEM_MAP_MODE_IMPORT, &mem_map_params,
+                        &dst_memh_size_max, &dst_memh_global[i]);
+        }
+
+        coll_args.dst_memh.global_memh = dst_memh_global;
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH;
+        coll_args.flags |= UCC_COLL_ARGS_FLAG_DST_MEMH_GLOBAL;
+
+        if (!is_inplace) {
+            mem_map_params.segments[0].address = src_header->addr;
+            mem_map_params.segments[0].len     = src_count_max * ucc_dt_size(dt);
+            UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                      &mem_map_params, &src_memh_size, &src_memh),
+                          exit, st);
+            // Synchronize memh size across all ranks to ensure consistent buffer allocation
+            comm->allreduce(&src_memh_size, &src_memh_size_max, 1, UCC_OP_MAX,
+                            UCC_DT_UINT64);
+
+            src_memh_global = new ucc_mem_map_mem_h[comm->get_size()];
+            for (int i = 0; i < comm->get_size(); i++) {
+                src_memh_global[i] = new char[src_memh_size_max];
+                if (i == comm->get_rank()) {
+                    memcpy(src_memh_global[i], src_memh, src_memh_size);
+                }
+                comm->bcast(src_memh_global[i], src_memh_size_max, i);
+            }
+            for (int i = 0; i < comm->get_size(); i++) {
+                ucc_mem_map(ctx, UCC_MEM_MAP_MODE_IMPORT, &mem_map_params,
+                            &src_memh_size_max, &src_memh_global[i]);
+            }
+
+            coll_args.src_memh.global_memh = src_memh_global;
+            coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH;
+            coll_args.flags |= UCC_COLL_ARGS_FLAG_SRC_MEMH_GLOBAL;
+        }
+    } else if (map_type != UCC_PT_MAP_TYPE_NONE) {
+        std::cerr << "unsupported map type for perftest alltoallv" << std::endl;
+        goto exit;
+    }
+
+    coll_args.flags |= UCC_COLL_ARGS_FLAG_CONTIG_SRC_BUFFER |
+                       UCC_COLL_ARGS_FLAG_CONTIG_DST_BUFFER;
+    if (is_inplace) {
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_FLAGS;
+        coll_args.flags |= UCC_COLL_ARGS_FLAG_IN_PLACE;
+    }
+
+    // One-sided: publish puts to the peers' symmetric work buffers (I4).
+    // Only the mem-mapped (onesided-capable) configuration provides the
+    // work buffer; the plain two-sided pairwise/bruck paths do not use it.
+    if (map_type != UCC_PT_MAP_TYPE_NONE) {
+        coll_args.global_work_buffer = comm->get_onesided_buf();
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER;
     }
 
     if (is_persistent) {
@@ -109,6 +218,34 @@ float ucc_pt_coll_alltoallv::get_bw(float time_ms, int grsize,
 
 ucc_pt_coll_alltoallv::~ucc_pt_coll_alltoallv()
 {
+    if (src_memh) {
+        ucc_mem_unmap(&src_memh);
+    }
+
+    if (dst_memh) {
+        ucc_mem_unmap(&dst_memh);
+    }
+
+    if (dst_memh_global) {
+        for (int i = 0; i < comm->get_size(); i++) {
+            if (dst_memh_global[i]) {
+                ucc_mem_unmap(&dst_memh_global[i]);
+                delete[] static_cast<char*>(dst_memh_global[i]);
+            }
+        }
+        delete[] dst_memh_global;
+    }
+
+    if (src_memh_global) {
+        for (int i = 0; i < comm->get_size(); i++) {
+            if (src_memh_global[i]) {
+                ucc_mem_unmap(&src_memh_global[i]);
+                delete[] static_cast<char*>(src_memh_global[i]);
+            }
+        }
+        delete[] src_memh_global;
+    }
+
     if (src_header) {
         ucc_pt_free(src_header);
     }

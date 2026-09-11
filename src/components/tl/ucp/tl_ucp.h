@@ -34,8 +34,17 @@
 #define UCC_TL_UCP_PROFILE_REQUEST_FREE UCC_PROFILE_REQUEST_FREE
 
 #define MAX_NR_SEGMENTS 32
-#define ONESIDED_SYNC_SIZE 1
-#define ONESIDED_REDUCE_SIZE 4
+/*
+ * Number of monotonic one-sided signal slots in the collective's global
+ * work buffer. Slot 0 is the generic alltoall/gather/scatter/fanin slot;
+ * slots [1, 1+ceil(log2(N))) hold barrier dissemination / tree rounds;
+ * the rest are reserved for multi-phase trees. The buffer must be at
+ * least ONESIDED_SYNC_SIZE longs, so N_SLOTS bounds the largest team we
+ * can one-sided a dissemination barrier for.
+ */
+#define UCC_TL_UCP_ONESIDED_N_SLOTS  32
+#define ONESIDED_SYNC_SIZE           UCC_TL_UCP_ONESIDED_N_SLOTS
+#define ONESIDED_REDUCE_SIZE         4
 
 typedef struct ucc_tl_ucp_iface {
     ucc_tl_iface_t super;
@@ -90,6 +99,8 @@ typedef struct ucc_tl_ucp_lib_config {
     int                                use_reordering;
     uint32_t                           alltoall_onesided_percent_bw;
     ucc_tl_ucp_alltoall_onesided_alg_t alltoall_onesided_alg;
+    /* Shared pacing knob for all one-sided linear algorithms (default 100). */
+    uint32_t                           onesided_percent_bw;
 } ucc_tl_ucp_lib_config_t;
 
 typedef enum ucc_tl_ucp_local_copy_type {
@@ -179,6 +190,14 @@ typedef struct ucc_tl_ucp_team {
     ucc_rank_t                 opt_radix; /* generic opt radix */
     ucc_rank_t                 opt_radix_host; /* host specific opt radix */
     ucc_ring_pattern_t         *cuda_ring;
+    /*
+     * Monotonic one-sided signal-slot bases (I7): slot s is never reset to
+     * zero during a round; a task expecting k signals computes base+k at
+     * post time and commits base+k on completion. Zeroed by the class init
+     * (ucs_class_malloc does not zero the block, and a previous team may
+     * have committed a non-zero base into the same block).
+     */
+    long                       onesided_slot_base[UCC_TL_UCP_ONESIDED_N_SLOTS];
 } ucc_tl_ucp_team_t;
 UCC_CLASS_DECLARE(ucc_tl_ucp_team_t, ucc_base_context_t *,
                   const ucc_base_team_params_t *);

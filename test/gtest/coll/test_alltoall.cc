@@ -219,7 +219,7 @@ UCC_TEST_P(test_alltoall_0, single_onesided)
     const int            count          = std::get<4>(GetParam());
     UccTeam_h            reference_team = UccJob::getStaticTeams()[team_id];
     int                  size           = reference_team->procs.size();
-    ucc_job_env_t        env       = {{"UCC_TL_UCP_TUNE", "alltoall:0-inf:@1"}};
+    ucc_job_env_t        env       = {{"UCC_TL_UCP_TUNE", "alltoall:0-inf:@onesided"}};
     bool                 is_contig = true;
     UccJob               job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
     UccTeam_h            team;
@@ -242,6 +242,51 @@ UCC_TEST_P(test_alltoall_0, single_onesided)
     UccReq req(team, ctxs);
     req.start();
     req.wait();
+    EXPECT_EQ(true, data_validate(ctxs));
+    data_fini_onesided(ctxs);
+}
+
+UCC_TEST_P(test_alltoall_0, multiple_onesided)
+{
+    /* Two collectives back-to-back on the same team, no barrier between.
+     * Catches the I7 sync-counter-reuse bug: a fast peer entering the next
+     * collective while a slow peer still resets/observes the previous one's
+     * counter loses a signal. */
+    const int            team_id        = std::get<0>(GetParam());
+    const ucc_datatype_t dtype          = std::get<1>(GetParam());
+    ucc_memory_type_t    mem_type       = std::get<2>(GetParam());
+    gtest_ucc_inplace_t  inplace        = std::get<3>(GetParam());
+    const int            count          = std::get<4>(GetParam());
+    UccTeam_h            reference_team = UccJob::getStaticTeams()[team_id];
+    int                  size           = reference_team->procs.size();
+    ucc_job_env_t        env            = {{"UCC_TL_UCP_TUNE",
+                                            "alltoall:0-inf:@onesided"}};
+    bool                 is_contig = true;
+    UccJob               job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+    UccTeam_h            team;
+    std::vector<int>     reference_ranks;
+    UccCollCtxVec        ctxs;
+
+    for (auto i = 0; i < reference_team->n_procs; i++) {
+        int rank = reference_team->procs[i].p->job_rank;
+        reference_ranks.push_back(rank);
+        if (is_contig && i > 0 &&
+            (rank - reference_ranks[i - 1] > 1 ||
+             reference_ranks[i - 1] - rank > 1)) {
+            is_contig = false;
+        }
+    }
+    team = job.create_team(reference_ranks, true, is_contig, true);
+    this->set_inplace(inplace);
+    SET_MEM_TYPE(mem_type);
+    data_init(size, dtype, count, ctxs, team, false);
+    UccReq req1(team, ctxs);
+    req1.start();
+    req1.wait();
+    EXPECT_EQ(true, data_validate(ctxs));
+    UccReq req2(team, ctxs);
+    req2.start();
+    req2.wait();
     EXPECT_EQ(true, data_validate(ctxs));
     data_fini_onesided(ctxs);
 }
