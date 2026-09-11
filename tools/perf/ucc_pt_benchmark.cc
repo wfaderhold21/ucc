@@ -95,7 +95,8 @@ ucc_pt_benchmark::ucc_pt_benchmark(ucc_pt_benchmark_config cfg,
         break;
     case UCC_PT_OP_TYPE_GATHER:
         coll = new ucc_pt_coll_gather(cfg.dt, cfg.mt, cfg.inplace,
-                                      cfg.persistent, cfg.root_shift, comm, generator);
+                                      cfg.persistent, cfg.root_shift,
+                                      cfg.map_type, comm, generator);
         break;
     case UCC_PT_OP_TYPE_GATHERV:
         coll = new ucc_pt_coll_gatherv(cfg.dt, cfg.mt, cfg.inplace,

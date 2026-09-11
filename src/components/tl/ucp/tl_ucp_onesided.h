@@ -36,13 +36,15 @@
  * Slot layout (UCC_TL_UCP_ONESIDED_N_SLOTS slots, slot 0 = first long of
  * the global work buffer):
  *   [0]              put-family sync: alltoallv, allgather-put, scatter,
- *                    gather, fanout, bcast-linear. Every rank's local slot 0
+ *                    fanout, bcast-linear. Every rank's local slot 0
  *                    grows by exactly 1 per round (fanout via the root's
  *                    signal + self-signal), so the per-rank base stays in
  *                    lockstep across interleaved rounds.
- *   [1]              fanin. The root's local slot 1 grows by (size-1) per
- *                    round and non-roots' never changes, so it must not share
- *                    slot 0 with the put-family.
+ *   [1]              fanin and gather-put. The root's local slot 1 grows by
+ *                    (size-1) per round and non-roots' never changes (fanin
+ *                    signals the root; gather-put has the same root-only
+ *                    commit topology), so it must not share slot 0 with the
+ *                    put-family.
  *   [2]              scratch sync: reduce family, gather-get, gatherv
  *   [3 .. 3+log2(N)) barrier rounds / tree levels
  *   [3+log2(N) .. ]  bcast knomial levels, allgather-rd levels

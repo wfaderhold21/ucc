@@ -11,6 +11,7 @@
 
 enum {
     UCC_TL_UCP_GATHER_ALG_KNOMIAL,
+    UCC_TL_UCP_GATHER_ALG_ONESIDED,
     UCC_TL_UCP_GATHER_ALG_LAST
 };
 
@@ -53,4 +54,23 @@ ucc_status_t ucc_tl_ucp_gather_knomial_init_r(ucc_base_coll_args_t *coll_args,
                                               ucc_base_team_t *team,
                                               ucc_coll_task_t **task_h,
                                               ucc_kn_radix_t radix);
+
+ucc_status_t ucc_tl_ucp_gather_knomial_init(ucc_base_coll_args_t *coll_args,
+                                            ucc_base_team_t      *team,
+                                            ucc_coll_task_t     **task_h);
+
+ucc_status_t ucc_tl_ucp_gather_onesided_init(ucc_base_coll_args_t *coll_args,
+                                             ucc_base_team_t      *team,
+                                             ucc_coll_task_t     **task_h);
+
+static inline int ucc_tl_ucp_gather_alg_from_str(const char *str)
+{
+    int i;
+    for (i = 0; i < UCC_TL_UCP_GATHER_ALG_LAST; i++) {
+        if (0 == strcasecmp(str, ucc_tl_ucp_gather_algs[i].name)) {
+            break;
+        }
+    }
+    return i;
+}
 #endif

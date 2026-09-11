@@ -76,7 +76,8 @@ fanout =                     \
 gather =                    \
 	gather/gather.h         \
 	gather/gather.c         \
-	gather/gather_knomial.c
+	gather/gather_knomial.c \
+	gather/gather_onesided.c
 
 gatherv =                    \
 	gatherv/gatherv.h        \

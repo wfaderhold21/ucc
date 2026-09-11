@@ -14,14 +14,23 @@ ucc_base_coll_alg_info_t
              .name = "knomial",
              .desc = "gather over knomial tree with arbitrary radix "
                      "(optimized for latency)"},
+        [UCC_TL_UCP_GATHER_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_GATHER_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "one-sided gather (leaf-driven put + atomic signal)"},
         [UCC_TL_UCP_GATHER_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 
+/*
+ * Legacy init (no score context): the two-sided knomial is the only
+ * algorithm reachable this way, so wire its start/progress directly. The
+ * score/tune path (ucc_tl_ucp_alg_id_to_init) uses the *_init wrappers.
+ */
 ucc_status_t ucc_tl_ucp_gather_init(ucc_tl_ucp_task_t *task)
 {
     ucc_tl_ucp_team_t *team    = TASK_TEAM(task);
     ucc_rank_t         size    = UCC_TL_TEAM_SIZE(team);
-    ucc_kn_radix_t radix;
+    ucc_kn_radix_t     radix;
 
     radix = ucc_min(UCC_TL_UCP_TEAM_LIB(team)->cfg.gather_kn_radix, size);
 

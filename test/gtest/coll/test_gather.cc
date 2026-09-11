@@ -278,3 +278,215 @@ INSTANTIATE_TEST_CASE_P(
                        ::testing::Values(1, 3, 8192), // count
                        ::testing::Values(0, 1),       // root
                        ::testing::Values(TEST_INPLACE, TEST_NO_INPLACE)));
+
+/*
+ * One-sided gather: every non-root puts its src block into the root's dst
+ * segment at offset rank*count and publishes it with a put -> ep_flush ->
+ * atomic_add(1) chain on the root's copy of slot 1 in the symmetric work
+ * buffer. The root copies its own block locally and completes once its slot 1
+ * has received size-1 signals. It is the first data-moving one-sided
+ * collective, so the gtest asserts the actual data lands correctly at the root
+ * (not just slot counters).
+ *
+ * Segment buffers: buf 0 = src, buf 1 = dst, buf 2 = work buffer (the same
+ * 1 MiB symmetric segments every rank registers, satisfying I1). Every rank
+ * provides a full-size dst at the same symmetric offset: a non-root's put
+ * target is its own local dst VA + rank*count, which I1 translates to the
+ * root's dst at the same offset. The two-sided knomial never touches the work
+ * buffer, so a fallback to knomial leaves the root's slot 1 at 0 and fails the
+ * assertion below. The algorithm is forced via
+ * UCC_TL_UCP_TUNE="gather:0-inf:@onesided".
+ */
+static const int GATHER_ONESIDED_SLOT = 1;
+
+using OsideParam = std::tuple<int, int, ucc_datatype_t>;
+
+class test_gather_onesided : public ucc::test,
+                             public ::testing::WithParamInterface<OsideParam>
+{
+  public:
+    int root = 0;
+
+    /* Build one gather's per-rank args on the team's onesided segments and
+     * fill the src segment with rank r's pattern. dst is full-size on every
+     * rank (I1: the non-root's put offset resolves to the root's buffer). */
+    void os_data_init(UccTeam_h team, size_t single_rank_count,
+                      ucc_datatype_t dtype, UccCollCtxVec &ctxs)
+    {
+        int    nprocs = team->procs.size();
+        size_t dt     = ucc_dt_size(dtype);
+
+        ctxs.resize(nprocs);
+        for (int r = 0; r < nprocs; r++) {
+            ucc_coll_args_t *coll =
+                (ucc_coll_args_t *)calloc(1, sizeof(ucc_coll_args_t));
+            ctxs[r] =
+                (gtest_ucc_coll_ctx_t *)calloc(1, sizeof(gtest_ucc_coll_ctx_t));
+            ctxs[r]->args = coll;
+
+            coll->coll_type = UCC_COLL_TYPE_GATHER;
+            coll->mask      = UCC_COLL_ARGS_FIELD_FLAGS |
+                              UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER;
+            coll->flags = UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS;
+            coll->root  = root;
+
+            coll->src.info.mem_type  = UCC_MEMORY_TYPE_HOST;
+            coll->src.info.datatype  = dtype;
+            coll->src.info.count     = (ucc_count_t)single_rank_count;
+            coll->src.info.buffer    = team->procs[r].p->onesided_buf[0];
+
+            coll->dst.info.mem_type  = UCC_MEMORY_TYPE_HOST;
+            coll->dst.info.datatype  = dtype;
+            coll->dst.info.count     = (ucc_count_t)single_rank_count * nprocs;
+            coll->dst.info.buffer    = team->procs[r].p->onesided_buf[1];
+
+            coll->global_work_buffer = team->procs[r].p->onesided_buf[2];
+            ctxs[r]->rbuf_size       = single_rank_count * nprocs * dt;
+
+            for (size_t i = 0; i < single_rank_count * dt; i++) {
+                ((uint8_t *)team->procs[r].p->onesided_buf[0])[i] = ((i + r) % 256);
+            }
+            clear_buffer(team->procs[r].p->onesided_buf[1],
+                         single_rank_count * nprocs * dt, UCC_MEMORY_TYPE_HOST, 0);
+        }
+    }
+
+    void os_data_fini(UccCollCtxVec ctxs)
+    {
+        for (gtest_ucc_coll_ctx_t *ctx : ctxs) {
+            free(ctx->args);
+            free(ctx);
+        }
+        ctxs.clear();
+    }
+
+    /* Root's aggregated dst segment must hold rank r's pattern at block r. */
+    bool os_data_validate(UccTeam_h team, UccCollCtxVec ctxs,
+                          size_t single_rank_count, ucc_datatype_t dtype)
+    {
+        int    nprocs = team->procs.size();
+        int    root   = ctxs[0]->args->root;
+        size_t dt     = ucc_dt_size(dtype);
+        uint8_t *dsts = (uint8_t *)team->procs[root].p->onesided_buf[1];
+
+        for (int r = 0; r < nprocs; r++) {
+            for (size_t i = 0; i < single_rank_count * dt; i++) {
+                if ((uint8_t)((i + r) % 256) !=
+                    dsts[r * single_rank_count * dt + i]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+};
+
+/*
+ * Single one-sided gather across sizes {1,2,3,4,8,15,16}, roots {0,1,2}, and a
+ * datatype sweep. The data assertion proves the put landed at the right offset;
+ * the slot assertion proves the one-sided algorithm ran (knomial would leave the
+ * root's slot 1 at 0). Size 1 is skipped: the UCP TL has no size-1 teams.
+ */
+UCC_TEST_P(test_gather_onesided, single_onesided)
+{
+    const int          size  = std::get<0>(GetParam());
+    const int          root  = std::get<1>(GetParam());
+    const ucc_datatype_t dtype = std::get<2>(GetParam());
+    const size_t       count = 8192; /* elements per rank; dst = count*size */
+    ucc_job_env_t      env   = {{"UCC_TL_UCP_TUNE", "gather:0-inf:@onesided"}};
+    UccJob             job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+
+    if (size == 1) {
+        GTEST_SKIP() << "UCP TL does not support size-1 teams; the self TL "
+                        "handles gather as a no-op and the work buffer is "
+                        "never exercised.";
+    }
+    if (root >= size) {
+        GTEST_SKIP() << "root " << root << " >= team size " << size;
+    }
+
+    UccTeam_h     team = job.create_team(size, true, true, true);
+    UccCollCtxVec ctxs;
+    this->root         = root;
+
+    os_data_init(team, count, dtype, ctxs);
+    UccReq req(team, ctxs);
+    ASSERT_EQ(UCC_OK, req.status);
+    req.start();
+    ucc_status_t st = req.wait();
+    EXPECT_EQ(UCC_OK, st);
+
+    EXPECT_TRUE(os_data_validate(team, ctxs, count, dtype))
+        << "onesided gather data mismatch, size=" << size << " root=" << root;
+
+    /* The root's local slot 1 advanced by exactly (size-1): one +1 from each
+     * non-root. A two-sided fallback never touches the work buffer, so this
+     * also proves the one-sided algorithm was selected. */
+    long *root_slot = (long *)team->procs[root].p->onesided_buf[2];
+    EXPECT_EQ((long)(size - 1), root_slot[GATHER_ONESIDED_SLOT])
+        << "onesided gather root slot, size=" << size << " root=" << root;
+    /* Non-roots' local slot 1 is untouched: their put targets the root's slot. */
+    for (int r = 0; r < size; r++) {
+        if (r == root) {
+            continue;
+        }
+        long *slot = (long *)team->procs[r].p->onesided_buf[2];
+        EXPECT_EQ(0L, slot[GATHER_ONESIDED_SLOT])
+            << "onesided gather non-root slot should be 0, rank=" << r;
+    }
+
+    os_data_fini(ctxs);
+}
+
+/*
+ * Two one-sided gathers back-to-back on the same team with no barrier between:
+ * the I7 counter-reuse regression. The root's slot 1 must reach 2*(size-1) and
+ * the data must still validate after each round.
+ */
+UCC_TEST_P(test_gather_onesided, multiple_onesided)
+{
+    const int          size  = std::get<0>(GetParam());
+    const int          root  = std::get<1>(GetParam());
+    const ucc_datatype_t dtype = std::get<2>(GetParam());
+    const size_t       count = 8192;
+    ucc_job_env_t      env   = {{"UCC_TL_UCP_TUNE", "gather:0-inf:@onesided"}};
+    UccJob             job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+
+    if (size == 1) {
+        GTEST_SKIP() << "UCP TL does not support size-1 teams.";
+    }
+    if (root >= size) {
+        GTEST_SKIP() << "root " << root << " >= team size " << size;
+    }
+
+    UccTeam_h     team = job.create_team(size, true, true, true);
+    UccCollCtxVec ctxs;
+    this->root         = root;
+
+    os_data_init(team, count, dtype, ctxs);
+
+    long *root_slot = (long *)team->procs[root].p->onesided_buf[2];
+
+    for (int call = 0; call < 2; call++) {
+        UccReq req(team, ctxs);
+        ASSERT_EQ(UCC_OK, req.status);
+        req.start();
+        ucc_status_t st = req.wait();
+        EXPECT_EQ(UCC_OK, st);
+        EXPECT_TRUE(os_data_validate(team, ctxs, count, dtype))
+            << "onesided gather back-to-back data mismatch, call=" << call;
+        EXPECT_EQ((long)((call + 1) * (size - 1)), root_slot[GATHER_ONESIDED_SLOT])
+            << "onesided gather back-to-back root slot, call=" << call;
+    }
+
+    os_data_fini(ctxs);
+}
+
+INSTANTIATE_TEST_CASE_P(
+    , test_gather_onesided,
+    ::testing::Combine(
+        ::testing::Values(1, 2, 3, 4, 8, 15, 16), // size
+        ::testing::Values(0, 1, 2),                // root
+        ::testing::Values(UCC_DT_INT8, UCC_DT_INT32, UCC_DT_INT64,
+                          UCC_DT_UINT8, UCC_DT_FLOAT64))); // dtype
