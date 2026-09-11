@@ -184,6 +184,8 @@ static inline int alg_id_from_str(ucc_coll_type_t coll_type, const char *str)
         return ucc_tl_ucp_bcast_alg_from_str(str);
     case UCC_COLL_TYPE_GATHER:
         return ucc_tl_ucp_gather_alg_from_str(str);
+    case UCC_COLL_TYPE_GATHERV:
+        return ucc_tl_ucp_gatherv_alg_from_str(str);
     case UCC_COLL_TYPE_REDUCE:
         return ucc_tl_ucp_reduce_alg_from_str(str);
     case UCC_COLL_TYPE_REDUCE_SCATTER:
@@ -408,6 +410,19 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
             break;
         case UCC_TL_UCP_FANOUT_ALG_ONESIDED:
             *init = ucc_tl_ucp_fanout_onesided_init;
+            break;
+        default:
+            status = UCC_ERR_INVALID_PARAM;
+            break;
+        };
+        break;
+    case UCC_COLL_TYPE_GATHERV:
+        switch (alg_id) {
+        case UCC_TL_UCP_GATHERV_ALG_LINEAR:
+            *init = ucc_tl_ucp_gatherv_linear_init;
+            break;
+        case UCC_TL_UCP_GATHERV_ALG_ONESIDED:
+            *init = ucc_tl_ucp_gatherv_onesided_init;
             break;
         default:
             status = UCC_ERR_INVALID_PARAM;

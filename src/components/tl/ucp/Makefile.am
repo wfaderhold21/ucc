@@ -82,7 +82,8 @@ gather =                    \
 gatherv =                    \
 	gatherv/gatherv.h        \
 	gatherv/gatherv.c        \
-	gatherv/gatherv_linear.c
+	gatherv/gatherv_linear.c    \
+	gatherv/gatherv_onesided.c
 
 reduce =                        \
 	reduce/reduce.h             \
