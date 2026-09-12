@@ -24,7 +24,8 @@ allgatherv =                        \
 	allgatherv/allgatherv.h         \
 	allgatherv/allgatherv.c         \
 	allgatherv/allgatherv_ring.c    \
-	allgatherv/allgatherv_knomial.c
+	allgatherv/allgatherv_knomial.c \
+	allgatherv/allgatherv_onesided.c
 
 alltoall =                       \
 	alltoall/alltoall.h          \

@@ -19,6 +19,10 @@ ucc_base_coll_alg_info_t
             {.id   = UCC_TL_UCP_ALLGATHERV_ALG_KNOMIAL,
              .name = "knomial",
              .desc = "recursive k-ing with arbitrary radix"},
+        [UCC_TL_UCP_ALLGATHERV_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_ALLGATHERV_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "one-sided allgatherv (put + signal, variable blocks)"},
         [UCC_TL_UCP_ALLGATHERV_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 

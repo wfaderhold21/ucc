@@ -274,6 +274,9 @@ ucc_status_t ucc_tl_ucp_alg_id_to_init(int alg_id, const char *alg_id_str,
         case UCC_TL_UCP_ALLGATHERV_ALG_RING:
             *init = ucc_tl_ucp_allgatherv_ring_init;
             break;
+        case UCC_TL_UCP_ALLGATHERV_ALG_ONESIDED:
+            *init = ucc_tl_ucp_allgatherv_onesided_init;
+            break;
         default:
             status = UCC_ERR_INVALID_PARAM;
             break;

@@ -83,11 +83,12 @@ class ucc_pt_coll_allgatherv: public ucc_pt_coll {
 public:
     ucc_pt_coll_allgatherv(ucc_datatype_t dt, ucc_memory_type mt,
                            bool is_inplace, bool is_persistent,
+                           ucc_pt_map_type_t map_type,
                            ucc_pt_comm *communicator,
                            ucc_pt_generator_base *generator);
     ucc_status_t init_args(ucc_pt_test_args_t &args) override;
     float get_bw(float time_ms, int grsize, ucc_pt_test_args_t args) override;
-    void free_args(ucc_pt_test_args_t &args) override;
+    ~ucc_pt_coll_allgatherv();
 };
 
 class ucc_pt_coll_allreduce: public ucc_pt_coll {

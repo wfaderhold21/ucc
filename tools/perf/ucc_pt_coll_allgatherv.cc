@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2021-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See file LICENSE for terms.
  */
@@ -12,63 +12,165 @@
 
 ucc_pt_coll_allgatherv::ucc_pt_coll_allgatherv(ucc_datatype_t dt,
                          ucc_memory_type mt, bool is_inplace,
-                         bool is_persistent,
+                         bool is_persistent, ucc_pt_map_type_t map_type,
                          ucc_pt_comm *communicator,
                          ucc_pt_generator_base *generator) : ucc_pt_coll(communicator, generator)
 {
+    size_t src_count_size = generator->get_src_count_max() * ucc_dt_size(dt);
+    size_t dst_count_size = generator->get_dst_count_max() * ucc_dt_size(dt);
+    ucc_status_t st;
+
     has_inplace_   = true;
     has_reduction_ = false;
     has_range_     = true;
     has_bw_        = true;
     root_shift_    = 0;
 
-    coll_args.mask                = UCC_COLL_ARGS_FIELD_FLAGS;
-    coll_args.flags               = UCC_COLL_ARGS_FLAG_CONTIG_DST_BUFFER;
-    coll_args.coll_type           = UCC_COLL_TYPE_ALLGATHERV;
-    coll_args.src.info.datatype   = dt;
-    coll_args.src.info.mem_type   = mt;
+    UCCCHECK_GOTO(ucc_pt_alloc(&dst_header, dst_count_size, mt),
+                  exit, st);
+    if (!is_inplace) {
+        UCCCHECK_GOTO(ucc_pt_alloc(&src_header, src_count_size, mt),
+                      exit, st);
+    }
+
+    coll_args.mask              = 0;
+    coll_args.flags             = 0;
+    coll_args.coll_type         = UCC_COLL_TYPE_ALLGATHERV;
+    coll_args.src.info.datatype = dt;
+    coll_args.src.info.mem_type = mt;
+    coll_args.dst.info_v.buffer   = dst_header->addr;
     coll_args.dst.info_v.datatype = dt;
     coll_args.dst.info_v.mem_type = mt;
 
     if (is_inplace) {
         coll_args.mask  |= UCC_COLL_ARGS_FIELD_FLAGS;
         coll_args.flags |= UCC_COLL_ARGS_FLAG_IN_PLACE;
+    } else {
+        coll_args.src.info.buffer = src_header->addr;
     }
 
     if (is_persistent) {
         coll_args.mask  |= UCC_COLL_ARGS_FIELD_FLAGS;
         coll_args.flags |= UCC_COLL_ARGS_FLAG_PERSISTENT;
     }
+
+    if (map_type == UCC_PT_MAP_TYPE_LOCAL) {
+        ucc_context_h        ctx = comm->get_context();
+        ucc_mem_map_t        segments[1];
+        ucc_mem_map_params_t mem_map_params;
+        size_t               dst_memh_size, src_memh_size;
+
+        mem_map_params.n_segments          = 1;
+        mem_map_params.segments            = segments;
+
+        mem_map_params.segments[0].address = dst_header->addr;
+        mem_map_params.segments[0].len     = dst_count_size;
+        UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                  &mem_map_params, &dst_memh_size, &dst_memh),
+                      exit, st);
+        coll_args.dst_memh.local_memh = dst_memh;
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH;
+
+        if (!is_inplace) {
+            mem_map_params.segments[0].address = src_header->addr;
+            mem_map_params.segments[0].len     = src_count_size;
+            UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                      &mem_map_params, &src_memh_size, &src_memh),
+                          exit, st);
+            coll_args.src_memh.local_memh = src_memh;
+            coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH;
+        }
+    } else if (map_type == UCC_PT_MAP_TYPE_GLOBAL) {
+        /*
+         * Onesided (full-mesh put, variable blocks): every rank provides its
+         * own src block (its contribution) and its full dst. The src memh is
+         * local (each rank puts from its own src); the dst memh is a global
+         * array (each rank puts its block into every peer's dst at offset
+         * displs[rank]), exported + broadcast + imported across ranks exactly
+         * like allgather's global mapping. The symmetric work buffer carries
+         * the put -> flush -> signal completion signals. Selection is opt-in
+         * via UCC_TL_UCP_TUNE (e.g. "allgatherv:0-inf:@onesided").
+         */
+        ucc_context_h        ctx            = comm->get_context();
+        ucc_mem_map_t        segments[1];
+        ucc_mem_map_params_t mem_map_params;
+        uint64_t             dst_memh_size, src_memh_size;
+        uint64_t             dst_memh_size_max;
+
+        coll_args.mask  |= UCC_COLL_ARGS_FIELD_FLAGS;
+        coll_args.flags |= UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS;
+        mem_map_params.n_segments = 1;
+        mem_map_params.segments   = segments;
+
+        /* Global dst memh: full aggregated buffer, symmetric across ranks. */
+        mem_map_params.segments[0].address = dst_header->addr;
+        mem_map_params.segments[0].len     = dst_count_size;
+        UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                  &mem_map_params, &dst_memh_size, &dst_memh),
+                      exit, st);
+        comm->allreduce(&dst_memh_size, &dst_memh_size_max, 1, UCC_OP_MAX,
+                        UCC_DT_UINT64);
+        dst_memh_global = new ucc_mem_map_mem_h[comm->get_size()];
+        for (int i = 0; i < comm->get_size(); i++) {
+            dst_memh_global[i] = new char[dst_memh_size_max];
+            if (i == comm->get_rank()) {
+                memcpy(dst_memh_global[i], dst_memh, dst_memh_size);
+            }
+            comm->bcast(dst_memh_global[i], dst_memh_size_max, i);
+        }
+        for (int i = 0; i < comm->get_size(); i++) {
+            ucc_mem_map(ctx, UCC_MEM_MAP_MODE_IMPORT, &mem_map_params,
+                        &dst_memh_size_max, &dst_memh_global[i]);
+        }
+        coll_args.dst_memh.global_memh = dst_memh_global;
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH;
+        coll_args.flags |= UCC_COLL_ARGS_FLAG_DST_MEMH_GLOBAL;
+
+        /* Local src memh: each rank puts from its own src block. */
+        if (!is_inplace) {
+            mem_map_params.segments[0].address = src_header->addr;
+            mem_map_params.segments[0].len     = src_count_size;
+            UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                      &mem_map_params, &src_memh_size,
+                                      &src_memh),
+                          exit, st);
+            coll_args.src_memh.local_memh = src_memh;
+            coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH;
+        }
+
+        /* Onesided needs the symmetric global work buffer. */
+        coll_args.global_work_buffer = comm->get_onesided_buf();
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER;
+    } else {
+        std::cerr << "Only local/global mapping is supported for perftest allgatherv"
+                  << std::endl;
+        goto exit;
+    }
+
+    return;
+exit:
+    if (dst_header) {
+        ucc_pt_free(dst_header);
+        dst_header = nullptr;
+    }
+    if (src_header) {
+        ucc_pt_free(src_header);
+        src_header = nullptr;
+    }
+    throw std::runtime_error("failed to initialize allgatherv arguments");
 }
 
 ucc_status_t ucc_pt_coll_allgatherv::init_args(ucc_pt_test_args_t &test_args)
 {
-    ucc_coll_args_t &args      = test_args.coll_args;
-	size_t           dt_size   = ucc_dt_size(coll_args.src.info.datatype);
-    ucc_status_t st;
+    ucc_coll_args_t &args = test_args.coll_args;
 
     args = coll_args;
     args.dst.info_v.counts        = generator->get_dst_counts();
     args.dst.info_v.displacements = generator->get_dst_displs();
-    UCCCHECK_GOTO(ucc_pt_alloc(&dst_header,
-                               generator->get_dst_count() * dt_size,
-                               args.dst.info_v.mem_type),
-                  exit, st);
-    args.dst.info_v.buffer = dst_header->addr;
     if (!UCC_IS_INPLACE(args)) {
         args.src.info.count = generator->get_src_count();
-        UCCCHECK_GOTO(
-            ucc_pt_alloc(&src_header,
-                         generator->get_src_count() * dt_size,
-                         args.src.info.mem_type),
-            free_dst, st);
-        args.src.info.buffer = src_header->addr;
     }
     return UCC_OK;
-free_dst:
-    ucc_pt_free(dst_header);
-exit:
-    return st;
 }
 
 float ucc_pt_coll_allgatherv::get_bw(float time_ms, int grsize,
@@ -86,12 +188,27 @@ float ucc_pt_coll_allgatherv::get_bw(float time_ms, int grsize,
     return (S / time_ms) * ((N - 1) / N) / 1000.0;
 }
 
-void ucc_pt_coll_allgatherv::free_args(ucc_pt_test_args_t &test_args)
+ucc_pt_coll_allgatherv::~ucc_pt_coll_allgatherv()
 {
-    ucc_coll_args_t &args = test_args.coll_args;
-
-    if (!UCC_IS_INPLACE(args)) {
+    if (src_header) {
         ucc_pt_free(src_header);
     }
-    ucc_pt_free(dst_header);
+    if (dst_header) {
+        ucc_pt_free(dst_header);
+    }
+    if (src_memh) {
+        ucc_mem_unmap(&src_memh);
+    }
+    if (dst_memh) {
+        ucc_mem_unmap(&dst_memh);
+    }
+    if (dst_memh_global) {
+        for (int i = 0; i < comm->get_size(); i++) {
+            if (dst_memh_global[i]) {
+                ucc_mem_unmap(&dst_memh_global[i]);
+                delete[] static_cast<char *>(dst_memh_global[i]);
+            }
+        }
+        delete[] dst_memh_global;
+    }
 }

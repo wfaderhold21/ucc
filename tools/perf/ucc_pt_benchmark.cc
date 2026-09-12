@@ -64,7 +64,8 @@ ucc_pt_benchmark::ucc_pt_benchmark(ucc_pt_benchmark_config cfg,
         break;
     case UCC_PT_OP_TYPE_ALLGATHERV:
         coll = new ucc_pt_coll_allgatherv(cfg.dt, cfg.mt, cfg.inplace,
-                                          cfg.persistent, comm, generator);
+                                          cfg.persistent, cfg.map_type, comm,
+                                          generator);
         break;
     case UCC_PT_OP_TYPE_ALLREDUCE:
         coll = new ucc_pt_coll_allreduce(cfg.dt, cfg.mt, cfg.op, cfg.inplace,
