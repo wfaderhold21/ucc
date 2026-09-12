@@ -8,6 +8,7 @@
 #include "common/test_ucc.h"
 #include "utils/ucc_math.h"
 
+#include <algorithm>
 #include <array>
 
 template<typename T>
@@ -355,3 +356,199 @@ TYPED_TEST(test_reduce_2step, 2step) {
 TYPED_TEST(test_reduce_srg, srg) {
     TEST_DECLARE_WITH_ENV(reduce_srg_env, 15, false);
 }
+
+/*
+ * One-sided reduce (plan 6.4): a knomial tree of put+signal. Root rank's dst
+ * holds the SUM over every rank of the matching element. The slot assertion
+ * proves the one-sided alg was selected (a two-sided fallback never touches
+ * the work buffer) and that the root's level-0 slot advanced by exactly its
+ * number of children (per-level, per-rank slot base, I7).
+ */
+using RdoParam = std::tuple<int, ucc_datatype_t>;
+
+class test_reduce_onesided
+    : public ucc::test, public ::testing::WithParamInterface<RdoParam>
+{
+  public:
+    /* Build one reduce's per-rank args on the onesided segments:
+     * src = onesided_buf[0] (count elements, host), dst = onesided_buf[1]
+     * (count elements, host, only the root's holds the result), work buffer =
+     * onesided_buf[2]. Element i of rank r's src holds (i + r + 1) % 8, so the
+     * expected root dst[i] is the sum over every rank q of (i + q + 1) % 8. */
+    void os_data_init(UccTeam_h team, size_t count, ucc_datatype_t dtype,
+                      UccCollCtxVec &ctxs)
+    {
+        int    nprocs = team->procs.size();
+        size_t dt     = ucc_dt_size(dtype);
+
+        ctxs.resize(nprocs);
+        for (int r = 0; r < nprocs; r++) {
+            ucc_coll_args_t *coll =
+                (ucc_coll_args_t *)calloc(1, sizeof(ucc_coll_args_t));
+            ctxs[r] =
+                (gtest_ucc_coll_ctx_t *)calloc(1, sizeof(gtest_ucc_coll_ctx_t));
+            ctxs[r]->args = coll;
+
+            coll->coll_type = UCC_COLL_TYPE_REDUCE;
+            coll->op        = UCC_OP_SUM;
+            coll->root      = nprocs / 2; /* non-trivial root */
+            coll->mask      = UCC_COLL_ARGS_FIELD_FLAGS |
+                              UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER;
+            coll->flags     = UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS;
+
+            coll->src.info.mem_type  = UCC_MEMORY_TYPE_HOST;
+            coll->src.info.datatype  = dtype;
+            coll->src.info.count     = (ucc_count_t)count;
+            coll->src.info.buffer    = team->procs[r].p->onesided_buf[0];
+            int32_t *src = (int32_t *)team->procs[r].p->onesided_buf[0];
+            for (size_t i = 0; i < count; i++) {
+                src[i] = (int32_t)((i + r + 1) % 8);
+            }
+
+            coll->dst.info.mem_type  = UCC_MEMORY_TYPE_HOST;
+            coll->dst.info.datatype  = dtype;
+            coll->dst.info.count     = (ucc_count_t)count;
+            coll->dst.info.buffer    = team->procs[r].p->onesided_buf[1];
+
+            coll->global_work_buffer = team->procs[r].p->onesided_buf[2];
+            ctxs[r]->rbuf_size       = count * dt;
+            clear_buffer(team->procs[r].p->onesided_buf[1], count * dt,
+                         UCC_MEMORY_TYPE_HOST, 0);
+        }
+    }
+
+    void os_data_fini(UccCollCtxVec ctxs)
+    {
+        for (gtest_ucc_coll_ctx_t *ctx : ctxs) {
+            free(ctx->args);
+            free(ctx);
+        }
+        ctxs.clear();
+    }
+
+    /* The root's dst must hold, for every element i: sum over every rank q of
+     * (i + q + 1) % 8 (the SUM reduce over every rank's i-th element). */
+    bool os_data_validate(UccTeam_h team, size_t count, ucc_datatype_t dtype)
+    {
+        int    nprocs = team->procs.size();
+        int    root   = nprocs / 2;
+        int32_t *dst  = (int32_t *)team->procs[root].p->onesided_buf[1];
+
+        for (size_t i = 0; i < count; i++) {
+            int res = 0;
+            for (int q = 0; q < nprocs; q++) {
+                res += (i + q + 1) % 8;
+            }
+            if (dst[i] != (int32_t)res) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /* Zero the dst so a repeat round reduces fresh (not stale) data. */
+    void os_reset_dst(UccTeam_h team, size_t count, ucc_datatype_t dtype)
+    {
+        size_t dt = ucc_dt_size(dtype);
+        clear_buffer(team->procs[team->procs.size() / 2].p->onesided_buf[1],
+                     count * dt, UCC_MEMORY_TYPE_HOST, 0);
+    }
+};
+
+UCC_TEST_P(test_reduce_onesided, single_onesided)
+{
+    const int            size  = std::get<0>(GetParam());
+    const ucc_datatype_t dtype = std::get<1>(GetParam());
+    const size_t         count = 4608; /* 18432 bytes < 1MB segment */
+    ucc_job_env_t        env = {{"UCC_TL_UCP_TUNE", "reduce:0-inf:@onesided"},
+                                {"UCC_TL_UCP_ONESIDED_SCRATCH_SIZE",
+                                 "4194304"}};
+    UccJob               job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+
+    if (size == 1) {
+        GTEST_SKIP() << "UCP TL does not support size-1 teams; the self TL "
+                       "handles reduce as a no-op.";
+    }
+
+    UccTeam_h     team = job.create_team(size, true, true, true);
+    UccCollCtxVec ctxs;
+    int           root = size / 2;
+
+    os_data_init(team, count, dtype, ctxs);
+    UccReq req(team, ctxs);
+    ASSERT_EQ(UCC_OK, req.status);
+    req.start();
+    ucc_status_t st = req.wait();
+    EXPECT_EQ(UCC_OK, st);
+
+    EXPECT_TRUE(os_data_validate(team, count, dtype))
+        << "onesided reduce data mismatch, size=" << size;
+
+    /* The root's level-0 slot advanced by exactly its level-0 children count.
+     * slot_base = 3 + ceil(log2(size)); the root is a level-0 parent with
+     * min(radix-1, size-1) children. A two-sided fallback leaves the work
+     * buffer untouched, so the slot would still be 0. */
+    int    radix      = std::min(4, size);
+    long   increment  = std::min(radix - 1, size - 1);
+    int    slot_base  = 3 + (int)ucc_ilog2_ceil(size);
+    long  *slot       = (long *)team->procs[root].p->onesided_buf[2];
+    EXPECT_EQ((long)increment, slot[slot_base])
+        << "onesided reduce slot, size=" << size << " root=" << root;
+
+    os_data_fini(ctxs);
+}
+
+/*
+ * Two one-sided reduces back-to-back on the same team with no barrier
+ * between: the I7 counter-reuse and scratch-refcount regression. The root's
+ * level-0 slot must reach 2*increment after the second round, and the data
+ * must still validate each round.
+ */
+UCC_TEST_P(test_reduce_onesided, multiple_onesided)
+{
+    const int            size  = std::get<0>(GetParam());
+    const ucc_datatype_t dtype = std::get<1>(GetParam());
+    const size_t         count = 4608; /* 18432 bytes < 1MB segment */
+    ucc_job_env_t        env = {{"UCC_TL_UCP_TUNE", "reduce:0-inf:@onesided"},
+                                {"UCC_TL_UCP_ONESIDED_SCRATCH_SIZE",
+                                 "4194304"}};
+    UccJob               job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+
+    if (size == 1) {
+        GTEST_SKIP() << "UCP TL does not support size-1 teams.";
+    }
+
+    UccTeam_h     team = job.create_team(size, true, true, true);
+    UccCollCtxVec ctxs;
+    int           root = size / 2;
+
+    os_data_init(team, count, dtype, ctxs);
+
+    int    radix     = std::min(4, size);
+    long   increment = std::min(radix - 1, size - 1);
+    int    slot_base = 3 + (int)ucc_ilog2_ceil(size);
+
+    for (int call = 0; call < 2; call++) {
+        UccReq req(team, ctxs);
+        ASSERT_EQ(UCC_OK, req.status);
+        req.start();
+        ucc_status_t st = req.wait();
+        EXPECT_EQ(UCC_OK, st);
+        EXPECT_TRUE(os_data_validate(team, count, dtype))
+            << "onesided reduce back-to-back data mismatch, call=" << call;
+        long *slot = (long *)team->procs[root].p->onesided_buf[2];
+        EXPECT_EQ((long)(call + 1) * increment, slot[slot_base])
+            << "onesided reduce back-to-back slot, size=" << size
+            << " root=" << root << " call=" << call;
+        /* Zero the dst so the second round's combine overwrites clean data. */
+        os_reset_dst(team, count, dtype);
+    }
+
+    os_data_fini(ctxs);
+}
+
+INSTANTIATE_TEST_CASE_P(
+    , test_reduce_onesided,
+    ::testing::Combine(
+        ::testing::Values(2, 3, 4, 8, 16), // size
+        ::testing::Values(UCC_DT_INT32))); // dtype

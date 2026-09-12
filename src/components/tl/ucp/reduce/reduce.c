@@ -23,6 +23,10 @@ ucc_base_coll_alg_info_t
              .name = "srg",
              .desc = "recursive knomial scatter-reduce followed by knomial "
                      "gather"},
+        [UCC_TL_UCP_REDUCE_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_REDUCE_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "reduce over a knomial tree of put+signal (RMA) ops"},
         [UCC_TL_UCP_REDUCE_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 

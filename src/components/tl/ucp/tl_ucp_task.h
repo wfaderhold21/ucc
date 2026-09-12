@@ -301,6 +301,17 @@ typedef struct ucc_tl_ucp_task {
             uint8_t                        gap_filled;
         } reduce_scatterv_onesided;
         struct {
+            ucc_rank_t                     dist;
+            ucc_rank_t                     max_dist;
+            uint32_t                       radix;
+            uint32_t                       level;
+            uint32_t                       nlevels;
+            uint32_t                       slot_base;
+            void                           *scratch;
+            ucc_ee_executor_task_t         *etask;
+            ucc_ee_executor_t              *executor;
+        } reduce_onesided;
+        struct {
             ucc_rank_t                     rounds;
             ucc_rank_t                     round;
         } barrier_onesided;
