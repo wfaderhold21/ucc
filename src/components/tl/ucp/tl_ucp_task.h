@@ -255,6 +255,11 @@ typedef struct ucc_tl_ucp_task {
             ucc_tl_ucp_onesided_window_t   window;
         } scatter_onesided;
         struct {
+            long                           expected;
+            ucc_rank_t                     peer;
+            ucc_tl_ucp_onesided_window_t   window;
+        } scatterv_onesided;
+        struct {
             ucc_rank_t                     rounds;
             ucc_rank_t                     round;
         } barrier_onesided;

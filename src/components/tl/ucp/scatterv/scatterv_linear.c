@@ -114,7 +114,7 @@ error:
 
 }
 
-ucc_status_t ucc_tl_ucp_scatterv_linear_init(ucc_tl_ucp_task_t *task)
+ucc_status_t ucc_tl_ucp_scatterv_linear_init_common(ucc_tl_ucp_task_t *task)
 {
     task->super.post     = ucc_tl_ucp_scatterv_linear_start;
     task->super.progress = ucc_tl_ucp_scatterv_linear_progress;

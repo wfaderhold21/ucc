@@ -112,7 +112,8 @@ scatter =                     \
 scatterv =                     \
 	scatterv/scatterv.h        \
 	scatterv/scatterv.c        \
-	scatterv/scatterv_linear.c
+	scatterv/scatterv_linear.c \
+	scatterv/scatterv_onesided.c
 
 sources =                 \
 	tl_ucp.h              \

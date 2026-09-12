@@ -124,7 +124,8 @@ ucc_pt_benchmark::ucc_pt_benchmark(ucc_pt_benchmark_config cfg,
         break;
     case UCC_PT_OP_TYPE_SCATTERV:
         coll = new ucc_pt_coll_scatterv(cfg.dt, cfg.mt, cfg.inplace,
-                                        cfg.persistent, cfg.root_shift, comm, generator);
+                                        cfg.persistent, cfg.root_shift,
+                                        cfg.map_type, comm, generator);
         break;
     case UCC_PT_OP_TYPE_MEMCPY:
         coll = new ucc_pt_op_memcpy(cfg.dt, cfg.mt, cfg.n_bufs, comm, generator);
