@@ -81,8 +81,69 @@ ucc_pt_coll_allgather::ucc_pt_coll_allgather(ucc_datatype_t dt,
             coll_args.src_memh.local_memh = src_memh;
             coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH;
         }
-    } else if (map_type != UCC_PT_MAP_TYPE_NONE) {
-        std::cerr << "Only local mapping is supported for perftest allgather"
+    } else if (map_type == UCC_PT_MAP_TYPE_GLOBAL) {
+        /*
+         * Onesided (full-mesh put): every rank provides its src block and its
+         * full dst, both registered as mem handles. The src memh is local
+         * (each rank puts from its own src); the dst memh is a global array
+         * (each rank puts into every peer's dst at offset grank*blk),
+         * exported + broadcast + imported across ranks exactly like
+         * scatter's global mapping. The symmetric work buffer carries the
+         * put -> flush -> signal completion signals. Selection is opt-in via
+         * UCC_TL_UCP_TUNE (e.g. "allgather:0-inf:@onesided").
+         */
+        ucc_context_h        ctx            = comm->get_context();
+        ucc_mem_map_t        segments[1];
+        ucc_mem_map_params_t mem_map_params;
+        uint64_t             dst_memh_size, src_memh_size;
+        uint64_t             dst_memh_size_max;
+
+        coll_args.mask  |= UCC_COLL_ARGS_FIELD_FLAGS;
+        coll_args.flags |= UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS;
+        mem_map_params.n_segments = 1;
+        mem_map_params.segments   = segments;
+
+        /* Global dst memh: full aggregated buffer, symmetric across ranks. */
+        mem_map_params.segments[0].address = dst_header->addr;
+        mem_map_params.segments[0].len     = dst_count_size;
+        UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                  &mem_map_params, &dst_memh_size, &dst_memh),
+                      exit, st);
+        comm->allreduce(&dst_memh_size, &dst_memh_size_max, 1, UCC_OP_MAX,
+                        UCC_DT_UINT64);
+        dst_memh_global = new ucc_mem_map_mem_h[comm->get_size()];
+        for (int i = 0; i < comm->get_size(); i++) {
+            dst_memh_global[i] = new char[dst_memh_size_max];
+            if (i == comm->get_rank()) {
+                memcpy(dst_memh_global[i], dst_memh, dst_memh_size);
+            }
+            comm->bcast(dst_memh_global[i], dst_memh_size_max, i);
+        }
+        for (int i = 0; i < comm->get_size(); i++) {
+            ucc_mem_map(ctx, UCC_MEM_MAP_MODE_IMPORT, &mem_map_params,
+                        &dst_memh_size_max, &dst_memh_global[i]);
+        }
+        coll_args.dst_memh.global_memh = dst_memh_global;
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_DST_MEMH;
+        coll_args.flags |= UCC_COLL_ARGS_FLAG_DST_MEMH_GLOBAL;
+
+        /* Local src memh: each rank puts from its own src block. */
+        if (!is_inplace) {
+            mem_map_params.segments[0].address = src_header->addr;
+            mem_map_params.segments[0].len     = src_count_size;
+            UCCCHECK_GOTO(ucc_mem_map(ctx, UCC_MEM_MAP_MODE_EXPORT,
+                                      &mem_map_params, &src_memh_size,
+                                      &src_memh),
+                          exit, st);
+            coll_args.src_memh.local_memh = src_memh;
+            coll_args.mask |= UCC_COLL_ARGS_FIELD_MEM_MAP_SRC_MEMH;
+        }
+
+        /* Onesided needs the symmetric global work buffer. */
+        coll_args.global_work_buffer = comm->get_onesided_buf();
+        coll_args.mask |= UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER;
+    } else {
+        std::cerr << "Only local/global mapping is supported for perftest allgather"
                   << std::endl;
         goto exit;
     }
@@ -137,5 +198,14 @@ ucc_pt_coll_allgather::~ucc_pt_coll_allgather()
     }
     if (dst_memh) {
         ucc_mem_unmap(&dst_memh);
+    }
+    if (dst_memh_global) {
+        for (int i = 0; i < comm->get_size(); i++) {
+            if (dst_memh_global[i]) {
+                ucc_mem_unmap(&dst_memh_global[i]);
+                delete[] static_cast<char *>(dst_memh_global[i]);
+            }
+        }
+        delete[] dst_memh_global;
     }
 }

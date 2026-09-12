@@ -43,6 +43,10 @@ ucc_base_coll_alg_info_t
             {.id   = UCC_TL_UCP_ALLGATHER_ALG_LINEAR_BATCHED,
              .name = "batched",
              .desc = "O(N - 1) Linear algorithm, K-send/receive in flight"},
+        [UCC_TL_UCP_ALLGATHER_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_ALLGATHER_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "one-sided allgather (put + signal)"},
         [UCC_TL_UCP_ALLGATHER_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 

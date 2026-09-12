@@ -234,6 +234,11 @@ typedef struct ucc_tl_ucp_task {
         } alltoallv_onesided;
         struct {
             long                           expected;
+            ucc_rank_t                     peer;
+            ucc_tl_ucp_onesided_window_t   window;
+        } allgather_onesided;
+        struct {
+            long                           expected;
             ucc_tl_ucp_onesided_window_t   window;
         } fanin_onesided;
         struct {

@@ -308,3 +308,200 @@ INSTANTIATE_TEST_CASE_P(
             name += std::string("_")+std::get<4>(info.param);
             return name;
         });
+
+/*
+ * One-sided allgather (put variant, plan 5.1): every rank puts its own
+ * per-rank block into every peer's dst at offset grank*count and local-copies
+ * its own block. Each remote put is published with put -> flush ->
+ * atomic_add(1) on the peer's slot 0; the self case is a local copy plus a
+ * local self-increment. Every rank's local slot 0 therefore advances by
+ * exactly size per round (size-1 remote signals + 1 self), so the expected
+ * value is base + size and every rank commits the slot-0 base. The data
+ * assertion proves each rank received every peer's block; the slot assertion
+ * (slot 0 == size after one call) proves the one-sided algorithm ran (a
+ * two-sided fallback never touches the work buffer).
+ */
+static const int ALLGATHER_ONESIDED_SLOT = 0;
+
+using AgoParam = std::tuple<int, ucc_datatype_t>;
+
+class test_allgather_onesided : public ucc::test,
+                                public ::testing::WithParamInterface<AgoParam>
+{
+  public:
+    /* Each rank's src holds `count` elements filled with pattern
+     * ((i + r) % 256); its dst holds count*size elements. After the
+     * allgather, rank r's dst block p must equal ((i + p) % 256). */
+    void os_data_init(UccTeam_h team, size_t count, ucc_datatype_t dtype,
+                      UccCollCtxVec &ctxs)
+    {
+        int    nprocs = team->procs.size();
+        size_t dt     = ucc_dt_size(dtype);
+
+        ctxs.resize(nprocs);
+        for (int r = 0; r < nprocs; r++) {
+            ucc_coll_args_t *coll =
+                (ucc_coll_args_t *)calloc(1, sizeof(ucc_coll_args_t));
+            ctxs[r] =
+                (gtest_ucc_coll_ctx_t *)calloc(1, sizeof(gtest_ucc_coll_ctx_t));
+            ctxs[r]->args = coll;
+
+            coll->coll_type = UCC_COLL_TYPE_ALLGATHER;
+            coll->mask      = UCC_COLL_ARGS_FIELD_FLAGS |
+                              UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER;
+            coll->flags = UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS;
+
+            coll->src.info.mem_type = UCC_MEMORY_TYPE_HOST;
+            coll->src.info.datatype = dtype;
+            coll->src.info.count    = (ucc_count_t)count;
+            coll->src.info.buffer   = team->procs[r].p->onesided_buf[0];
+
+            for (size_t i = 0; i < count * dt; i++) {
+                ((uint8_t *)team->procs[r].p->onesided_buf[0])[i] =
+                    (uint8_t)((i + r) % 256);
+            }
+
+            coll->dst.info.mem_type  = UCC_MEMORY_TYPE_HOST;
+            coll->dst.info.datatype  = dtype;
+            coll->dst.info.count     = (ucc_count_t)(count * nprocs);
+            coll->dst.info.buffer    = team->procs[r].p->onesided_buf[1];
+
+            coll->global_work_buffer = team->procs[r].p->onesided_buf[2];
+            ctxs[r]->rbuf_size       = count * nprocs * dt;
+
+            clear_buffer(team->procs[r].p->onesided_buf[1], count * nprocs * dt,
+                         UCC_MEMORY_TYPE_HOST, 0);
+        }
+    }
+
+    void os_data_fini(UccCollCtxVec ctxs)
+    {
+        for (gtest_ucc_coll_ctx_t *ctx : ctxs) {
+            free(ctx->args);
+            free(ctx);
+        }
+        ctxs.clear();
+    }
+
+    /* Rank r's dst block p must hold the pattern ((i + p) % 256) that rank p
+     * scattered to it. */
+    bool os_data_validate(UccTeam_h team, UccCollCtxVec ctxs, size_t count,
+                          ucc_datatype_t dtype)
+    {
+        int    nprocs = team->procs.size();
+        size_t dt     = ucc_dt_size(dtype);
+
+        for (int r = 0; r < nprocs; r++) {
+            uint8_t *dsts = (uint8_t *)team->procs[r].p->onesided_buf[1];
+            for (int p = 0; p < nprocs; p++) {
+                for (size_t i = 0; i < count * dt; i++) {
+                    if ((uint8_t)((i + p) % 256) != dsts[p * count * dt + i]) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+};
+
+/*
+ * Single one-sided allgather across sizes {1,2,3,4,8,15,16} and a datatype
+ * sweep. Size 1 is skipped: the UCP TL has no size-1 teams.
+ */
+UCC_TEST_P(test_allgather_onesided, single_onesided)
+{
+    const int            size  = std::get<0>(GetParam());
+    const ucc_datatype_t dtype = std::get<1>(GetParam());
+    const size_t         count = 4096; /* per-rank block */
+    ucc_job_env_t        env   = {{"UCC_TL_UCP_TUNE",
+                                   "allgather:0-inf:@onesided"}};
+    UccJob               job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+
+    if (size == 1) {
+        GTEST_SKIP() << "UCP TL does not support size-1 teams; the self TL "
+                        "handles allgather as a no-op and the work buffer is "
+                        "never exercised.";
+    }
+
+    UccTeam_h     team = job.create_team(size, true, true, true);
+    UccCollCtxVec ctxs;
+
+    os_data_init(team, count, dtype, ctxs);
+    UccReq req(team, ctxs);
+    ASSERT_EQ(UCC_OK, req.status);
+    req.start();
+    ucc_status_t st = req.wait();
+    EXPECT_EQ(UCC_OK, st);
+
+    EXPECT_TRUE(os_data_validate(team, ctxs, count, dtype))
+        << "onesided allgather data mismatch, size=" << size;
+
+    /* Every rank's local slot 0 advanced by exactly size this round
+     * (size-1 remote signals + 1 self-increment). A two-sided fallback never
+     * touches the work buffer, so this also proves the one-sided algorithm
+     * was selected. */
+    for (int r = 0; r < size; r++) {
+        long *slot = (long *)team->procs[r].p->onesided_buf[2];
+        EXPECT_EQ((long)size, slot[ALLGATHER_ONESIDED_SLOT])
+            << "onesided allgather slot, rank=" << r << " size=" << size;
+    }
+
+    os_data_fini(ctxs);
+}
+
+/*
+ * Two one-sided allgathers back-to-back on the same team with no barrier
+ * between: the I7 counter-reuse regression. Every rank's slot 0 must reach
+ * 2*size after the second round, and the data must still validate each round.
+ */
+UCC_TEST_P(test_allgather_onesided, multiple_onesided)
+{
+    const int            size  = std::get<0>(GetParam());
+    const ucc_datatype_t dtype = std::get<1>(GetParam());
+    const size_t         count = 4096;
+    ucc_job_env_t        env   = {{"UCC_TL_UCP_TUNE",
+                                   "allgather:0-inf:@onesided"}};
+    UccJob               job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+
+    if (size == 1) {
+        GTEST_SKIP() << "UCP TL does not support size-1 teams.";
+    }
+
+    UccTeam_h     team = job.create_team(size, true, true, true);
+    UccCollCtxVec ctxs;
+
+    os_data_init(team, count, dtype, ctxs);
+
+    for (int call = 0; call < 2; call++) {
+        UccReq req(team, ctxs);
+        ASSERT_EQ(UCC_OK, req.status);
+        req.start();
+        ucc_status_t st = req.wait();
+        EXPECT_EQ(UCC_OK, st);
+        EXPECT_TRUE(os_data_validate(team, ctxs, count, dtype))
+            << "onesided allgather back-to-back data mismatch, call=" << call;
+        for (int r = 0; r < size; r++) {
+            long *slot = (long *)team->procs[r].p->onesided_buf[2];
+            EXPECT_EQ((long)((call + 1) * size), slot[ALLGATHER_ONESIDED_SLOT])
+                << "onesided allgather back-to-back slot, rank=" << r
+                << " call=" << call;
+        }
+        /* Re-arm the dst blocks so the second allgather's puts overwrite
+         * zeroed (not stale) data, keeping the validation meaningful. */
+        for (int r = 0; r < size; r++) {
+            clear_buffer(team->procs[r].p->onesided_buf[1],
+                         count * size * ucc_dt_size(dtype),
+                         UCC_MEMORY_TYPE_HOST, 0);
+        }
+    }
+
+    os_data_fini(ctxs);
+}
+
+INSTANTIATE_TEST_CASE_P(
+    , test_allgather_onesided,
+    ::testing::Combine(
+        ::testing::Values(1, 2, 3, 4, 8, 15, 16), // size
+        ::testing::Values(UCC_DT_INT8, UCC_DT_INT32, UCC_DT_INT64,
+                          UCC_DT_UINT8, UCC_DT_FLOAT64))); // dtype

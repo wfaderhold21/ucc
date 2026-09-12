@@ -16,6 +16,7 @@ enum {
     UCC_TL_UCP_ALLGATHER_ALG_SPARBIT,
     UCC_TL_UCP_ALLGATHER_ALG_LINEAR,
     UCC_TL_UCP_ALLGATHER_ALG_LINEAR_BATCHED,
+    UCC_TL_UCP_ALLGATHER_ALG_ONESIDED,
     UCC_TL_UCP_ALLGATHER_ALG_LAST
 };
 
@@ -100,4 +101,9 @@ ucc_status_t ucc_tl_ucp_allgather_knomial_init(ucc_base_coll_args_t *coll_args,
 ucc_status_t ucc_tl_ucp_allgather_knomial_init_r(
     ucc_base_coll_args_t *coll_args, ucc_base_team_t *team,
     ucc_coll_task_t **task_h, ucc_kn_radix_t radix);
+
+/* One-sided (put) allgather */
+ucc_status_t ucc_tl_ucp_allgather_onesided_init(ucc_base_coll_args_t *coll_args,
+                                                ucc_base_team_t      *team,
+                                                ucc_coll_task_t     **task_h);
 #endif
