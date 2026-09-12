@@ -12,6 +12,7 @@ enum
 {
     UCC_TL_UCP_REDUCE_SCATTER_ALG_RING,
     UCC_TL_UCP_REDUCE_SCATTER_ALG_KNOMIAL,
+    UCC_TL_UCP_REDUCE_SCATTER_ALG_ONESIDED,
     UCC_TL_UCP_REDUCE_SCATTER_ALG_LAST
 };
 
@@ -48,4 +49,9 @@ ucc_status_t
 ucc_tl_ucp_reduce_scatter_ring_init(ucc_base_coll_args_t *coll_args,
                                     ucc_base_team_t *     team,
                                     ucc_coll_task_t **    task_h);
+
+ucc_status_t
+ucc_tl_ucp_reduce_scatter_onesided_init(ucc_base_coll_args_t *coll_args,
+                                        ucc_base_team_t *     team,
+                                        ucc_coll_task_t **    task_h);
 #endif

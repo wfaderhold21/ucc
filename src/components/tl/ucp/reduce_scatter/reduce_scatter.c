@@ -18,5 +18,10 @@ ucc_base_coll_alg_info_t
             {.id   = UCC_TL_UCP_REDUCE_SCATTER_ALG_KNOMIAL,
              .name = "knomial",
              .desc = "recursive k-ing with arbitrary radix"},
+        [UCC_TL_UCP_REDUCE_SCATTER_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_REDUCE_SCATTER_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "one-sided full-mesh put into a shared scratch segment, "
+                     "single-phase local combine (reduction)"},
         [UCC_TL_UCP_REDUCE_SCATTER_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
