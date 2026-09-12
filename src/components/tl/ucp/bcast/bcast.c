@@ -24,6 +24,10 @@ ucc_base_coll_alg_info_t
              .name = "dbt",
              .desc = "bcast over double binary tree where a leaf in one tree "
                      "will be intermediate in other (optimized for BW)"},
+        [UCC_TL_UCP_BCAST_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_BCAST_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "root-driven one-sided put + atomic signal (fanout)"},
         [UCC_TL_UCP_BCAST_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};
 

@@ -63,7 +63,8 @@ bcast =                       \
 	bcast/bcast.c             \
 	bcast/bcast_knomial.c     \
 	bcast/bcast_sag_knomial.c \
-	bcast/bcast_dbt.c
+	bcast/bcast_dbt.c         \
+	bcast/bcast_onesided.c
 
 fanin =                    \
 	fanin/fanin.h            \
