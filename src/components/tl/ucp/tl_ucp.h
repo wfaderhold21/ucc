@@ -45,6 +45,16 @@
 #define UCC_TL_UCP_ONESIDED_N_SLOTS  32
 #define ONESIDED_SYNC_SIZE           UCC_TL_UCP_ONESIDED_N_SLOTS
 #define ONESIDED_REDUCE_SIZE         4
+/*
+ * The internal one-sided scratch segment (plan 6.1) is partitioned into this
+ * many per-team regions. Region index = team->scratch_id (a uniform per-context
+ * creation ordinal), so two concurrently-alive teams never share a region and
+ * cannot clobber each other's in-flight reduction data. Region size is a fixed
+ * fraction of the segment (scratch_size / N_REGIONS), which keeps the offset
+ * uniform across ranks (I1) without depending on the (monotonically growing)
+ * live team count.
+ */
+#define UCC_TL_UCP_ONESIDED_SCRATCH_N_REGIONS UCC_TL_UCP_ONESIDED_N_SLOTS
 
 typedef struct ucc_tl_ucp_iface {
     ucc_tl_iface_t super;
@@ -122,6 +132,9 @@ typedef struct ucc_tl_ucp_context_config {
     ucc_tl_ucp_local_copy_type_t local_copy_type;
     int                          memtype_copy_enable;
     uint32_t                     exported_memory_handle;
+    /* Size of the internal one-sided scratch segment (bytes); 0 = disabled.
+     * Plan 6.1: appended as the last registered segment, remotely writable. */
+    size_t                       onesided_scratch_size;
 } ucc_tl_ucp_context_config_t;
 
 typedef ucc_tl_ucp_lib_config_t ucc_tl_ucp_team_config_t;
@@ -191,6 +204,19 @@ typedef struct ucc_tl_ucp_team {
     ucc_rank_t                 opt_radix_host; /* host specific opt radix */
     ucc_ring_pattern_t         *cuda_ring;
     /*
+     * Sub-region index of this team's one-sided scratch (plan 6.1). Assigned
+     * deterministically from a per-context creation counter (same on every
+     * rank), so the symmetric offset is uniform. -1 = scratch disabled.
+     */
+    int                        scratch_id;
+    /*
+     * Number of in-flight one-sided reduction tasks currently holding this
+     * team's scratch region (plan 6.1). Incremented on scratch alloc,
+     * decremented on release; a second concurrent request falls back to
+     * UCC_ERR_NOT_SUPPORTED rather than clobber the first task's data.
+     */
+    int                        scratch_refcount;
+    /*
      * Monotonic one-sided signal-slot bases (I7): slot s is never reset to
      * zero during a round; a task expecting k signals computes base+k at
      * post time and commits base+k on completion. Zeroed by the class init
@@ -251,6 +277,16 @@ typedef struct ucc_tl_ucp_context {
     uint64_t                    ucp_memory_types;
     int                         topo_required;
     uint32_t                    n_teams;
+    /*
+     * Internally-registered one-sided scratch segment (plan 6.1): an extra
+     * symmetric segment appended last so user segment indices are unchanged.
+     * Remotely writable, used as a landing pad for reduction contributions.
+     * `scratch_seg` is its index in remote_info (== n_rinfo_segs - 1), or -1
+     * when the UCC_TL_UCP_ONESIDED_SCRATCH_SIZE knob is 0 (disabled).
+     */
+    void *                      scratch;
+    size_t                      scratch_size;
+    int                         scratch_seg;
     struct {
         ucc_tl_ucp_copy_post_fn_t     post;
         ucc_tl_ucp_copy_test_fn_t     test;

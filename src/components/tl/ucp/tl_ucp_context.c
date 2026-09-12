@@ -157,8 +157,14 @@ ucc_status_t ucc_tl_ucp_rinfo_destroy(ucc_tl_ucp_context_t *ctx)
     }
     ucc_free(ctx->remote_info);
     ucc_free(ctx->rkeys);
-    ctx->remote_info = NULL;
-    ctx->rkeys       = NULL;
+    /* The one-sided scratch segment is the last remote_info entry; its
+     * mem_h was unmapped above. Free the backing heap buffer and reset. */
+    ucc_free(ctx->scratch);
+    ctx->remote_info  = NULL;
+    ctx->rkeys        = NULL;
+    ctx->scratch      = NULL;
+    ctx->scratch_size = 0;
+    ctx->scratch_seg  = -1;
 
     return UCC_OK;
 }
@@ -347,6 +353,9 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
     self->n_rinfo_segs = 0;
     self->rkeys        = NULL;
     self->n_teams      = 0;
+    self->scratch      = NULL;
+    self->scratch_size = 0;
+    self->scratch_seg  = -1;
     if (params->params.mask & UCC_CONTEXT_PARAM_FIELD_MEM_PARAMS &&
         params->params.mask & UCC_CONTEXT_PARAM_FIELD_OOB) {
         ucc_status = ucc_tl_ucp_ctx_remote_populate(
@@ -543,12 +552,24 @@ ucc_status_t ucc_tl_ucp_populate_rcache(void *addr, size_t length,
     return UCC_OK;
 }
 
+static ucs_status_t
+ucc_tl_ucp_ctx_remote_scratch(ucc_tl_ucp_context_t     *ctx,
+                              ucc_tl_ucp_remote_info_t *info, int seg,
+                              size_t size);
+
 ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
                                             ucc_mem_map_params_t   map,
                                             ucc_context_oob_coll_t oob)
 {
     uint32_t             size  = oob.n_oob_eps;
     uint64_t             nsegs = map.n_segments;
+    /* One-sided scratch is appended as the LAST segment (plan 6.1). It must
+     * be registered uniformly across ranks so that n_rinfo_segs (and thus the
+     * packed-EP address layout and UCC_TL_UCP_REMOTE_RKEY indexing) stay
+     * consistent. Size the rkeys/remote_info arrays for it up front. */
+    uint64_t             has_scratch =
+        (ctx->cfg.onesided_scratch_size > 0) ? 1 : 0;
+    uint64_t             total_segs  = nsegs + has_scratch;
     ucp_mem_map_params_t mmap_params;
     ucp_mem_h            mh;
     ucs_status_t         status;
@@ -574,20 +595,20 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
     }
 
     ctx->rkeys = (ucp_rkey_h *)ucc_calloc(
-        sizeof(ucp_rkey_h), nsegs * size, "ucp_ctx_rkeys");
+        sizeof(ucp_rkey_h), total_segs * size, "ucp_ctx_rkeys");
     if (NULL == ctx->rkeys) {
         tl_error(
             ctx->super.super.lib,
             "failed to allocated %zu bytes",
-            sizeof(ucp_rkey_h) * nsegs * size);
+            sizeof(ucp_rkey_h) * total_segs * size);
         return UCC_ERR_NO_MEMORY;
     }
 
     ctx->remote_info = (ucc_tl_ucp_remote_info_t *)ucc_calloc(
-        nsegs, sizeof(ucc_tl_ucp_remote_info_t), "ucp_remote_info");
+        total_segs, sizeof(ucc_tl_ucp_remote_info_t), "ucp_remote_info");
     if (NULL == ctx->remote_info) {
         tl_error(ctx->super.super.lib, "failed to allocated %zu bytes",
-                 sizeof(ucc_tl_ucp_remote_info_t) * nsegs);
+                 sizeof(ucc_tl_ucp_remote_info_t) * total_segs);
         ucc_status = UCC_ERR_NO_MEMORY;
         goto fail_alloc_remote_segs;
     }
@@ -618,11 +639,31 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
         ctx->remote_info[i].va_base = map.segments[i].address;
         ctx->remote_info[i].len     = map.segments[i].len;
     }
-    ctx->n_rinfo_segs = nsegs;
+
+    /* Append the one-sided scratch segment last (plan 6.1) so that user
+     * segment indices are unchanged and it can be resolved to peers by the
+     * same symmetric offset (I1). */
+    if (has_scratch) {
+        status = ucc_tl_ucp_ctx_remote_scratch(ctx, ctx->remote_info,
+                                               (int)nsegs,
+                                               ctx->cfg.onesided_scratch_size);
+        if (UCS_OK != status) {
+            tl_error(ctx->super.super.lib,
+                     "failed to register one-sided scratch segment: %s",
+                     ucs_status_string(status));
+            ucc_status = ucs_status_to_ucc_status(status);
+            goto fail_mem_map;
+        }
+        tl_debug(ctx->super.super.lib,
+                 "registered one-sided scratch segment #%d: %p size %zu",
+                 (int)nsegs, ctx->scratch, ctx->cfg.onesided_scratch_size);
+    }
+
+    ctx->n_rinfo_segs = total_segs;
 
     return UCC_OK;
 fail_mem_map:
-    for (i = 0; i < nsegs; i++) {
+    for (i = 0; i < total_segs; i++) {
         if (ctx->remote_info[i].mem_h) {
             ucp_mem_unmap(ctx->worker.ucp_context, ctx->remote_info[i].mem_h);
         }
@@ -635,6 +676,54 @@ fail_alloc_remote_segs:
     ucc_free(ctx->rkeys);
     return ucc_status;
 }
+static ucs_status_t
+ucc_tl_ucp_ctx_remote_scratch(ucc_tl_ucp_context_t     *ctx,
+                              ucc_tl_ucp_remote_info_t *info, int seg,
+                              size_t size)
+{
+    ucp_mem_map_params_t mmap_params;
+    ucp_mem_h            mh;
+    ucs_status_t         status;
+
+    ctx->scratch = ucc_malloc(size, "ucp_onesided_scratch");
+    if (NULL == ctx->scratch) {
+        tl_error(ctx->super.super.lib,
+                 "failed to allocate %zu bytes for one-sided scratch", size);
+        return UCS_ERR_NO_MEMORY;
+    }
+    memset(ctx->scratch, 0, size);
+
+    mmap_params.field_mask =
+        UCP_MEM_MAP_PARAM_FIELD_ADDRESS | UCP_MEM_MAP_PARAM_FIELD_LENGTH;
+    mmap_params.address = ctx->scratch;
+    mmap_params.length  = size;
+    status = ucp_mem_map(ctx->worker.ucp_context, &mmap_params, &mh);
+    if (UCS_OK != status) {
+        tl_error(ctx->super.super.lib,
+                 "ucp_mem_map of one-sided scratch failed: %s",
+                 ucs_status_string(status));
+        ucc_free(ctx->scratch);
+        ctx->scratch = NULL;
+        return status;
+    }
+
+    info[seg].mem_h   = (void *)mh;
+    info[seg].va_base = ctx->scratch;
+    info[seg].len     = size;
+    status = ucp_rkey_pack(ctx->worker.ucp_context, mh, &info[seg].packed_key,
+                           &info[seg].packed_key_len);
+    if (UCS_OK != status) {
+        tl_error(ctx->super.super.lib,
+                 "failed to pack one-sided scratch rkey: %s",
+                 ucs_status_string(status));
+        return status;
+    }
+    ctx->scratch_size = size;
+    ctx->scratch_seg  = seg;
+    return UCS_OK;
+}
+
+
 
 static void ucc_tl_ucp_ctx_remote_pack_data(ucc_tl_ucp_context_t *ctx,
                                             void                 *pack)

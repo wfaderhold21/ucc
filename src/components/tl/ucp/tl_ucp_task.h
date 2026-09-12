@@ -65,6 +65,12 @@ typedef struct ucc_tl_ucp_task {
         } onesided;
     };
     uint32_t        n_polls;
+    /*
+     * Last-hit TL segment index for resolve_p2p_by_va (plan 6.1 / ucc-opt 3):
+     * RMA ops within a round target one segment, so re-checking the cached
+     * segment first avoids the per-op linear segment scan. 0xFF = cold.
+     */
+    uint8_t         seg_cache;
     ucc_subset_t    subset;
     union {
         struct {
@@ -314,6 +320,7 @@ static inline ucc_tl_ucp_task_t *ucc_tl_ucp_get_task(ucc_tl_ucp_team_t *team)
     task->super.flags       = 0;
     task->flags             = 0;
     task->n_polls           = ctx->cfg.n_polls;
+    task->seg_cache         = 0xFF; /* cold: no last-hit segment yet */
     task->super.team        = &team->super.super;
     task->subset.map.type   = UCC_EP_MAP_FULL;
     task->subset.map.ep_num = UCC_TL_TEAM_SIZE(team);

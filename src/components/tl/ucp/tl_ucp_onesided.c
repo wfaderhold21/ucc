@@ -104,6 +104,58 @@ ucc_status_t ucc_tl_ucp_onesided_check_args(ucc_base_coll_args_t *coll_args,
 }
 
 /*
+ * One-sided scratch allocator (plan 6.1). The context's scratch segment is
+ * partitioned into N_REGIONS equal regions; the team's region is indexed by
+ * its deterministic ordinal (scratch_id, identical on every rank), so the
+ * returned pointer sits at the same offset on every rank (I1) and two teams'
+ * regions never overlap. The per-team refcount admits at most one in-flight
+ * reduction per team so a second cannot clobber the first.
+ */
+ucc_status_t ucc_tl_ucp_onesided_scratch_alloc(ucc_tl_ucp_team_t *team,
+                                               size_t             size,
+                                               void             **ptr)
+{
+    ucc_tl_ucp_context_t *ctx = UCC_TL_UCP_TEAM_CTX(team);
+    int                   id  = team->scratch_id;
+    size_t                region, offset;
+
+    if (ctx->scratch_seg < 0 || NULL == ctx->scratch) {
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "one-sided scratch segment is disabled");
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+    if (id < 0 || id >= UCC_TL_UCP_ONESIDED_SCRATCH_N_REGIONS) {
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "scratch region index %d out of range (%d)",
+                 id, UCC_TL_UCP_ONESIDED_SCRATCH_N_REGIONS);
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+    region = ctx->scratch_size / UCC_TL_UCP_ONESIDED_SCRATCH_N_REGIONS;
+    offset = (size_t)id * region;
+    if (region < size) {
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "scratch request %zu exceeds region size %zu", size, region);
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+    if (team->scratch_refcount > 0) {
+        tl_debug(UCC_TL_TEAM_LIB(team),
+                 "scratch region already in use by an in-flight reduction");
+        return UCC_ERR_NOT_SUPPORTED;
+    }
+
+    team->scratch_refcount++;
+    *ptr = PTR_OFFSET(ctx->scratch, offset);
+    return UCC_OK;
+}
+
+void ucc_tl_ucp_onesided_scratch_release(ucc_tl_ucp_team_t *team)
+{
+    if (team->scratch_refcount > 0) {
+        team->scratch_refcount--;
+    }
+}
+
+/*
  * Accounted atomic post: ucp_atomic_op_nbx with a completion callback that
  * bumps the task's get counters (onesided ops are accounted in the tagged
  * union's word slots, keeping the 4-word aliasing intact).
@@ -144,7 +196,7 @@ static ucc_status_t ucc_tl_ucp_atomic_add_nb(long *          local_slot,
     }
 
     status = ucc_tl_ucp_resolve_p2p_by_va(team, local_slot, &ep, peer, &rva,
-                                          &rkey, &segment, memh);
+                                          &rkey, &segment, memh, task);
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
     }
@@ -323,7 +375,7 @@ ucc_status_t ucc_tl_ucp_put_signal(void *             src,
         }
     }
     status = ucc_tl_ucp_resolve_p2p_by_va(team, dst, &ep, peer, &rva, &rkey,
-                                          &segment, dst_memh);
+                                          &segment, dst_memh, task);
     if (ucc_unlikely(UCC_OK != status)) {
         ucc_free(sig);
         return status;

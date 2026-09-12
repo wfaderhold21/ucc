@@ -72,6 +72,28 @@ ucc_status_t ucc_tl_ucp_onesided_check_args(ucc_base_coll_args_t *coll_args,
                                             uint64_t              reqs);
 
 /*
+ * One-sided scratch segment allocation (plan 6.1).
+ *
+ * The context registers a symmetric, remotely-writable scratch segment as the
+ * LAST TL segment. It is partitioned into UCC_TL_UCP_ONESIDED_SCRATCH_N_REGIONS
+ * equal regions; a team's region index is team->scratch_id (a deterministic
+ * per-context ordinal, identical on every rank), so the returned pointer has
+ * the SAME offset on every rank (I1) and two teams' regions never overlap.
+ * A per-team refcount guarantees at most one in-flight reduction per team, so
+ * concurrent same-team reductions cannot clobber each other: the second
+ * caller gets UCC_ERR_NOT_SUPPORTED and the core falls back.
+ *
+ * Returns the region base (usable as a local RMA target / landing pad) on
+ * success, UCC_ERR_NOT_SUPPORTED when scratch is disabled, `size` exceeds the
+ * region, or the team's region is already in use. `ucc_tl_ucp_onesided_
+ * scratch_release` MUST be called once per successful alloc on the team.
+ */
+ucc_status_t ucc_tl_ucp_onesided_scratch_alloc(ucc_tl_ucp_team_t *team,
+                                               size_t             size,
+                                               void             **ptr);
+void         ucc_tl_ucp_onesided_scratch_release(ucc_tl_ucp_team_t *team);
+
+/*
  * Atomically add `value` to the peer's copy of the counter at the same
  * symmetric offset as `local_slot` (I1: a local slot pointer is a valid
  * RMA target). `memh` is the destination memory handle array (global-memh

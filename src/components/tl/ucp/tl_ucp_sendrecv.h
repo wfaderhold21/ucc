@@ -447,7 +447,8 @@ static inline ucc_status_t ucc_tl_ucp_check_memh(ucp_ep_h *ep, ucc_rank_t me,
 static inline ucc_status_t
 ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team, void *va, ucp_ep_h *ep,
                              ucc_rank_t peer, uint64_t *rva, ucp_rkey_h *rkey,
-                             int *segment, ucc_mem_map_mem_h *dst_memh)
+                             int *segment, ucc_mem_map_mem_h *dst_memh,
+                             ucc_tl_ucp_task_t *task)
 {
     ucc_tl_ucp_context_t *ctx            = UCC_TL_UCP_TEAM_CTX(team);
     ucc_rank_t            grank          = UCC_TL_TEAM_RANK(team);
@@ -482,35 +483,58 @@ ucc_tl_ucp_resolve_p2p_by_va(ucc_tl_ucp_team_t *team, void *va, ucp_ep_h *ep,
     key_sizes   = PTR_OFFSET(base_offset, (section_offset * 2));
     keys        = PTR_OFFSET(base_offset, (section_offset * 3));
 
-    for (int i = 0; i < ctx->n_rinfo_segs; i++) {
-        uint64_t base = (uint64_t)team->va_base[i];
-        uint64_t end = base + team->base_length[i];
-        if ((uint64_t)va >= base &&
-            (uint64_t)va < end) {
+    /*
+     * ucc-opt.md section 3: RMA ops within a round target one segment, so
+     * re-check the last-hit segment (cached on the task) before the linear
+     * scan. The cached index is self-validating: only trust it if it is in
+     * range and `va` still falls within that segment.
+     */
+    if (task && task->seg_cache < (uint8_t)ctx->n_rinfo_segs) {
+        int        i      = task->seg_cache;
+        uint64_t  base    = (uint64_t)team->va_base[i];
+        uint64_t  end     = base + team->base_length[i];
+        if ((uint64_t)va >= base && (uint64_t)va < end) {
             *segment = i;
-            break;
+            key_offset = 0;
+            for (int j = 0; j < i; j++) {
+                key_offset += key_sizes[j];
+            }
         }
-        key_offset += key_sizes[i];
     }
     if (ucc_unlikely(0 > *segment)) {
-        if (dst_memh) {
-            /* check if segment is in src/dst memh */
-            status = find_tl_index(dst_memh[grank], &tl_index);
-            if (status == UCC_ERR_NOT_FOUND) {
-               tl_error(UCC_TL_TEAM_LIB(team),
-                 "attempt to perform one-sided operation with malformed mem map handle");
-               return status;
+        for (int i = 0; i < ctx->n_rinfo_segs; i++) {
+            uint64_t base = (uint64_t)team->va_base[i];
+            uint64_t end = base + team->base_length[i];
+            if ((uint64_t)va >= base &&
+                (uint64_t)va < end) {
+                *segment = i;
+                break;
             }
-
-            status = ucc_tl_ucp_check_memh(ep, grank, peer, va, rva, rkey, tl_index, dst_memh);
-            if (status == UCC_OK) {
-                return UCC_OK;
-            }
+            key_offset += key_sizes[i];
         }
-        /* general error if nothing was found */
-        tl_error(UCC_TL_TEAM_LIB(team),
-            "attempt to perform one-sided operation on non-registered memory %p", va);
-        return UCC_ERR_NOT_FOUND;
+        if (ucc_unlikely(0 > *segment)) {
+            if (dst_memh) {
+                /* check if segment is in src/dst memh */
+                status = find_tl_index(dst_memh[grank], &tl_index);
+                if (status == UCC_ERR_NOT_FOUND) {
+                   tl_error(UCC_TL_TEAM_LIB(team),
+                     "attempt to perform one-sided operation with malformed mem map handle");
+                   return status;
+                }
+
+                status = ucc_tl_ucp_check_memh(ep, grank, peer, va, rva, rkey, tl_index, dst_memh);
+                if (status == UCC_OK) {
+                    return UCC_OK;
+                }
+            }
+            /* general error if nothing was found */
+            tl_error(UCC_TL_TEAM_LIB(team),
+                "attempt to perform one-sided operation on non-registered memory %p", va);
+            return UCC_ERR_NOT_FOUND;
+        }
+    }
+    if (task) {
+        task->seg_cache = (uint8_t)*segment;
     }
     if (ucc_unlikely(NULL == UCC_TL_UCP_REMOTE_RKEY(ctx, peer, *segment))) {
         ucs_status_t ucs_status =
@@ -602,7 +626,8 @@ static inline ucc_status_t ucc_tl_ucp_put_nb(void *buffer, void *target,
     }
 
     status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank,
-                                          &rva, &rkey, &segment, dest_memh);
+                                          &rva, &rkey, &segment, dest_memh,
+                                          task);
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
     }
@@ -662,7 +687,8 @@ static inline ucc_status_t ucc_tl_ucp_get_nb(void *buffer, void *target,
     }
 
     status = ucc_tl_ucp_resolve_p2p_by_va(team, target, &ep, dest_group_rank,
-                                          &rva, &rkey, &segment, dest_memh);
+                                          &rva, &rkey, &segment, dest_memh,
+                                          task);
     if (ucc_unlikely(UCC_OK != status)) {
         return status;
     }

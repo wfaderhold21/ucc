@@ -94,6 +94,8 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
     self->opt_radix       = UCC_UUNITS_AUTO_RADIX;
     self->opt_radix_host  = UCC_UUNITS_AUTO_RADIX;
     self->cuda_ring       = NULL;
+    self->scratch_id      = -1;
+    self->scratch_refcount = 0;
 
     status = ucc_config_clone_table(&UCC_TL_UCP_TEAM_LIB(self)->cfg, &self->cfg,
                                     ucc_tl_ucp_lib_config_table);
@@ -170,6 +172,15 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_team_t, ucc_base_context_t *tl_context,
         }
     }
 
+    /*
+     * Deterministic per-team scratch region index (plan 6.1). n_teams is a
+     * per-context creation counter that is incremented identically on every
+     * rank (teams are created in lockstep), so this ordinal is uniform across
+     * ranks; the scratch sub-region it indexes therefore has the same
+     * symmetric offset on all ranks (I1). -1 when scratch is disabled.
+     */
+    self->scratch_id =
+        (ctx->scratch_seg >= 0) ? (int)ctx->n_teams : -1;
     ctx->n_teams++;
 
     tl_debug(tl_context->lib, "posted tl team: %p", self);
