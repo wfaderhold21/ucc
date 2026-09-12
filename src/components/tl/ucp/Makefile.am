@@ -105,6 +105,7 @@ reduce_scatter =                            \
 reduce_scatterv =                          \
 	reduce_scatterv/reduce_scatterv.h      \
 	reduce_scatterv/reduce_scatterv_ring.c \
+	reduce_scatterv/reduce_scatterv_onesided.c \
 	reduce_scatterv/reduce_scatterv.c
 
 scatter =                     \

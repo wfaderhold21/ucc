@@ -291,6 +291,16 @@ typedef struct ucc_tl_ucp_task {
             uint8_t                        gap_filled;
         } reduce_scatter_onesided;
         struct {
+            long                           expected;
+            ucc_rank_t                     peer;
+            int                            phase;
+            ucc_tl_ucp_onesided_window_t   window;
+            void                           *scratch;
+            ucc_ee_executor_task_t         *etask;
+            ucc_ee_executor_t              *executor;
+            uint8_t                        gap_filled;
+        } reduce_scatterv_onesided;
+        struct {
             ucc_rank_t                     rounds;
             ucc_rank_t                     round;
         } barrier_onesided;

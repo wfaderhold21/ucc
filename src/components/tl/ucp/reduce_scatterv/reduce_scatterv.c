@@ -13,5 +13,9 @@ ucc_base_coll_alg_info_t
             {.id   = UCC_TL_UCP_REDUCE_SCATTERV_ALG_RING,
              .name = "ring",
              .desc = "O(N) ring"},
+        [UCC_TL_UCP_REDUCE_SCATTERV_ALG_ONESIDED] =
+            {.id   = UCC_TL_UCP_REDUCE_SCATTERV_ALG_ONESIDED,
+             .name = "onesided",
+             .desc = "O(1) one-sided RMA"},
         [UCC_TL_UCP_REDUCE_SCATTERV_ALG_LAST] = {
             .id = 0, .name = NULL, .desc = NULL}};

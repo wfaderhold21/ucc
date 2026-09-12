@@ -412,3 +412,223 @@ UCC_TEST_P(test_reduce_scatterv_alg, ring)
 }
 INSTANTIATE_TEST_CASE_P(, test_reduce_scatterv_alg,
                         ::testing::Values("bidirectional", "unidirectional"));
+
+/*
+ * One-sided reduce_scatterv (plan 6.3). Mirrors the one-sided reduce_scatter
+ * test but with variable per-rank block sizes, so the per-block src/dst
+ * offsets and the size*max_count scratch region are exercised. Rank r's src
+ * holds blocks of counts[r]=8+16r elements; block p (element i) holds
+ * (i + p + r) % 8, so rank r's dst (counts[r] elements) must hold
+ * sum over every rank q of (i + r + q) % 8 (the SUM of every rank's r-th
+ * block).
+ */
+static const int REDUCE_SCATTERV_ONESIDED_SLOT = 0;
+
+/* Distinct, positive per-rank counts; size up to 16 keeps max_count small. */
+static size_t osv_count_at(int nprocs, int r)
+{
+    (void)nprocs;
+    return (size_t)(8 + 16 * r);
+}
+
+class test_reduce_scatterv_onesided
+    : public ::testing::TestWithParam<std::tuple<int, ucc_datatype_t>> {
+  public:
+    void os_data_init(UccTeam_h team, ucc_datatype_t dtype, UccCollCtxVec &ctxs)
+    {
+        int    nprocs = team->procs.size();
+        size_t dt     = ucc_dt_size(dtype);
+        size_t total  = 0, max_count = 0;
+
+        for (int r = 0; r < nprocs; r++) {
+            total += osv_count_at(nprocs, r);
+            max_count = std::max(max_count, osv_count_at(nprocs, r));
+        }
+
+        ctxs.resize(nprocs);
+        for (int r = 0; r < nprocs; r++) {
+            ucc_coll_args_t *coll =
+                (ucc_coll_args_t *)calloc(1, sizeof(ucc_coll_args_t));
+            ctxs[r] =
+                (gtest_ucc_coll_ctx_t *)calloc(1, sizeof(gtest_ucc_coll_ctx_t));
+            ctxs[r]->args = coll;
+
+            coll->coll_type = UCC_COLL_TYPE_REDUCE_SCATTERV;
+            coll->op        = UCC_OP_SUM;
+            coll->mask      = UCC_COLL_ARGS_FIELD_FLAGS |
+                              UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER;
+            coll->flags     = UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS;
+
+            coll->src.info.mem_type  = UCC_MEMORY_TYPE_HOST;
+            coll->src.info.datatype  = dtype;
+            coll->src.info.count     = (ucc_count_t)total;
+            coll->src.info.buffer    = team->procs[r].p->onesided_buf[0];
+            /* INT32 only (see INSTANTIATE): fill each block p of
+             * counts[p] elements; element i holds (i + p + r) % 8. */
+            int32_t *src = (int32_t *)team->procs[r].p->onesided_buf[0];
+            size_t   off = 0;
+            for (int p = 0; p < nprocs; p++) {
+                size_t cnt = osv_count_at(nprocs, p);
+                for (size_t i = 0; i < cnt; i++) {
+                    src[off + i] = (int32_t)((i + p + r) % 8);
+                }
+                off += cnt;
+            }
+
+            coll->dst.info_v.mem_type  = UCC_MEMORY_TYPE_HOST;
+            coll->dst.info_v.datatype  = dtype;
+            coll->dst.info_v.counts =
+                (ucc_count_t *)ucc_malloc(nprocs * sizeof(uint32_t), "counts");
+            for (int p = 0; p < nprocs; p++) {
+                ((uint32_t *)coll->dst.info_v.counts)[p] =
+                    (uint32_t)osv_count_at(nprocs, p);
+            }
+            coll->dst.info_v.buffer = team->procs[r].p->onesided_buf[1];
+
+            coll->global_work_buffer = team->procs[r].p->onesided_buf[2];
+
+            size_t rcount = osv_count_at(nprocs, r);
+            ctxs[r]->rbuf_size = rcount * dt;
+            clear_buffer(team->procs[r].p->onesided_buf[1], rcount * dt,
+                         UCC_MEMORY_TYPE_HOST, 0);
+        }
+    }
+
+    void os_data_fini(UccCollCtxVec ctxs)
+    {
+        for (gtest_ucc_coll_ctx_t *ctx : ctxs) {
+            ucc_coll_args_t *coll = ctx->args;
+            ucc_free(coll->dst.info_v.counts);
+            free(coll);
+            free(ctx);
+        }
+        ctxs.clear();
+    }
+
+    /* Rank r's dst (counts[r] elements) must hold, for element i:
+     * sum over every rank q of (i + r + q) % 8 (the SUM of every rank's
+     * r-th block, which is counts[r] elements wide). */
+    bool os_data_validate(UccTeam_h team, ucc_datatype_t dtype)
+    {
+        int nprocs = team->procs.size();
+        for (int r = 0; r < nprocs; r++) {
+            size_t    rcount = osv_count_at(nprocs, r);
+            int32_t *dst    = (int32_t *)team->procs[r].p->onesided_buf[1];
+            for (size_t i = 0; i < rcount; i++) {
+                int res = 0;
+                for (int q = 0; q < nprocs; q++) {
+                    res += (i + r + q) % 8;
+                }
+                if (dst[i] != (int32_t)res) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /* Zero each rank's dst segment (counts[r] elements) so a repeat round
+     * reduces fresh (not stale) data. */
+    void os_reset_dst(UccTeam_h team, ucc_datatype_t dtype)
+    {
+        int    nprocs = team->procs.size();
+        size_t dt     = ucc_dt_size(dtype);
+        for (int r = 0; r < nprocs; r++) {
+            clear_buffer(team->procs[r].p->onesided_buf[1],
+                         osv_count_at(nprocs, r) * dt, UCC_MEMORY_TYPE_HOST, 0);
+        }
+    }
+};
+
+UCC_TEST_P(test_reduce_scatterv_onesided, single_onesided)
+{
+    const int            size  = std::get<0>(GetParam());
+    const ucc_datatype_t dtype = std::get<1>(GetParam());
+    ucc_job_env_t        env = {{"UCC_TL_UCP_TUNE",
+                                 "reduce_scatterv:0-inf:@onesided"},
+                                {"UCC_TL_UCP_ONESIDED_SCRATCH_SIZE",
+                                 "4194304"}};
+    UccJob               job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+
+    if (size == 1) {
+        GTEST_SKIP() << "UCP TL does not support size-1 teams; the self TL "
+                       "handles reduce_scatterv as a no-op.";
+    }
+
+    UccTeam_h     team = job.create_team(size, true, true, true);
+    UccCollCtxVec ctxs;
+
+    os_data_init(team, dtype, ctxs);
+    UccReq req(team, ctxs);
+    ASSERT_EQ(UCC_OK, req.status);
+    req.start();
+    ucc_status_t st = req.wait();
+    EXPECT_EQ(UCC_OK, st);
+
+    EXPECT_TRUE(os_data_validate(team, dtype))
+        << "onesided reduce_scatterv data mismatch, size=" << size;
+
+    /* Every rank's local slot 0 advanced by exactly `size` (size-1 remote
+     * signals + 1 self-increment). A two-sided fallback never touches the
+     * work buffer, so slot 0 would still be 0. */
+    for (int r = 0; r < size; r++) {
+        long *slot = (long *)team->procs[r].p->onesided_buf[2];
+        EXPECT_EQ((long)size, slot[REDUCE_SCATTERV_ONESIDED_SLOT])
+            << "onesided reduce_scatterv slot, size=" << size << " rank=" << r;
+    }
+
+    os_data_fini(ctxs);
+}
+
+/*
+ * Two one-sided reduce_scattervs back-to-back on the same team with no
+ * barrier between: the I7 counter-reuse and scratch-refcount regression.
+ * Every rank's slot 0 must reach 2*size after the second round, and the data
+ * must still validate each round.
+ */
+UCC_TEST_P(test_reduce_scatterv_onesided, multiple_onesided)
+{
+    const int            size  = std::get<0>(GetParam());
+    const ucc_datatype_t dtype = std::get<1>(GetParam());
+    ucc_job_env_t        env = {{"UCC_TL_UCP_TUNE",
+                                 "reduce_scatterv:0-inf:@onesided"},
+                                {"UCC_TL_UCP_ONESIDED_SCRATCH_SIZE",
+                                 "4194304"}};
+    UccJob               job(size, UccJob::UCC_JOB_CTX_GLOBAL_ONESIDED, env);
+
+    if (size == 1) {
+        GTEST_SKIP() << "UCP TL does not support size-1 teams.";
+    }
+
+    UccTeam_h     team = job.create_team(size, true, true, true);
+    UccCollCtxVec ctxs;
+
+    os_data_init(team, dtype, ctxs);
+
+    for (int call = 0; call < 2; call++) {
+        UccReq req(team, ctxs);
+        ASSERT_EQ(UCC_OK, req.status);
+        req.start();
+        ucc_status_t st = req.wait();
+        EXPECT_EQ(UCC_OK, st);
+        EXPECT_TRUE(os_data_validate(team, dtype))
+            << "onesided reduce_scatterv back-to-back data mismatch, call="
+            << call;
+        for (int r = 0; r < size; r++) {
+            long *slot = (long *)team->procs[r].p->onesided_buf[2];
+            EXPECT_EQ((long)(call + 1) * size,
+                      slot[REDUCE_SCATTERV_ONESIDED_SLOT])
+                << "onesided reduce_scatterv back-to-back slot, size=" << size
+                << " rank=" << r << " call=" << call;
+        }
+        os_reset_dst(team, dtype);
+    }
+
+    os_data_fini(ctxs);
+}
+
+INSTANTIATE_TEST_CASE_P(
+    , test_reduce_scatterv_onesided,
+    ::testing::Combine(
+        ::testing::Values(2, 3, 4, 8, 16), // size
+        ::testing::Values(UCC_DT_INT32))); // dtype
