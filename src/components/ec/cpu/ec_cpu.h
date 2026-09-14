@@ -27,7 +27,10 @@ typedef struct ucc_ec_cpu_config {
     unsigned long exec_num_workers;   /* pool worker count               */
     unsigned long exec_max_tasks;     /* pool queue capacity (nodes)     */
     unsigned long reduce_chunk_size;  /* chunk split size for threading  */
+    unsigned long reduce_num_threads; /* split width; 0 = auto (nproc)   */
+    unsigned long reduce_split_thresh; /* min elements worth splitting   */
     int           use_threaded_reduce; /* 1 = async post via worker pool */
+    int           use_split_reduce;   /* 1 = split one reduce across threads */
     int           pin_threads;        /* pin workers to one core each    */
     int           pin_start_cpu;      /* first core for pinning          */
     int           pin_stride;         /* core stride: start + i*stride   */
@@ -55,6 +58,17 @@ extern ucc_ec_cpu_t ucc_ec_cpu;
 #ifdef HAVE_EC_THREADED_REDUCE
 #define EC_CPU_CONFIG                                                         \
     (ucc_derived_of(ucc_ec_cpu.super.config, ucc_ec_cpu_config_t))
+
+/* Per-process reduce routing counters: reduce tasks handed to a pool
+ * worker vs run inline in ucc_cpu_executor_task_post.  Both are also
+ * logged at ec_info level from ucc_ec_cpu_finalize. */
+uint64_t ucc_ec_cpu_pool_reduce_count(void);
+uint64_t ucc_ec_cpu_inline_reduce_count(void);
+uint64_t ucc_ec_cpu_split_reduce_count(void);
+
+/* Wall time / element volume of reduces run synchronously in task_post. */
+uint64_t ucc_ec_cpu_sync_reduce_ns(void);
+uint64_t ucc_ec_cpu_sync_reduce_elems(void);
 #endif
 
 ucc_status_t ucc_ec_cpu_reduce(ucc_eee_task_reduce_t *task, void * restrict dst, void * const * restrict srcs, uint16_t flags);

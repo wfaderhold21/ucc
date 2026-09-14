@@ -6,9 +6,12 @@
 
 #include "ec_cpu.h"
 #include "utils/arch/cpu.h"
+#include "utils/ucc_atomic.h"
 #include "components/mc/ucc_mc.h"
+#include <inttypes.h>
 #include <limits.h>
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifdef HAVE_EC_THREADED_REDUCE
@@ -39,6 +42,30 @@ static ucc_config_field_t ucc_ec_cpu_config_table[] = {
      "(1 = threaded, 0 = run synchronously in task_post)",
      ucc_offsetof(ucc_ec_cpu_config_t, use_threaded_reduce),
      UCC_CONFIG_TYPE_BOOL},
+
+    {"USE_SPLIT_REDUCE", "0",
+     "Split a single reduce across REDUCE_NUM_THREADS threads in task_post "
+     "(1 = split, 0 = reduce on one thread).  Takes precedence over "
+     "USE_THREADED_REDUCE for reduce tasks: the two are alternative uses of "
+     "the same cores, and splitting needs the posting thread to block",
+     ucc_offsetof(ucc_ec_cpu_config_t, use_split_reduce),
+     UCC_CONFIG_TYPE_BOOL},
+
+    {"REDUCE_NUM_THREADS", "0",
+     "Number of threads a split reduce is divided across (0 = auto).  "
+     "Reduce streams n_srcs inputs plus one output, so it saturates memory "
+     "bandwidth well before it saturates cores; more threads than the "
+     "memory system can feed only adds handshake cost",
+     ucc_offsetof(ucc_ec_cpu_config_t, reduce_num_threads),
+     UCC_CONFIG_TYPE_ULUNITS},
+
+    {"REDUCE_SPLIT_THRESH", "4194304",
+     "Minimum reduce size (in elements) worth splitting across threads.  "
+     "Measured crossover on a 2x60-core Xeon 8580: a 1.6M-element reduce is "
+     "2.4x slower split, a 6.3M-element one is 1.3x faster, so the cost is "
+     "cross-core data movement rather than the batch handshake",
+     ucc_offsetof(ucc_ec_cpu_config_t, reduce_split_thresh),
+     UCC_CONFIG_TYPE_ULUNITS},
 
     {"PIN_THREADS", "0",
      "Pin worker threads to CPU cores for NUMA locality "
@@ -76,6 +103,95 @@ static ucc_config_field_t ucc_ec_cpu_config_table[] = {
  * single progress thread).
  */
 static int ucc_ec_cpu_pool_active = 0;
+
+/* Per-process reduce routing counters (pool worker vs inline in task_post).
+ * Mirrors ucc_ec_cuda_{host,gpu}_reduce_cnt in the CUDA component. */
+static volatile uint64_t ucc_ec_cpu_pool_reduce_cnt   = 0;
+static volatile uint64_t ucc_ec_cpu_inline_reduce_cnt = 0;
+static volatile uint64_t ucc_ec_cpu_split_reduce_cnt  = 0;
+
+/* Wall time and element volume of the reduces that ran synchronously in
+ * task_post (inline and split).  Together with the benchmark's own
+ * latency these answer "what share of a collective is CPU reduce?".
+ * The pool path is async and completes on a worker, so it is not timed
+ * here. */
+static volatile uint64_t ucc_ec_cpu_sync_ns_total    = 0;
+static volatile uint64_t ucc_ec_cpu_sync_elems_total = 0;
+
+static inline uint64_t ucc_ec_cpu_now_ns(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t ucc_ec_cpu_pool_reduce_count(void)
+{
+    /* volatile read is a single aligned 8-byte load on the supported
+     * archs; increments go through ucc_atomic_add64. */
+    return ucc_ec_cpu_pool_reduce_cnt;
+}
+
+uint64_t ucc_ec_cpu_inline_reduce_count(void)
+{
+    return ucc_ec_cpu_inline_reduce_cnt;
+}
+
+uint64_t ucc_ec_cpu_split_reduce_count(void)
+{
+    return ucc_ec_cpu_split_reduce_cnt;
+}
+
+uint64_t ucc_ec_cpu_sync_reduce_ns(void)
+{
+    return ucc_ec_cpu_sync_ns_total;
+}
+
+uint64_t ucc_ec_cpu_sync_reduce_elems(void)
+{
+    return ucc_ec_cpu_sync_elems_total;
+}
+
+/* Split width: REDUCE_NUM_THREADS, or one thread per online core. */
+static int ucc_ec_cpu_split_threads(void)
+{
+    long n;
+
+    if (EC_CPU_CONFIG->reduce_num_threads > 0) {
+        return (int)EC_CPU_CONFIG->reduce_num_threads;
+    }
+    n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n <= 0) {
+        return 1;
+    }
+    /* Capped at 4: on a 2x60-core Xeon 8580 a 6.3M-element reduce took
+     * 100ms at 4 threads and 96ms at 8, so the fourth thread is already
+     * near the memory-bandwidth ceiling.  Staying low matters at high
+     * ppn, where every rank spawns its own split threads. */
+    return (n > 4) ? 4 : (int)n;
+}
+
+/* One reduce, split across ucc_ec_cpu_split_threads() threads.  The
+ * splitter falls back to the single-threaded reduce on its own when the
+ * count is too small or a batch is already in flight. */
+static ucc_status_t ucc_ec_cpu_reduce_split(ucc_eee_task_reduce_t *tr,
+                                            void *dst, void *const *srcs,
+                                            uint16_t flags)
+{
+    size_t chunk   = EC_CPU_CONFIG->reduce_chunk_size;
+    int    threads = ucc_ec_cpu_split_threads();
+
+    /* Below the threshold the batch handshake dominates, so reduce here
+     * rather than paying for a split that cannot repay it. */
+    if (tr->count < EC_CPU_CONFIG->reduce_split_thresh ||
+        threads <= 1 || tr->n_srcs > UCC_EE_EXECUTOR_NUM_BUFS) {
+        ucc_atomic_add64(&ucc_ec_cpu_inline_reduce_cnt, 1);
+        return ucc_ec_cpu_reduce(tr, dst, srcs, flags);
+    }
+    ucc_atomic_add64(&ucc_ec_cpu_split_reduce_cnt, 1);
+    return ucc_ec_cpu_reduce_threaded(tr, dst, srcs, flags, threads, chunk);
+}
 
 static ucc_status_t ucc_ec_cpu_pool_start(void)
 {
@@ -141,6 +257,18 @@ static void ucc_ec_cpu_pool_stop(void)
  */
 static int ucc_ec_cpu_task_goes_to_pool(const ucc_ee_executor_task_args_t *task_args)
 {
+    /* Splitting owns the reduce path when enabled: handing the task to a
+     * single pool worker would forfeit the split, and the splitter needs
+     * the posting thread to block. */
+    if (EC_CPU_CONFIG->use_split_reduce) {
+        switch (task_args->task_type) {
+        case UCC_EE_EXECUTOR_TASK_REDUCE:
+        case UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED:
+            return 0;
+        default:
+            break;
+        }
+    }
     switch (task_args->task_type) {
     case UCC_EE_EXECUTOR_TASK_REDUCE:
         return task_args->reduce.count >= EC_CPU_CONFIG->reduce_chunk_size;
@@ -197,8 +325,14 @@ static ucc_status_t ucc_ec_cpu_init(const ucc_ec_params_t *ec_params)
     } else {
         ec_debug(&ucc_ec_cpu.super, "threaded reduce disabled (USE_THREADED_REDUCE=0)");
     }
+    if (EC_CPU_CONFIG->use_split_reduce) {
+        ec_info(&ucc_ec_cpu.super,
+                "split reduce enabled: %d threads, chunk %lu elements",
+                ucc_ec_cpu_split_threads(), EC_CPU_CONFIG->reduce_chunk_size);
+    }
 #else
-    if (getenv("UCC_EC_CPU_USE_THREADED_REDUCE")) {
+    if (getenv("UCC_EC_CPU_USE_THREADED_REDUCE") ||
+        getenv("UCC_EC_CPU_USE_SPLIT_REDUCE")) {
         ec_warn(&ucc_ec_cpu.super,
                 "threaded reduce requested but not compiled in "
                 "(rebuild with --enable-ec-threaded-reduce)");
@@ -226,6 +360,17 @@ static ucc_status_t ucc_ec_cpu_finalize()
      */
 #ifdef HAVE_EC_THREADED_REDUCE
     ucc_ec_cpu_pool_stop();
+    /* Logged whether or not the pool ran: a zero/zero line distinguishes
+     * "no reduce ever reached the CPU EC" from "reduces ran inline". */
+    ec_info(&ucc_ec_cpu.super,
+            "reduce routing: %" PRIu64 " pooled, %" PRIu64 " split, %"
+            PRIu64 " inline; sync reduce %" PRIu64 " us over %" PRIu64
+            " elements",
+            ucc_ec_cpu_pool_reduce_count(),
+            ucc_ec_cpu_split_reduce_count(),
+            ucc_ec_cpu_inline_reduce_count(),
+            ucc_ec_cpu_sync_reduce_ns() / 1000,
+            ucc_ec_cpu_sync_reduce_elems());
 #endif
     ucc_mpool_cleanup(&ucc_ec_cpu.executors, 1);
     ucc_mpool_cleanup(&ucc_ec_cpu.executor_tasks, 1);
@@ -272,6 +417,11 @@ ucc_status_t ucc_cpu_executor_task_post(ucc_ee_executor_t *executor,
 {
     ucc_status_t            status = UCC_OK;
     ucc_ee_executor_task_t *eee_task;
+#ifdef HAVE_EC_THREADED_REDUCE
+    int is_reduce = (task_args->task_type == UCC_EE_EXECUTOR_TASK_REDUCE ||
+                     task_args->task_type ==
+                         UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED);
+#endif
 
     eee_task = ucc_mpool_get(&ucc_ec_cpu.executor_tasks);
     if (ucc_unlikely(!eee_task)) {
@@ -298,22 +448,47 @@ ucc_status_t ucc_cpu_executor_task_post(ucc_ee_executor_t *executor,
         if (ucc_unlikely(status != UCC_OK)) {
             goto free_task;
         }
+        if (is_reduce) {
+            ucc_atomic_add64(&ucc_ec_cpu_pool_reduce_cnt, 1);
+        }
         *task = eee_task;
         return UCC_OK;
+    }
+    /* Split reduces are counted in ucc_ec_cpu_reduce_split, which knows
+     * whether the split actually applied. */
+    if (is_reduce && !EC_CPU_CONFIG->use_split_reduce) {
+        ucc_atomic_add64(&ucc_ec_cpu_inline_reduce_cnt, 1);
     }
 #endif
     switch (task_args->task_type) {
     case UCC_EE_EXECUTOR_TASK_REDUCE:
-        status = ucc_ec_cpu_reduce((ucc_eee_task_reduce_t *)&task_args->reduce, task_args->reduce.dst,
-                                   (task_args->flags &
-                                        UCC_EEE_TASK_FLAG_REDUCE_SRCS_EXT) ?
-                                        task_args->reduce.srcs_ext :
-                                        task_args->reduce.srcs,
-                                    task_args->flags);
+    {
+        ucc_eee_task_reduce_t *tr =
+            (ucc_eee_task_reduce_t *)&task_args->reduce;
+        void *const *rsrcs =
+            (task_args->flags & UCC_EEE_TASK_FLAG_REDUCE_SRCS_EXT) ?
+                task_args->reduce.srcs_ext : task_args->reduce.srcs;
+
+#ifdef HAVE_EC_THREADED_REDUCE
+        uint64_t t0 = ucc_ec_cpu_now_ns();
+
+        if (EC_CPU_CONFIG->use_split_reduce) {
+            status = ucc_ec_cpu_reduce_split(tr, tr->dst, rsrcs,
+                                             task_args->flags);
+        } else
+#endif
+        {
+            status = ucc_ec_cpu_reduce(tr, tr->dst, rsrcs, task_args->flags);
+        }
+#ifdef HAVE_EC_THREADED_REDUCE
+        ucc_atomic_add64(&ucc_ec_cpu_sync_ns_total,
+                         ucc_ec_cpu_now_ns() - t0);
+        ucc_atomic_add64(&ucc_ec_cpu_sync_elems_total, tr->count);
+#endif
         if (ucc_unlikely(UCC_OK != status)) {
             goto free_task;
         }
-        break;
+    } break;
     case UCC_EE_EXECUTOR_TASK_REDUCE_STRIDED:
     {
         ucc_eee_task_reduce_strided_t *trs =
@@ -342,7 +517,21 @@ ucc_status_t ucc_cpu_executor_task_post(ucc_ee_executor_t *executor,
         tr.dst    = trs->dst;
         tr.alpha  = trs->alpha;
 
-        status = ucc_ec_cpu_reduce(&tr, tr.dst, srcs, flags);
+#ifdef HAVE_EC_THREADED_REDUCE
+        uint64_t t0 = ucc_ec_cpu_now_ns();
+
+        if (EC_CPU_CONFIG->use_split_reduce) {
+            status = ucc_ec_cpu_reduce_split(&tr, tr.dst, srcs, flags);
+        } else
+#endif
+        {
+            status = ucc_ec_cpu_reduce(&tr, tr.dst, srcs, flags);
+        }
+#ifdef HAVE_EC_THREADED_REDUCE
+        ucc_atomic_add64(&ucc_ec_cpu_sync_ns_total,
+                         ucc_ec_cpu_now_ns() - t0);
+        ucc_atomic_add64(&ucc_ec_cpu_sync_elems_total, tr.count);
+#endif
         if (ucc_unlikely(UCC_OK != status)) {
             goto free_task;
         }
@@ -367,7 +556,13 @@ free_task:
 
 ucc_status_t ucc_cpu_executor_task_test(const ucc_ee_executor_task_t *task)
 {
+#ifdef HAVE_EC_THREADED_REDUCE
+    /* Pool path: workers release-store the final status. */
     return ucc_ec_cpu_task_get_status(task);
+#else
+    /* Sync path: status is written by the posting thread only. */
+    return task->status;
+#endif
 }
 
 ucc_status_t ucc_cpu_executor_task_finalize(ucc_ee_executor_task_t *task)

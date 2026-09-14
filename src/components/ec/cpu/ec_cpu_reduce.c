@@ -471,8 +471,8 @@ ucc_status_t ucc_ec_cpu_reduce_chunk(void * const * restrict srcs,
  * round-trip, plus a 256KB stack mmap), which dominates fork-join at
  * high N and caps scaling below 0.6/N.  Instead, a lazily created set
  * of UCC_EC_CPU_REDUCE_MAX_WORKERS threads -- each on its own
- * preallocated 256KB static stack -- parks on a condvar between calls,
- * so a call only signals / unparks / reparks (~2us per thread).
+ * preallocated 256KB static stack -- parks on its own condvar between
+ * calls, so a call only signals / unparks / reparks (~2us per thread).
  *
  * Contract: workers are process-lifetime and at most one batch is
  * active per process -- the caller blocks for the whole batch, and
@@ -480,6 +480,14 @@ ucc_status_t ucc_ec_cpu_reduce_chunk(void * const * restrict srcs,
  * ucc_ec_cpu_reduce_chunk), so two batches can never overlap.
  * num_threads > UCC_EC_CPU_REDUCE_MAX_WORKERS keeps the fork-join path
  * for the excess threads.
+ *
+ * The one-batch invariant is enforced here rather than assumed of the
+ * caller: the batch state below (jobs / active_n / done_count) is
+ * process-global and indexed by worker id, so a second concurrent batch
+ * would corrupt it.  ucc_ec_cpu_reduce_threaded takes batch_mu with
+ * trylock and degrades to the single-threaded reduce when a batch is
+ * already running, which keeps the function safe to call from any
+ * thread (e.g. several progress threads under UCC_THREAD_MULTIPLE).
  */
 #define UCC_EC_CPU_REDUCE_MAX_WORKERS 8
 #define UCC_EC_CPU_REDUCE_WORKER_STACK (256 * 1024)
@@ -487,12 +495,19 @@ ucc_status_t ucc_ec_cpu_reduce_chunk(void * const * restrict srcs,
 static pthread_t     ucc_ec_cpu_reduce_workers[UCC_EC_CPU_REDUCE_MAX_WORKERS];
 static char          ucc_ec_cpu_reduce_worker_stacks
                      [UCC_EC_CPU_REDUCE_MAX_WORKERS][UCC_EC_CPU_REDUCE_WORKER_STACK];
+static pthread_mutex_t ucc_ec_cpu_reduce_batch_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t ucc_ec_cpu_reduce_mu   = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  ucc_ec_cpu_reduce_wake = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t  ucc_ec_cpu_reduce_job  = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t  ucc_ec_cpu_reduce_done = PTHREAD_COND_INITIALIZER;
-static int             ucc_ec_cpu_reduce_parked;      /* parked on wake       */
-static int             ucc_ec_cpu_reduce_active_n;    /* jobs set this batch  */
+/*
+ * One condvar and one job flag per worker, so dispatching a batch of n_p
+ * wakes exactly those n_p workers.  A broadcast to a shared condvar makes
+ * every idle worker contend for ucc_ec_cpu_reduce_mu -- the same mutex the
+ * working threads need -- which costs far more than the reduce itself at
+ * small counts.  The flag is set before the signal, so a worker that has
+ * not parked yet picks the job up without ever waiting.
+ */
+static pthread_cond_t  ucc_ec_cpu_reduce_cv[UCC_EC_CPU_REDUCE_MAX_WORKERS];
+static int             ucc_ec_cpu_reduce_has_job[UCC_EC_CPU_REDUCE_MAX_WORKERS];
 static int             ucc_ec_cpu_reduce_done_count;  /* done in this batch   */
 static int             ucc_ec_cpu_reduce_pool_size;   /* 0 = uninitialized    */
 static ucc_ec_cpu_reduce_thread_args_t ucc_ec_cpu_reduce_jobs
@@ -504,20 +519,15 @@ static void *ucc_ec_cpu_reduce_pool_worker(void *arg)
     int idx = (int)(intptr_t)arg;
 
     for (;;) {
-        /* Park: wait for a batch; signal the pool that we are available.
-           Park notifications go to "wake" only; the batch wake comes on
-           "job", so a re-parking worker can never wake a parked worker. */
+        /* Park on our own condvar until the dispatcher hands us a job.
+           Only workers with has_job set are woken, so an idle worker never
+           contends for the mutex during someone else's batch. */
         pthread_mutex_lock(&ucc_ec_cpu_reduce_mu);
-        ucc_ec_cpu_reduce_parked++;
-        pthread_cond_signal(&ucc_ec_cpu_reduce_wake);
-        pthread_cond_wait(&ucc_ec_cpu_reduce_job, &ucc_ec_cpu_reduce_mu);
-        ucc_ec_cpu_reduce_parked--;
-        /* The broadcast wakes every parked worker; only idx < active_n
-           has a job this batch -- the rest re-park without running. */
-        if (idx >= ucc_ec_cpu_reduce_active_n) {
-            pthread_mutex_unlock(&ucc_ec_cpu_reduce_mu);
-            continue;
+        while (!ucc_ec_cpu_reduce_has_job[idx]) {
+            pthread_cond_wait(&ucc_ec_cpu_reduce_cv[idx],
+                              &ucc_ec_cpu_reduce_mu);
         }
+        ucc_ec_cpu_reduce_has_job[idx] = 0;
         pthread_mutex_unlock(&ucc_ec_cpu_reduce_mu);
         /* Run our chunk, then notify completion */
         ucc_ec_cpu_reduce_jobs[idx].status = ucc_ec_cpu_reduce_chunk(
@@ -553,6 +563,7 @@ static int ucc_ec_cpu_reduce_pool_get(void)
             pthread_attr_t attr;
             int ret;
 
+            pthread_cond_init(&ucc_ec_cpu_reduce_cv[i], NULL);
             pthread_attr_init(&attr);
             pthread_attr_setstack(&attr, ucc_ec_cpu_reduce_worker_stacks[i],
                                   UCC_EC_CPU_REDUCE_WORKER_STACK);
@@ -570,17 +581,40 @@ static int ucc_ec_cpu_reduce_pool_get(void)
         }
     }
     size = ucc_ec_cpu_reduce_pool_size;
-    /* Release before waiting: workers need the mutex to park */
     pthread_mutex_unlock(&ucc_ec_cpu_reduce_mu);
 
+    /* No wait for workers to park: the has_job flag is set before the
+     * signal, so a worker that has not reached its condvar yet still
+     * picks the job up on arrival. */
+
+    return size;
+}
+
+/*
+ * Block until the in-flight persistent batch of "n_p" jobs has finished,
+ * folding any worker error into "status".  Every exit from
+ * ucc_ec_cpu_reduce_threaded must pass through this once a batch has been
+ * broadcast: the workers write into the process-global jobs[] array, so
+ * returning early would let the next batch race them.
+ */
+static void ucc_ec_cpu_reduce_batch_wait(int n_p, ucc_status_t *status)
+{
+    int i;
+
+    if (n_p <= 0) {
+        return;
+    }
     pthread_mutex_lock(&ucc_ec_cpu_reduce_mu);
-    /* Wait until all live workers have parked */
-    while (ucc_ec_cpu_reduce_parked < size) {
-        pthread_cond_wait(&ucc_ec_cpu_reduce_wake, &ucc_ec_cpu_reduce_mu);
+    while (ucc_ec_cpu_reduce_done_count < n_p) {
+        pthread_cond_wait(&ucc_ec_cpu_reduce_done, &ucc_ec_cpu_reduce_mu);
     }
     pthread_mutex_unlock(&ucc_ec_cpu_reduce_mu);
 
-    return size;
+    for (i = 0; i < n_p; i++) {
+        if (ucc_ec_cpu_reduce_jobs[i].status != UCC_OK) {
+            *status = ucc_ec_cpu_reduce_jobs[i].status;
+        }
+    }
 }
 
 static void *ucc_ec_cpu_reduce_thread_worker(void *arg)
@@ -621,6 +655,12 @@ ucc_status_t ucc_ec_cpu_reduce_threaded(ucc_eee_task_reduce_t *task,
         return ucc_ec_cpu_reduce(task, dst, srcs, flags);
     }
 
+    /* Serialize batches; a caller that loses the race reduces inline
+     * rather than blocking behind the in-flight batch. */
+    if (pthread_mutex_trylock(&ucc_ec_cpu_reduce_batch_mu) != 0) {
+        return ucc_ec_cpu_reduce(task, dst, srcs, flags);
+    }
+
     chunk_count = task->count / num_threads;
     remaining = task->count % num_threads;
 
@@ -655,12 +695,11 @@ ucc_status_t ucc_ec_cpu_reduce_threaded(ucc_eee_task_reduce_t *task,
         }
 
         pthread_mutex_lock(&ucc_ec_cpu_reduce_mu);
-        while (ucc_ec_cpu_reduce_parked < n_p) {
-            pthread_cond_wait(&ucc_ec_cpu_reduce_wake, &ucc_ec_cpu_reduce_mu);
-        }
-        ucc_ec_cpu_reduce_active_n = n_p;
         ucc_ec_cpu_reduce_done_count = 0;
-        pthread_cond_broadcast(&ucc_ec_cpu_reduce_job);
+        for (i = 0; i < n_p; i++) {
+            ucc_ec_cpu_reduce_has_job[i] = 1;
+            pthread_cond_signal(&ucc_ec_cpu_reduce_cv[i]);
+        }
         pthread_mutex_unlock(&ucc_ec_cpu_reduce_mu);
     }
 
@@ -676,7 +715,10 @@ ucc_status_t ucc_ec_cpu_reduce_threaded(ucc_eee_task_reduce_t *task,
         if (!threads || !thread_args) {
             ucc_free(threads);
             ucc_free(thread_args);
-            return UCC_ERR_NO_MEMORY;
+            status = UCC_ERR_NO_MEMORY;
+            ucc_ec_cpu_reduce_batch_wait(n_p, &status);
+            pthread_mutex_unlock(&ucc_ec_cpu_reduce_batch_mu);
+            return status;
         }
 
         for (i = n_p; i < num_threads; i++) {
@@ -713,7 +755,10 @@ ucc_status_t ucc_ec_cpu_reduce_threaded(ucc_eee_task_reduce_t *task,
                 }
                 ucc_free(threads);
                 ucc_free(thread_args);
-                return UCC_ERR_NO_RESOURCE;
+                status = UCC_ERR_NO_RESOURCE;
+                ucc_ec_cpu_reduce_batch_wait(n_p, &status);
+                pthread_mutex_unlock(&ucc_ec_cpu_reduce_batch_mu);
+                return status;
             }
         }
 
@@ -728,20 +773,8 @@ ucc_status_t ucc_ec_cpu_reduce_threaded(ucc_eee_task_reduce_t *task,
         ucc_free(thread_args);
     }
 
-    if (n_p > 0) {
-        /* Wait for the persistent workers to complete */
-        pthread_mutex_lock(&ucc_ec_cpu_reduce_mu);
-        while (ucc_ec_cpu_reduce_done_count < n_p) {
-            pthread_cond_wait(&ucc_ec_cpu_reduce_done, &ucc_ec_cpu_reduce_mu);
-        }
-        pthread_mutex_unlock(&ucc_ec_cpu_reduce_mu);
-
-        for (i = 0; i < n_p; i++) {
-            if (ucc_ec_cpu_reduce_jobs[i].status != UCC_OK) {
-                status = ucc_ec_cpu_reduce_jobs[i].status;
-            }
-        }
-    }
+    ucc_ec_cpu_reduce_batch_wait(n_p, &status);
+    pthread_mutex_unlock(&ucc_ec_cpu_reduce_batch_mu);
 
     return status;
 }

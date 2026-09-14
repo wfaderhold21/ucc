@@ -25,10 +25,12 @@ extern "C" {
 }
 #include <common/test.h>
 #include <common/test_ucc.h>
+#include <dlfcn.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
 #include <cstring>
+#include <string>
 /*
  * Mirrors the runtime USE_THREADED_REDUCE (UCC_CONFIG_TYPE_BOOL) parse:
  * the async tests only make sense when the pool is actually started.
@@ -38,9 +40,9 @@ extern "C" {
  * spuriously fail (no task is ever observed INPROGRESS).
  */
 static bool
-threaded_reduce_enabled(void)
+env_bool_enabled(const char *name)
 {
-    const char *v = getenv("UCC_EC_CPU_USE_THREADED_REDUCE");
+    const char *v = getenv(name);
     char        buf[32];
     size_t      i;
 
@@ -53,6 +55,18 @@ threaded_reduce_enabled(void)
     buf[i] = '\0';
     return (strcmp(buf, "1") == 0 || strcmp(buf, "true") == 0 ||
             strcmp(buf, "on") == 0 || strcmp(buf, "yes") == 0);
+}
+
+static bool
+threaded_reduce_enabled(void)
+{
+    return env_bool_enabled("UCC_EC_CPU_USE_THREADED_REDUCE");
+}
+
+static bool
+split_reduce_enabled(void)
+{
+    return env_bool_enabled("UCC_EC_CPU_USE_SPLIT_REDUCE");
 }
 
 #ifdef HAVE_EC_THREADED_REDUCE
@@ -149,16 +163,26 @@ class test_ec_cpu_threaded : public ucc::test {
         return ucc_ee_executor_finalize(executor);
     }
 
-    /* Post a 4-src f32 SUM of BURST_COUNT into dst; returns the task. */
-    ucc_status_t post_sum(ucc_ee_executor_t *executor, float *dst,
-                          ucc_ee_executor_task_t **task)
+    ucc_status_t wait_task(ucc_ee_executor_task_t *task)
+    {
+        ucc_status_t status;
+
+        while (UCC_INPROGRESS == (status = ucc_ee_executor_task_test(task))) {
+        }
+        return status;
+    }
+
+    /* Post an n-element 4-src f32 SUM into dst (count controls whether the
+     * task clears REDUCE_CHUNK_SIZE and so goes to the pool). */
+    ucc_status_t post_sum_n(ucc_ee_executor_t *executor, float *dst,
+                            size_t count, ucc_ee_executor_task_t **task)
     {
         ucc_ee_executor_task_args_t args;
 
         memset(&args, 0, sizeof(args));
         args.task_type      = UCC_EE_EXECUTOR_TASK_REDUCE;
         args.reduce.dst     = dst;
-        args.reduce.count   = BURST_COUNT;
+        args.reduce.count   = count;
         args.reduce.dt      = UCC_DT_FLOAT32;
         args.reduce.op      = UCC_OP_SUM;
         args.reduce.n_srcs  = 4;
@@ -170,15 +194,46 @@ class test_ec_cpu_threaded : public ucc::test {
         return ucc_ee_executor_task_post(executor, &args, task);
     }
 
-    ucc_status_t wait_task(ucc_ee_executor_task_t *task)
+    /* Post a 4-src f32 SUM of BURST_COUNT into dst; returns the task. */
+    ucc_status_t post_sum(ucc_ee_executor_t *executor, float *dst,
+                          ucc_ee_executor_task_t **task)
     {
-        ucc_status_t status;
-
-        while (UCC_INPROGRESS == (status = ucc_ee_executor_task_test(task))) {
-        }
-        return status;
+        return post_sum_n(executor, dst, BURST_COUNT, task);
     }
 };
+
+typedef uint64_t (*ec_cpu_count_fn)(void);
+
+/*
+ * The CPU EC is a runtime-loaded component, so its routing counters are
+ * reached the same way test_ec_cuda_host_ops.cc reaches the CUDA ones:
+ * dlopen the already-loaded .so (same handle => same statics) and dlsym.
+ */
+static void *
+ec_cpu_open_counters(ec_cpu_count_fn *pooled, ec_cpu_count_fn *inlined,
+                     ec_cpu_count_fn *split)
+{
+    const char *cp  = getenv("UCC_COMPONENT_PATH");
+    std::string dir = cp ? cp
+                         : std::string(GTEST_UCC_TOP_SRCDIR) +
+                               "/src/components/ec/cpu/.libs";
+    char        lib[4096];
+    void       *handle;
+
+    snprintf(lib, sizeof(lib), "%s/libucc_ec_cpu.so", dir.c_str());
+    handle = dlopen(lib, RTLD_NOW | RTLD_GLOBAL);
+    if (!handle) {
+        return NULL;
+    }
+    *pooled  = (ec_cpu_count_fn)dlsym(handle, "ucc_ec_cpu_pool_reduce_count");
+    *inlined = (ec_cpu_count_fn)dlsym(handle, "ucc_ec_cpu_inline_reduce_count");
+    *split   = (ec_cpu_count_fn)dlsym(handle, "ucc_ec_cpu_split_reduce_count");
+    if (!*pooled || !*inlined || !*split) {
+        dlclose(handle);
+        return NULL;
+    }
+    return handle;
+}
 
 UCC_TEST_F(test_ec_cpu_threaded, ec_cpu_threaded_load)
 {
@@ -254,6 +309,134 @@ UCC_TEST_F(test_ec_cpu_threaded, ec_cpu_threaded_async_reduce)
     }
     EXPECT_EQ(UCC_OK, ucc_ee_executor_stop(executor));
     ASSERT_EQ(UCC_OK, put_cpu_executor(executor));
+}
+
+/*
+ * Routing counters: a reduce below REDUCE_CHUNK_SIZE always runs inline,
+ * a reduce above it goes to a pool worker when the pool is active.  This
+ * is what makes "did the threaded path actually execute?" observable in a
+ * benchmark run, so assert both counters move on the expected edge.
+ */
+UCC_TEST_F(test_ec_cpu_threaded, ec_cpu_reduce_routing_counters)
+{
+    ucc_ee_executor_t      *executor;
+    ucc_ee_executor_task_t *task = NULL;
+    ec_cpu_count_fn         pooled_cnt, inline_cnt, split_cnt;
+    void                   *handle;
+    uint64_t                pooled0, inline0, split0;
+    bool                    split = split_reduce_enabled();
+
+    /* The small/large split below assumes the default 1024-element
+     * REDUCE_CHUNK_SIZE, and the split branch assumes the default
+     * 4M-element REDUCE_SPLIT_THRESH (below it, split degrades to inline). */
+    if (getenv("UCC_EC_CPU_REDUCE_CHUNK_SIZE") ||
+        getenv("UCC_EC_CPU_REDUCE_SPLIT_THRESH")) {
+        GTEST_SKIP();
+    }
+
+    handle = ec_cpu_open_counters(&pooled_cnt, &inline_cnt, &split_cnt);
+    if (!handle) {
+        GTEST_SKIP() << "cannot resolve ec cpu routing counters";
+    }
+
+    ASSERT_EQ(UCC_OK, get_cpu_executor(&executor));
+    ASSERT_EQ(UCC_OK, ucc_ee_executor_start(executor, nullptr));
+    fill_f32();
+
+    /* Small reduce: inline on every build and every routing config
+     * (16 elements is below both the chunk and split thresholds). */
+    pooled0 = pooled_cnt();
+    inline0 = inline_cnt();
+    split0  = split_cnt();
+    ASSERT_EQ(UCC_OK, post_sum_n(executor, dst_single, 16, &task));
+    ASSERT_EQ(UCC_OK, wait_task(task));
+    EXPECT_TRUE(check_f32(dst_single, 16));
+    EXPECT_EQ(UCC_OK, ucc_ee_executor_task_finalize(task));
+    EXPECT_EQ(inline0 + 1, inline_cnt());
+    EXPECT_EQ(pooled0, pooled_cnt());
+    EXPECT_EQ(split0, split_cnt());
+
+    /* Large reduce (1M elements): split owns the path when enabled but
+     * 1M is below the default 4M split threshold, so it degrades to
+     * inline; otherwise pooled iff the pool is active, inline otherwise. */
+    pooled0 = pooled_cnt();
+    inline0 = inline_cnt();
+    split0  = split_cnt();
+    ASSERT_EQ(UCC_OK, post_sum_n(executor, dst_single, BURST_COUNT, &task));
+    ASSERT_EQ(UCC_OK, wait_task(task));
+    EXPECT_TRUE(check_f32(dst_single, BURST_COUNT));
+    EXPECT_EQ(UCC_OK, ucc_ee_executor_task_finalize(task));
+    if (split) {
+        EXPECT_EQ(inline0 + 1, inline_cnt());
+        EXPECT_EQ(pooled0, pooled_cnt());
+        EXPECT_EQ(split0, split_cnt());
+    } else if (threaded_reduce_enabled()) {
+        EXPECT_EQ(pooled0 + 1, pooled_cnt());
+        EXPECT_EQ(inline0, inline_cnt());
+    } else {
+        EXPECT_EQ(inline0 + 1, inline_cnt());
+        EXPECT_EQ(pooled0, pooled_cnt());
+    }
+
+    EXPECT_EQ(UCC_OK, ucc_ee_executor_stop(executor));
+    ASSERT_EQ(UCC_OK, put_cpu_executor(executor));
+    dlclose(handle);
+}
+/*
+ * Split-reduce tests need USE_SPLIT_REDUCE=1 and a lowered split threshold
+ * at EC-config parse time.  That parse happens inside ucc_ec_init, which
+ * the base fixture's SetUp calls, so this fixture sets both env vars before
+ * delegating to the base SetUp and clears them after the base TearDown.
+ * Config is re-parsed per test (ucc_ec_finalize resets the component), so
+ * the rest of the suite is unaffected.
+ */
+class test_ec_cpu_split : public test_ec_cpu_threaded {
+  protected:
+    virtual void SetUp() override
+    {
+        setenv("UCC_EC_CPU_USE_SPLIT_REDUCE", "1", 1);
+        setenv("UCC_EC_CPU_REDUCE_SPLIT_THRESH", "1024", 1);
+        test_ec_cpu_threaded::SetUp();
+    }
+
+    virtual void TearDown() override
+    {
+        test_ec_cpu_threaded::TearDown();
+        unsetenv("UCC_EC_CPU_USE_SPLIT_REDUCE");
+        unsetenv("UCC_EC_CPU_REDUCE_SPLIT_THRESH");
+    }
+};
+
+UCC_TEST_F(test_ec_cpu_split, ec_cpu_split_reduce_threaded)
+{
+    ucc_ee_executor_t      *executor;
+    ucc_ee_executor_task_t *task = NULL;
+    ec_cpu_count_fn         pooled_cnt, inline_cnt, split_cnt;
+    void                   *handle;
+    uint64_t                split0;
+
+    handle = ec_cpu_open_counters(&pooled_cnt, &inline_cnt, &split_cnt);
+    if (!handle) {
+        GTEST_SKIP() << "cannot resolve ec cpu split counter";
+    }
+
+    ASSERT_EQ(UCC_OK, get_cpu_executor(&executor));
+    ASSERT_EQ(UCC_OK, ucc_ee_executor_start(executor, nullptr));
+    fill_f32();
+
+    /* 1M elements exceeds the 1024-element threshold this fixture sets,
+     * so the reduce must split across threads rather than degrade to
+     * inline.  The split counter is the observable proof of that path. */
+    split0 = split_cnt();
+    ASSERT_EQ(UCC_OK, post_sum_n(executor, dst_single, BURST_COUNT, &task));
+    ASSERT_EQ(UCC_OK, wait_task(task));
+    EXPECT_TRUE(check_f32(dst_single, BURST_COUNT));
+    EXPECT_EQ(UCC_OK, ucc_ee_executor_task_finalize(task));
+    EXPECT_EQ(split0 + 1, split_cnt());
+
+    EXPECT_EQ(UCC_OK, ucc_ee_executor_stop(executor));
+    ASSERT_EQ(UCC_OK, put_cpu_executor(executor));
+    dlclose(handle);
 }
 
 UCC_TEST_F(test_ec_cpu_threaded, ec_cpu_threaded_async_copy)
@@ -341,7 +524,9 @@ UCC_TEST_F(test_ec_cpu_threaded, ec_cpu_threaded_async_burst)
     }
 
     /* BURST_N_TASKS in-flight tasks over the (default 4) pool workers:
-     * at least one must be observed INPROGRESS while the others drain. */
+     * at least one must be observed INPROGRESS while the others drain.
+     * Split reduce runs synchronously in task_post, so this async
+     * observation only applies to the pool path. */
     for (i = 0; i < BURST_N_TASKS; i++) {
         if (UCC_INPROGRESS == ucc_ee_executor_task_test(task[i])) {
             saw_inprogress = 1;
@@ -361,7 +546,14 @@ UCC_TEST_F(test_ec_cpu_threaded, ec_cpu_threaded_async_burst)
         }
     }
 
-    EXPECT_TRUE(saw_inprogress);
+    if (split_reduce_enabled()) {
+        /* Split reduces complete synchronously in task_post; there is no
+         * in-flight window to observe.  Correctness is still asserted by
+         * all_ok below. */
+        EXPECT_FALSE(saw_inprogress);
+    } else {
+        EXPECT_TRUE(saw_inprogress);
+    }
     EXPECT_TRUE(all_ok);
 
     EXPECT_EQ(UCC_OK, ucc_ee_executor_stop(executor));
