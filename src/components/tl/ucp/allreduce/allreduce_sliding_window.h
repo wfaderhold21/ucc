@@ -47,6 +47,8 @@ typedef struct ucc_tl_ucp_allreduce_sw_pipeline {
     int                            done_red;
     int                            done_put;
     int                            posted_put;
+    int                            put_window_size;
+    int                            sync_posted;
 } ucc_tl_ucp_allreduce_sw_pipeline_t;
 
 void

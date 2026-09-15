@@ -80,6 +80,20 @@ ucc_tl_ucp_allreduce_sliding_window_oshmem_init(ucc_base_coll_args_t *coll_args,
     ucc_status_t       status = UCC_OK;
 
     ALLREDUCE_TASK_CHECK(coll_args->args, tl_team);
+    if (!(coll_args->args.mask & UCC_COLL_ARGS_FIELD_GLOBAL_WORK_BUFFER)) {
+        tl_error(UCC_TL_TEAM_LIB(tl_team),
+                 "global work buffer not provided nor associated with team");
+        status = UCC_ERR_NOT_SUPPORTED;
+        goto out;
+    }
+    if (!(coll_args->args.mask & UCC_COLL_ARGS_FIELD_FLAGS) ||
+        !(coll_args->args.flags & UCC_COLL_ARGS_FLAG_MEM_MAPPED_BUFFERS)) {
+        tl_error(UCC_TL_TEAM_LIB(tl_team),
+                 "memory mapped buffers are required for sliding window "
+                 "allreduce");
+        status = UCC_ERR_NOT_SUPPORTED;
+        goto out;
+    }
 
     task = ucc_tl_ucp_init_task(coll_args, team);
     *task_h = &task->super;
