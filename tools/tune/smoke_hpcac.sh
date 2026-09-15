@@ -17,7 +17,7 @@ set -u
 R=${UCC_TUNE_BUILD:-/global/home/users/faderholdt/build-staging/ucc-tuning}
 A=${UCC_TUNE_ARTIFACTS:-/global/home/users/faderholdt/tune-smoke-7-28/v2}
 source /usr/share/lmod/lmod/init/bash 2>/dev/null || true
-module load gcc hpcx/2.25
+module load gcc hpcx/2.25.1
 export LD_LIBRARY_PATH=$R/install/lib:$LD_LIBRARY_PATH
 export PATH=$R/install/bin:$PATH
 # thor default UCX transport set makes ucp_rkey_pack fail (-22) during TL/UCP
@@ -86,14 +86,14 @@ python3 ucc_offline_tune.py \
     --output-dir $A/step4 --no-validate 2>&1 | tail -25
 echo "exit=${PIPESTATUS[0]}"
 echo "--- emitted config ---"
-cat $A/step4/ucc_tuned.conf
+cat $A/step4/ucc_tuned_provisional.conf
 echo "--- findings (ROADMAP A3) ---"
 cat $A/step4/findings.md
 echo "--- readback in results.json (default_selected_alg must be non-null) ---"
 python3 -c "import json; d=json.load(open('$A/step4/results.json')); print([s['default_selected_alg'] for r in d['results'] for s in r['size_decisions']])"
 
 echo "=========== STEP 4b: load emitted config via UCC_CONFIG_FILE ==========="
-UCC_CONFIG_FILE=$A/step4/ucc_tuned.conf UCC_LOG_LEVEL=info \
+UCC_CONFIG_FILE=$A/step4/ucc_tuned_provisional.conf UCC_LOG_LEVEL=info \
   mpirun -np 8 $PT -c allreduce -b 1024 -e 1024 -m host -n 50 -w 5 -p \
   > $A/step4b_load.txt 2>&1
 echo "exit=$?"
@@ -130,9 +130,9 @@ python3 ucc_offline_tune.py \
     --output-dir $A/step4d --no-validate 2>&1 | tail -10
 echo "exit=${PIPESTATUS[0]}"
 echo "--- emitted config ---"
-cat $A/step4d/ucc_tuned.conf
+cat $A/step4d/ucc_tuned_provisional.conf
 echo "--- bad token (must be absent): ---"
-grep -E "allreduce:4k-16k" $A/step4d/ucc_tuned.conf && echo "  !! BAD RANGE RE-EMITTED" || echo "  (absent - inclusive semantics held)"
+grep -E "allreduce:4k-16k" $A/step4d/ucc_tuned_provisional.conf && echo "  !! BAD RANGE RE-EMITTED" || echo "  (absent - inclusive semantics held)"
 
 echo "=========== STEP 5: multi-collective x multi-team-size ==========="
 rm -rf $A/step5
@@ -145,12 +145,12 @@ python3 ucc_offline_tune.py \
     --output-dir $A/step5 --no-validate 2>&1 | tail -30
 echo "exit=${PIPESTATUS[0]}"
 echo "--- emitted config ---"
-cat $A/step5/ucc_tuned.conf
+cat $A/step5/ucc_tuned_provisional.conf
 echo "--- findings (ROADMAP A3) ---"
 cat $A/step5/findings.md
 
 echo "=========== STEP 5b: load step5 config ==========="
-UCC_CONFIG_FILE=$A/step5/ucc_tuned.conf UCC_LOG_LEVEL=info \
+UCC_CONFIG_FILE=$A/step5/ucc_tuned_provisional.conf UCC_LOG_LEVEL=info \
   mpirun -np 16 $PT -c allreduce -b 4096 -e 4096 -m host -n 50 -w 5 -p \
   > $A/step5b_load.txt 2>&1
 echo "exit=$?"

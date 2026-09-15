@@ -135,6 +135,14 @@ def _collect_tune_tokens(
         bands = _compute_team_bands(spec.all_team_sizes or [spec.team_size])
         team_low, team_high = bands.get(spec.team_size, (spec.team_size, None))
         for tr in result.tune_ranges:
+            if not tr.is_emittable:
+                logger.warning(
+                    "Skipping zero-width range %s:%s-%s (UCC score-map grammar "
+                    "rejects start>=end); reported as a finding lead only",
+                    spec.collective, _fmt_bytes(tr.start_bytes),
+                    _fmt_bytes(tr.end_bytes),
+                )
+                continue
             tok = tr.tune_token(spec.collective, mt, team_low, team_high)
             tokens.setdefault(tune_var, []).append(tok)
     return tokens
@@ -154,6 +162,8 @@ def _collect_knob_overrides(
         if not domain:
             continue
         for tr in result.tune_ranges:
+            if not tr.is_emittable:
+                continue
             for env_var, val in tr.knob_overrides.items():
                 seen.setdefault(env_var, []).append((
                     tr.start_bytes, tr.end_bytes,

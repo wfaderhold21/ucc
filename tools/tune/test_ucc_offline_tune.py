@@ -57,6 +57,11 @@ class TestTuneTokens(unittest.TestCase):
         self.assertEqual(tokens["UCC_TL_UCP_TUNE"],
                          ["allreduce:4k-4100:host:[8-8]:inf:@knomial"])
 
+    def test_zero_width_range_emits_no_token(self):
+        tokens = _collect_tune_tokens(
+            [sweep_result(ranges=[tune_range(4096, 4096)])])
+        self.assertEqual(tokens, {})
+
     def test_unmeasured_team_sizes_are_not_covered(self):
         results = [sweep_result(team=8, all_teams=[8, 64], ranges=[tune_range()]),
                    sweep_result(team=64, all_teams=[8, 64], ranges=[tune_range()])]

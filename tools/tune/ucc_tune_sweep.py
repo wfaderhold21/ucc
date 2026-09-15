@@ -140,6 +140,13 @@ class TuneRange:
     def contains(self, size_bytes: int) -> bool:
         return self.start_bytes <= size_bytes <= self.end_bytes
 
+    @property
+    def is_emittable(self) -> bool:
+        """UCC's score-map grammar requires start < end
+        (coll_score_add_range rejects start >= end). A zero-width range cannot
+        be expressed; it is reported as a finding lead, never emitted."""
+        return self.start_bytes < self.end_bytes
+
     def tune_token(self, collective: str, mem_type_tune: str,
                    team_low: int, team_high: Optional[int] = None) -> str:
         # An unqualified team observation is a singleton, never an open tail.

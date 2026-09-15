@@ -80,6 +80,10 @@ class TestInclusiveRanges(unittest.TestCase):
         self.assertTrue(tune_range.contains(16380))
         self.assertFalse(tune_range.contains(16384))
 
+    def test_zero_width_range_is_not_emittable(self):
+        self.assertTrue(TuneRange(4096, 4100, "knomial", 0, {}).is_emittable)
+        self.assertFalse(TuneRange(4096, 4096, "knomial", 0, {}).is_emittable)
+
     def test_single_team_never_extrapolates(self):
         self.assertEqual(_compute_team_bands([8]), {8: (8, 8)})
         self.assertEqual(_compute_team_bands([64, 8]), {8: (8, 8), 64: (64, 64)})
