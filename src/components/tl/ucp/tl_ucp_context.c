@@ -586,11 +586,10 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
         return UCC_OK;
     }
 
-    if (nsegs > MAX_NR_SEGMENTS) {
-        tl_error(
-            ctx->super.super.lib,
-            "cannot map more than %d segments",
-            MAX_NR_SEGMENTS);
+    if (total_segs > MAX_NR_SEGMENTS) {
+        tl_error(ctx->super.super.lib,
+                 "cannot map more than %d segments (including one-sided "
+                 "scratch)", MAX_NR_SEGMENTS);
         return UCC_ERR_INVALID_PARAM;
     }
 
@@ -618,7 +617,6 @@ ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t * ctx,
             UCP_MEM_MAP_PARAM_FIELD_ADDRESS | UCP_MEM_MAP_PARAM_FIELD_LENGTH;
         mmap_params.address = map.segments[i].address;
         mmap_params.length  = map.segments[i].len;
-
         status = ucp_mem_map(ctx->worker.ucp_context, &mmap_params, &mh);
         if (UCS_OK != status) {
             tl_error(ctx->super.super.lib,

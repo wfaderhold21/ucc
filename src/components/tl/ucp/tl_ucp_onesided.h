@@ -94,42 +94,6 @@ ucc_status_t ucc_tl_ucp_onesided_scratch_alloc(ucc_tl_ucp_team_t *team,
 void         ucc_tl_ucp_onesided_scratch_release(ucc_tl_ucp_team_t *team);
 
 /*
- * Atomically add `value` to the peer's copy of the counter at the same
- * symmetric offset as `local_slot` (I1: a local slot pointer is a valid
- * RMA target). `memh` is the destination memory handle array (global-memh
- * mode), or NULL for segment mode. Generalization of
- * ucc_tl_ucp_atomic_inc(); the request is accounted in the task's onesided
- * get counters, so completion is visible through
- * UCC_TL_UCP_TASK_ONESIDED_P2P_COMPLETE.
- */
-ucc_status_t ucc_tl_ucp_atomic_add(long *           local_slot,
-                                   long             value,
-                                   ucc_rank_t       peer,
-                                   ucc_mem_map_mem_h *memh,
-                                   ucc_tl_ucp_team_t *team,
-                                   ucc_tl_ucp_task_t *task);
-
-/*
- * THE ordering-safe publish (I4): put -> ep_flush -> atomic_add(1) on the
- * peer's slot. `slot` is the local symmetric address of the destination's
- * counter; `dst` is the local symmetric address of the data target. Data
- * is guaranteed visible on the peer before the signal is added. The put is
- * accounted in the task's onesided put counters; the flush and the atomic
- * are accounted in the flush and onesided get counters respectively. Use
- * this everywhere a peer must observe data; never open-code put+signal.
- */
-ucc_status_t ucc_tl_ucp_put_signal(void *              src,
-                                   void *              dst,
-                                   size_t              len,
-                                   ucc_memory_type_t   mtype,
-                                   ucc_rank_t          peer,
-                                   long *              slot,
-                                   ucc_mem_map_mem_h   src_memh,
-                                   ucc_mem_map_mem_h  *dst_memh,
-                                   ucc_tl_ucp_team_t  *team,
-                                   ucc_tl_ucp_task_t  *task);
-
-/*
  * Address of slot `slot` in the task's global work buffer. The offset is
  * identical on every rank, so the returned pointer is a valid RMA target
  * under I1.
