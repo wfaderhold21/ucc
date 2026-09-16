@@ -193,32 +193,41 @@ class ucc_pt_coll_reduce: public ucc_pt_coll {
 public:
     ucc_pt_coll_reduce(ucc_datatype_t dt, ucc_memory_type mt,
                        ucc_reduction_op_t op, bool is_inplace, bool is_persistent,
-                       int root_shift, ucc_pt_comm *communicator,
+                       int root_shift, ucc_pt_map_type_t map_type,
+                       ucc_pt_comm *communicator,
                        ucc_pt_generator_base *generator);
     ucc_status_t init_args(ucc_pt_test_args_t &args) override;
     void free_args(ucc_pt_test_args_t &args) override;
     float get_bw(float time_ms, int grsize, ucc_pt_test_args_t args) override;
+protected:
+    ucc_pt_map_type_t map_type_;
 };
 
 class ucc_pt_coll_reduce_scatter: public ucc_pt_coll {
 public:
     ucc_pt_coll_reduce_scatter(ucc_datatype_t dt, ucc_memory_type mt,
                                ucc_reduction_op_t op, bool is_inplace,
-                               bool is_persistent, ucc_pt_comm *communicator,
+                               bool is_persistent, ucc_pt_map_type_t map_type,
+                               ucc_pt_comm *communicator,
                                ucc_pt_generator_base *generator);
     ucc_status_t init_args(ucc_pt_test_args_t &args) override;
     void free_args(ucc_pt_test_args_t &args) override;
     float get_bw(float time_ms, int grsize, ucc_pt_test_args_t args) override;
+protected:
+    ucc_pt_map_type_t map_type_;
 };
 
 class ucc_pt_coll_reduce_scatterv: public ucc_pt_coll {
 public:
     ucc_pt_coll_reduce_scatterv(ucc_datatype_t dt, ucc_memory_type mt,
                                 ucc_reduction_op_t op, bool is_inplace,
-                                bool is_persistent, ucc_pt_comm *communicator,
+                                bool is_persistent, ucc_pt_map_type_t map_type,
+                                ucc_pt_comm *communicator,
                                 ucc_pt_generator_base *generator);
     ucc_status_t init_args(ucc_pt_test_args_t &args) override;
     void free_args(ucc_pt_test_args_t &args) override;
+protected:
+    ucc_pt_map_type_t map_type_;
 };
 
 class ucc_pt_coll_scatter: public ucc_pt_coll {
