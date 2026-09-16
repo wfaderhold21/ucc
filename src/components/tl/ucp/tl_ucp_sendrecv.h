@@ -67,11 +67,12 @@ ucc_tl_ucp_mark_peer_failed(ucc_tl_ucp_team_t *team, ucc_rank_t rank)
 {
     ucc_team_t *core_team = UCC_TL_CORE_TEAM(team);
     ucc_rank_t  team_rank = ucc_tl_ucp_rank_to_team_rank(team, rank);
+    ucc_rank_t  ctx_rank  = (core_team && team_rank != UCC_RANK_MAX)
+                                ? ucc_get_ctx_rank(core_team, team_rank)
+                                : team_rank;
 
-    ucc_context_mark_rank_failed(UCC_TL_CORE_CTX(team),
-                                 core_team && team_rank != UCC_RANK_MAX
-                                     ? ucc_get_ctx_rank(core_team, team_rank)
-                                     : team_rank);
+    ucc_tl_ucp_quality_mark_error(UCC_TL_UCP_TEAM_CTX(team), ctx_rank);
+    ucc_context_mark_rank_failed(UCC_TL_CORE_CTX(team), ctx_rank);
     if (core_team && team_rank != UCC_RANK_MAX) {
         ucc_team_mark_rank_failed(core_team, team_rank);
     }
@@ -232,6 +233,10 @@ ucc_tl_ucp_send_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
         }
         return UCS_STATUS_PTR(ucc_status_to_ucs_status(status));
     }
+    ucc_tl_ucp_quality_add_tx(UCC_TL_UCP_TEAM_CTX(team),
+                              ucc_tl_ucp_rank_to_ctx_rank(team,
+                                                          dest_group_rank),
+                              msglen);
     ucp_tag = UCC_TL_UCP_MAKE_SEND_TAG((args->mask & UCC_COLL_ARGS_FIELD_TAG),
         task->tagged.tag, UCC_TL_TEAM_RANK(team), team->super.super.params.id,
         team->super.super.params.scope_id, team->super.super.params.scope);
@@ -347,6 +352,10 @@ ucc_tl_ucp_recv_common(void *buffer, size_t msglen, ucc_memory_type_t mtype,
                              team->super.super.params.id,
                              team->super.super.params.scope_id,
                              team->super.super.params.scope);
+    ucc_tl_ucp_quality_add_rx(UCC_TL_UCP_TEAM_CTX(team),
+                              ucc_tl_ucp_rank_to_ctx_rank(team,
+                                                          dest_group_rank),
+                              msglen);
     req_param.op_attr_mask =
         UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_DATATYPE |
         UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMORY_TYPE;

@@ -40,6 +40,8 @@ unsigned ucc_tl_ucp_service_worker_progress(void *progress_arg)
     int                   throttling_count =
         ucc_atomic_fadd32(&ctx->service_worker_throttling_count, 1);
 
+    ucc_tl_ucp_quality_progress(ctx);
+
     if (throttling_count == ctx->cfg.service_throttling_thresh) {
         ctx->service_worker_throttling_count = 0;
         return ucp_worker_progress(ctx->service_worker.ucp_worker);
@@ -354,6 +356,7 @@ UCC_CLASS_INIT_FUNC(ucc_tl_ucp_context_t,
               "failed to init service worker", err_cfg, UCC_ERR_NO_MESSAGE,
               self);
     }
+    ucc_tl_ucp_quality_init(self);
 
     ucc_free(prefix);
     prefix = NULL;
@@ -511,6 +514,7 @@ UCC_CLASS_CLEANUP_FUNC(ucc_tl_ucp_context_t)
             (ucc_context_progress_fn_t)ucc_tl_ucp_service_worker_progress,
             self);
     }
+    ucc_tl_ucp_quality_finalize(self);
     ucc_mpool_cleanup(&self->req_mp, 1);
     ucc_tl_ucp_eps_cleanup(&self->worker, self);
     if (self->cfg.service_worker != 0) {

@@ -1,0 +1,4 @@
+dirs:
+  - path: /global/home/users/faderholdt/ucc-staging/ucc-shrink
+    configure_flags: ["CPPFLAGS=-Wno-shadow"]
+jobs: 4

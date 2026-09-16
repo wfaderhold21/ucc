@@ -122,13 +122,13 @@ static void ucc_pq_locked_mt_drain(ucc_progress_queue_t *pq,
                                    ucc_status_t err_status)
 {
     ucc_pq_mt_locked_t *pq_mt = ucc_derived_of(pq, ucc_pq_mt_locked_t);
-    ucc_coll_task_t    *task, *tmp;
+    ucc_coll_task_t    *task, *tmp_task;
     ucc_list_link_t     drain_list;
 
     ucc_list_head_init(&drain_list);
 
     ucc_spin_lock(&pq_mt->queue_lock);
-    ucc_list_for_each_safe(task, tmp, &pq_mt->queue, list_elem) {
+    ucc_list_for_each_safe(task, tmp_task, &pq_mt->queue, list_elem) {
         if (team_filter != NULL &&
             (task->team == NULL || task->team->params.team != team_filter)) {
             continue;

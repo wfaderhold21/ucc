@@ -12,6 +12,7 @@ static void ucc_tl_ucp_err_handler(void *arg, ucp_ep_h ep, ucs_status_t status)
 {
     ucc_tl_ucp_ep_err_handler_arg_t *a = arg;
     if (a) {
+        ucc_tl_ucp_quality_mark_error(a->ctx, a->rank);
         ucc_context_mark_rank_failed(a->ctx->super.super.ucc_context, a->rank);
     }
 }

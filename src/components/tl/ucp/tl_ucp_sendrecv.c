@@ -217,6 +217,10 @@ ucc_status_t ucc_tl_ucp_send_nbx(void *buffer, size_t msglen,
         }
         return status;
     }
+    ucc_tl_ucp_quality_add_tx(UCC_TL_UCP_TEAM_CTX(team),
+                              ucc_tl_ucp_rank_to_ctx_rank(team,
+                                                          dest_group_rank),
+                              msglen);
 
     ucp_tag = UCC_TL_UCP_MAKE_SEND_TAG((args->mask & UCC_COLL_ARGS_FIELD_TAG),
                                        task->tagged.tag, UCC_TL_TEAM_RANK(team),
@@ -265,6 +269,10 @@ ucc_status_t ucc_tl_ucp_recv_nbx(void *buffer, size_t msglen,
                              team->super.super.params.id,
                              team->super.super.params.scope_id,
                              team->super.super.params.scope);
+    ucc_tl_ucp_quality_add_rx(UCC_TL_UCP_TEAM_CTX(team),
+                              ucc_tl_ucp_rank_to_ctx_rank(team,
+                                                          dest_group_rank),
+                              msglen);
 
     ucp_status = ucp_tag_recv_nbx(team->worker->ucp_worker, buffer, msglen,
                                   ucp_tag, ucp_tag_mask, req_param);

@@ -112,6 +112,12 @@ typedef struct ucc_tl_ucp_context_config {
     int                          memtype_copy_enable;
     uint32_t                     exported_memory_handle;
     uint32_t                     fault_tolerance;
+    uint32_t                     quality_monitor;
+    uint32_t                     quality_probe_interval_usec;
+    uint32_t                     quality_rtt_degrade_ratio_pct;
+    uint32_t                     quality_bw_degrade_ratio_pct;
+    uint32_t                     quality_bw_check;
+    uint32_t                     quality_err_threshold;
 } ucc_tl_ucp_context_config_t;
 
 /* Per-endpoint argument passed to the UCX error handler when fault_tolerance
@@ -120,6 +126,45 @@ typedef struct ucc_tl_ucp_ep_err_handler_arg {
     struct ucc_tl_ucp_context *ctx;
     ucc_rank_t                 rank;
 } ucc_tl_ucp_ep_err_handler_arg_t;
+
+/* Classification of a peer's live link quality, derived from the measured
+ * RTT, throughput, and error rate.  DEAD is the terminal state that the
+ * existing fault-tolerance machinery (peer error handler) already detects. */
+typedef enum ucc_tl_ucp_quality_state {
+    UCC_TL_UCP_QUALITY_HEALTHY = 0,
+    UCC_TL_UCP_QUALITY_DEGRADED,
+    UCC_TL_UCP_QUALITY_DEAD
+} ucc_tl_ucp_quality_state_t;
+
+/* Per-peer live link-quality measurements.  Populated only when the
+ * QUALITY_MONITOR config is enabled. */
+typedef struct ucc_tl_ucp_peer_quality {
+    double   rtt_ewma;          /*!< EWMA of RTT samples (seconds) */
+    double   rtt_sq_ewma;       /*!< EWMA of RTT^2 (seconds^2), for jitter */
+    uint64_t tx_bytes;          /*!< bytes sent to peer (atomic) */
+    uint64_t rx_bytes;          /*!< bytes received from peer (atomic) */
+    uint64_t last_data_ts;      /*!< last time user traffic flowed (ns) */
+    uint64_t last_sample_ts;    /*!< last throughput sample timestamp (ns) */
+    uint64_t last_sample_bytes; /*!< tx+rx bytes at last throughput sample */
+    double   throughput_ewma;   /*!< EWMA of throughput (bytes/sec) */
+    uint32_t err_count;         /*!< error events observed (atomic) */
+    uint64_t probe_send_ts;     /*!< outstanding probe send ts (ns); 0=none */
+    double   static_latency;    /*!< baseline latency (sec); -1 = unknown */
+    double   static_bw;         /*!< baseline bandwidth (B/s); -1 = unknown */
+    uint32_t state;             /*!< ucc_tl_ucp_quality_state_t */
+} ucc_tl_ucp_peer_quality_t;
+
+/* Live link-quality monitor state, owned by the context. */
+typedef struct ucc_tl_ucp_quality {
+    ucc_tl_ucp_peer_quality_t *peers;         /*!< per-rank, NULL when off */
+    ucc_rank_t                 n_ranks;
+    uint64_t                   next_probe_ts; /*!< next probe round (ns) */
+    uint64_t                   probe_req_ts;  /*!< recv buffer: req payload */
+    uint64_t                   probe_echo_ts; /*!< recv buffer: echo payload */
+    uint64_t                   echo_payload;  /*!< send buffer for the echoed
+                                                    ts (must persist until the
+                                                    async send completes) */
+} ucc_tl_ucp_quality_t;
 
 typedef ucc_tl_ucp_lib_config_t ucc_tl_ucp_team_config_t;
 
@@ -226,6 +271,7 @@ typedef struct ucc_tl_ucp_context {
     ucc_tl_ucp_ep_err_handler_arg_t  *ep_err_args; /*!< per-rank err handler args;
                                                          non-NULL when fault_tolerance
                                                          is enabled */
+    ucc_tl_ucp_quality_t              quality;     /*!< live link-quality monitor */
     struct {
         ucc_tl_ucp_send_nb_fn_t               ucc_tl_ucp_send_nb;
         ucc_tl_ucp_recv_nb_fn_t               ucc_tl_ucp_recv_nb;
@@ -326,4 +372,17 @@ void ucc_tl_ucp_pre_register_mem(ucc_tl_ucp_team_t *team, void *addr,
 ucc_status_t ucc_tl_ucp_ctx_remote_populate(ucc_tl_ucp_context_t *ctx,
                                             ucc_mem_map_params_t  map,
                                             ucc_team_oob_coll_t   oob);
+
+/* Live link-quality monitor (tl_ucp_quality.c) */
+void ucc_tl_ucp_quality_init(ucc_tl_ucp_context_t *ctx);
+void ucc_tl_ucp_quality_finalize(ucc_tl_ucp_context_t *ctx);
+void ucc_tl_ucp_quality_progress(ucc_tl_ucp_context_t *ctx);
+void ucc_tl_ucp_quality_add_tx(ucc_tl_ucp_context_t *ctx, ucc_rank_t ctx_rank,
+                               size_t bytes);
+void ucc_tl_ucp_quality_add_rx(ucc_tl_ucp_context_t *ctx, ucc_rank_t ctx_rank,
+                               size_t bytes);
+void ucc_tl_ucp_quality_mark_error(ucc_tl_ucp_context_t *ctx,
+                                   ucc_rank_t ctx_rank);
+ucc_tl_ucp_quality_state_t
+ucc_tl_ucp_quality_classify(ucc_tl_ucp_context_t *ctx, ucc_rank_t ctx_rank);
 #endif

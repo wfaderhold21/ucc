@@ -324,6 +324,45 @@ static ucs_config_field_t ucc_tl_ucp_context_config_table[] = {
      ucc_offsetof(ucc_tl_ucp_context_config_t, fault_tolerance),
      UCC_CONFIG_TYPE_BOOL},
 
+    {"QUALITY_MONITOR", "n",
+     "Enable live per-peer link-quality monitoring (RTT probe, throughput, "
+     "error rate) feeding the healthy/degraded/dead classifier.  Requires "
+     "SERVICE_WORKER and an OOB context.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, quality_monitor),
+     UCC_CONFIG_TYPE_BOOL},
+
+    {"QUALITY_PROBE_INTERVAL", "100000",
+     "Period of the RTT probe round, in microseconds.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, quality_probe_interval_usec),
+     UCC_CONFIG_TYPE_UINT},
+
+    {"QUALITY_RTT_DEGRADE_RATIO", "300",
+     "RTT degradation threshold, in percent of the static baseline latency. "
+     "A peer whose EWMA RTT exceeds this ratio is classified degraded.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, quality_rtt_degrade_ratio_pct),
+     UCC_CONFIG_TYPE_UINT},
+
+    {"QUALITY_BW_DEGRADE_RATIO", "50",
+     "Bandwidth degradation threshold, in percent of the static baseline "
+     "bandwidth.  A peer whose EWMA throughput falls below this ratio is "
+     "classified degraded.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, quality_bw_degrade_ratio_pct),
+     UCC_CONFIG_TYPE_UINT},
+
+    {"QUALITY_BW_CHECK", "n",
+     "Apply the throughput-vs-static-bandwidth degradation check.  Off by "
+     "default because the static baseline is measured at a large message size "
+     "(1 MiB); latency-bound or small-message workloads inherently read far "
+     "below it and would be falsely DEGRADED.  Enable only for bandwidth-heavy "
+     "experiments where the BW signal is meaningful.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, quality_bw_check),
+     UCC_CONFIG_TYPE_BOOL},
+
+    {"QUALITY_ERR_THRESHOLD", "3",
+     "Number of peer error events after which a peer is classified degraded.",
+     ucc_offsetof(ucc_tl_ucp_context_config_t, quality_err_threshold),
+     UCC_CONFIG_TYPE_UINT},
+
     {NULL}};
 
 UCC_CLASS_DEFINE_NEW_FUNC(ucc_tl_ucp_lib_t, ucc_base_lib_t,
