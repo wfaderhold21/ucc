@@ -55,8 +55,21 @@ static ucc_config_field_t ucc_ec_cpu_config_table[] = {
      "Number of threads a split reduce is divided across (0 = auto).  "
      "Reduce streams n_srcs inputs plus one output, so it saturates memory "
      "bandwidth well before it saturates cores; more threads than the "
-     "memory system can feed only adds handshake cost",
+     "memory system can feed only adds handshake cost.  When "
+     "REDUCE_THREADS_PER_MB is set this is the MAXIMUM thread count",
      ucc_offsetof(ucc_ec_cpu_config_t, reduce_num_threads),
+     UCC_CONFIG_TYPE_ULUNITS},
+
+    {"REDUCE_THREADS_PER_MB", "1",
+     "Scale split-reduce breadth with message size instead of a fixed "
+     "width: dispatch ceil(count*dt_size / (REDUCE_THREADS_PER_MB MiB)) "
+     "threads for a reduce, capped at REDUCE_NUM_THREADS (default 8, the "
+     "persistent worker-pool depth).  This is the default: it keeps "
+     "small-message split overhead near zero (few threads) while "
+     "capturing the large-message win.  Set 0 to use a fixed width "
+     "(REDUCE_NUM_THREADS, or auto).  Idle workers stay parked in the "
+     "pool, so small messages spawn fewer threads",
+     ucc_offsetof(ucc_ec_cpu_config_t, reduce_threads_per_mb),
      UCC_CONFIG_TYPE_ULUNITS},
 
     {"REDUCE_SPLIT_THRESH", "4194304",
@@ -175,6 +188,36 @@ static int ucc_ec_cpu_split_threads(void)
     return (n > 4) ? 4 : (int)n;
 }
 
+/*
+ * Split width for a reduce of "bytes" of payload.  When
+ * REDUCE_THREADS_PER_MB is set, breadth scales with message size: one
+ * thread per (per_mb MiB), capped at REDUCE_NUM_THREADS (default 8, the
+ * persistent worker-pool depth).  Small messages get few threads, so the
+ * batch handshake cost is only paid when it can repay itself.  Otherwise
+ * falls back to the fixed / auto width.
+ */
+static int ucc_ec_cpu_split_threads_by_bytes(size_t bytes)
+{
+    long per_mb = EC_CPU_CONFIG->reduce_threads_per_mb;
+    long t, max_t;
+
+    if (per_mb <= 0) {
+        return ucc_ec_cpu_split_threads();
+    }
+    max_t = (EC_CPU_CONFIG->reduce_num_threads > 0)
+                ? (long)EC_CPU_CONFIG->reduce_num_threads
+                : 8; /* equal to UCC_EC_CPU_REDUCE_MAX_WORKERS */
+    /* ceil(bytes / (per_mb * MiB)), clamped to [1, max_t] */
+    t = (long)((bytes + (per_mb * 1048576UL) - 1) / (per_mb * 1048576UL));
+    if (t < 1) {
+        t = 1;
+    }
+    if (t > max_t) {
+        t = max_t;
+    }
+    return (int)t;
+}
+
 /* One reduce, split across ucc_ec_cpu_split_threads() threads.  The
  * splitter falls back to the single-threaded reduce on its own when the
  * count is too small or a batch is already in flight. */
@@ -183,7 +226,8 @@ static ucc_status_t ucc_ec_cpu_reduce_split(ucc_eee_task_reduce_t *tr,
                                             uint16_t flags)
 {
     size_t chunk   = EC_CPU_CONFIG->reduce_chunk_size;
-    int    threads = ucc_ec_cpu_split_threads();
+    size_t bytes   = tr->count * ucc_dt_size(tr->dt);
+    int    threads = ucc_ec_cpu_split_threads_by_bytes(bytes);
 
     /* Below the threshold the batch handshake dominates, so reduce here
      * rather than paying for a split that cannot repay it. */

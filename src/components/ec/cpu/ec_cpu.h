@@ -28,6 +28,7 @@ typedef struct ucc_ec_cpu_config {
     unsigned long exec_max_tasks;     /* pool queue capacity (nodes)     */
     unsigned long reduce_chunk_size;  /* chunk split size for threading  */
     unsigned long reduce_num_threads; /* split width; 0 = auto (nproc)   */
+    unsigned long reduce_threads_per_mb; /* 0=off, else 1 thr per MiB(cap) */
     unsigned long reduce_split_thresh; /* min elements worth splitting   */
     int           use_threaded_reduce; /* 1 = async post via worker pool */
     int           use_split_reduce;   /* 1 = split one reduce across threads */
