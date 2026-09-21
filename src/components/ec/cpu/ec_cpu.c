@@ -72,11 +72,11 @@ static ucc_config_field_t ucc_ec_cpu_config_table[] = {
      ucc_offsetof(ucc_ec_cpu_config_t, reduce_threads_per_mb),
      UCC_CONFIG_TYPE_ULUNITS},
 
-    {"REDUCE_SPLIT_THRESH", "4194304",
+    {"REDUCE_SPLIT_THRESH", "65536",
      "Minimum reduce size (in elements) worth splitting across threads.  "
-     "Measured crossover on a 2x60-core Xeon 8580: a 1.6M-element reduce is "
-     "2.4x slower split, a 6.3M-element one is 1.3x faster, so the cost is "
-     "cross-core data movement rather than the batch handshake",
+     "Safe to keep low because REDUCE_THREADS_PER_MB (default) already "
+     "degrades to one thread (inline) below 1 MiB of payload, so small "
+     "messages skip the split handshake rather than paying it",
      ucc_offsetof(ucc_ec_cpu_config_t, reduce_split_thresh),
      UCC_CONFIG_TYPE_ULUNITS},
 
