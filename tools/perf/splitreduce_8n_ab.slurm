@@ -23,7 +23,7 @@ export LD_LIBRARY_PATH=$UCC/lib:$LD_LIBRARY_PATH
 BASE="--mca coll_ucc_enable 1 --mca coll_ucc_priority 100 --mca coll_hcoll_enable 0 \
  --mca pml_ucx_enable 1 --mca pml_ucx_priority 100 \
  -x UCX_NET_DEVICES=mlx5_0:1 -x UCX_TLS=rc,shm -x LD_LIBRARY_PATH"
-MAP="--map-by socket --bind-to none"
+MAP="--map-by socket --bind-to socket"
 NP=16
 
 env_for() {
