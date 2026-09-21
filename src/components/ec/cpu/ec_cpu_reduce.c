@@ -4,11 +4,18 @@
  * See file LICENSE for terms.
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* sched_getcpu / pthread_setaffinity_np */
+#endif
+
 #include "config.h"
 #include "utils/arch/reduce_simd.h"
 #include "utils/ucc_math_op.h"
 #include "ec_cpu.h"
 #include <complex.h>
+#include <sched.h>
+#include <stdio.h>
+#include <unistd.h>
 
 #define DO_DT_REDUCE_WITH_OP(type, s, d, _count, _n_srcs, OP)                  \
     do {                                                                       \
@@ -550,6 +557,98 @@ static void *ucc_ec_cpu_reduce_pool_worker(void *arg)
     return NULL;
 }
 
+/*
+ * Compute the cpuset that split-reduce worker "worker_idx" should be
+ * bound to.
+ *
+ * Socket-aware: workers are pinned to free cores on the package (socket)
+ * the calling thread currently runs on, so they stay NUMA-local to the
+ * buffers being reduced and never share a core with the caller or with
+ * each other.  Distinct PPN ranks that land on different sockets
+ * (e.g. --map-by socket) therefore get disjoint worker sets and can never
+ * pin two threads to the same core.
+ *
+ * worker_idx maps to the (caller_core_offset + 1 + worker_idx)-th core of
+ * the caller's package, wrapping modulo the package size, so the caller's
+ * own core is always skipped.
+ *
+ * Returns 0 with the target CPU in *cpu and its bit set in *cpuset on
+ * success; nonzero if the package topology cannot be determined (the
+ * caller then leaves the worker unpinned).
+ */
+static int ucc_ec_cpu_split_pin(int worker_idx, cpu_set_t *cpuset, int *cpu)
+{
+    int  caller_cpu, pkg;
+    int *pkg_cpus = NULL;
+    int  n = 0, caller_idx = -1, i, ret = -1;
+    long nr;
+    char path[128];
+    FILE *f;
+
+    CPU_ZERO(cpuset);
+
+    caller_cpu = sched_getcpu();
+    if (caller_cpu < 0) {
+        return -1;
+    }
+
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu%d/topology/physical_package_id",
+             caller_cpu);
+    f = fopen(path, "r");
+    if (f == NULL) {
+        return -1;
+    }
+    if (fscanf(f, "%d", &pkg) != 1) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    if (pkg < 0) {
+        return -1;
+    }
+
+    nr = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nr <= 0) {
+        return -1;
+    }
+    pkg_cpus = ucc_malloc(nr * sizeof(int), "ec cpu split pkg");
+    if (pkg_cpus == NULL) {
+        return -1;
+    }
+
+    /* Collect the logical CPUs of the caller's package. */
+    for (i = 0; i < nr; i++) {
+        int cpkg;
+
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/topology/physical_package_id",
+                 i);
+        f = fopen(path, "r");
+        if (f == NULL) {
+            continue;
+        }
+        if (fscanf(f, "%d", &cpkg) == 1 && cpkg == pkg) {
+            if (i == caller_cpu) {
+                caller_idx = n;
+            }
+            pkg_cpus[n++] = i;
+        }
+        fclose(f);
+    }
+
+    if (n > 0) {
+        *cpu = (caller_idx >= 0)
+                   ? pkg_cpus[(caller_idx + 1 + worker_idx) % n]
+                   : pkg_cpus[worker_idx % n];
+        CPU_SET(*cpu, cpuset);
+        ret = 0;
+    }
+
+    ucc_free(pkg_cpus);
+    return ret;
+}
+
 /* Lazily create the worker set; returns the number of live workers. */
 static int ucc_ec_cpu_reduce_pool_get(void)
 {
@@ -574,6 +673,35 @@ static int ucc_ec_cpu_reduce_pool_get(void)
             if (ret != 0) {
                 ucc_ec_cpu_reduce_pool_size = i;
                 break;
+            }
+            /* Pin right after create, mirroring the worker pool: it keeps
+             * the window where an unpinned worker could run on (and pollute
+             * the NUMA locality of) another core as short as possible.  A
+             * failed bind only warns; the worker keeps running unpinned. */
+            if (EC_CPU_CONFIG->pin_threads) {
+                cpu_set_t cpuset;
+                int       cpu = -1;
+
+                if (ucc_ec_cpu_split_pin(i, &cpuset, &cpu) == 0) {
+                    if (pthread_setaffinity_np(
+                            ucc_ec_cpu_reduce_workers[i],
+                            sizeof(cpu_set_t), &cpuset) != 0) {
+                        ec_warn(&ucc_ec_cpu.super,
+                                "failed to pin split reduce worker %d to "
+                                "CPU %d: %m",
+                                i, cpu);
+                    } else {
+                        ec_info(&ucc_ec_cpu.super,
+                                "split reduce worker %d pinned to CPU %d "
+                                "(socket-aware)",
+                                i, cpu);
+                    }
+                } else {
+                    ec_debug(&ucc_ec_cpu.super,
+                             "split reduce worker %d not pinned "
+                             "(package topology unavailable)",
+                             i);
+                }
             }
         }
         if (i == UCC_EC_CPU_REDUCE_MAX_WORKERS) {

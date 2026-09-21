@@ -31,7 +31,7 @@ typedef struct ucc_ec_cpu_config {
     unsigned long reduce_split_thresh; /* min elements worth splitting   */
     int           use_threaded_reduce; /* 1 = async post via worker pool */
     int           use_split_reduce;   /* 1 = split one reduce across threads */
-    int           pin_threads;        /* pin workers to one core each    */
+    int           pin_threads;        /* pin workers (pool + split)       */
     int           pin_start_cpu;      /* first core for pinning          */
     int           pin_stride;         /* core stride: start + i*stride   */
 #endif

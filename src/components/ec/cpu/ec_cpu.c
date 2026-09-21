@@ -69,7 +69,10 @@ static ucc_config_field_t ucc_ec_cpu_config_table[] = {
 
     {"PIN_THREADS", "0",
      "Pin worker threads to CPU cores for NUMA locality "
-     "(1 = pin, 0 = leave to the scheduler)",
+     "(1 = pin, 0 = leave to the scheduler).  Applies to the threaded "
+     "worker pool (PIN_START_CPU/PIN_STRIDE) and, socket-aware, to "
+     "split-reduce workers (pinned to free cores on the caller's socket, "
+     "never sharing a core with the caller or with each other)",
      ucc_offsetof(ucc_ec_cpu_config_t, pin_threads),
      UCC_CONFIG_TYPE_BOOL},
 
