@@ -33,8 +33,10 @@ export LD_LIBRARY_PATH=$UCC/lib:$LD_LIBRARY_PATH
 
 BASE="--mca coll_ucc_enable 1 --mca coll_ucc_priority 100 --mca coll_hcoll_enable 0 \
  --mca pml_ucx_enable 1 --mca pml_ucx_priority 100 \
- -x UCX_NET_DEVICES=mlx5_0:1 -x UCX_TLS=rc,shm -x LD_LIBRARY_PATH"
+ -x UCX_NET_DEVICES=mlx5_0:1 -x UCX_TLS=rc,shm -x LD_LIBRARY_PATH \
+ -x UCC_CLS=${UCC_CLS:-basic}"
 MAP="--map-by socket --bind-to socket"
+echo "##SCALE-CLS## UCC_CLS=${UCC_CLS:-basic}"
 
 NODES=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 RUN_TIMEOUT="${RUN_TIMEOUT:-600}"
