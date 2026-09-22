@@ -9,10 +9,13 @@ classified as DEFAULT.
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import enum
+import hashlib
 import itertools
 import math
+import random
 import statistics
 from typing import Iterable, Optional
 
@@ -136,6 +139,39 @@ class ProofBudget:
         )
 
 
+# Sign-flip nulls are enumerated exhaustively up to 2**_EXACT_SIGN_LIMIT
+# assignments.  Beyond that the proof budget allows 2**20 ~ 1.0M sign
+# combinations per null (and classify_cell evaluates every group twice), so
+# the tail uses a seeded PRNG whose seed is derived from the exact sample
+# values: identical inputs always reproduce identical p-values and intervals.
+_EXACT_SIGN_LIMIT = 13
+_SIGN_FLIP_SAMPLES = 40_001
+
+
+def _sign_flip_null(centered: list[float]) -> list[float]:
+    """Null distribution of the mean under all 2**n sign flips of `centered`.
+
+    Exhaustive through 2**_EXACT_SIGN_LIMIT assignments; deterministic PRNG
+    sampling beyond (seed derived from the exact sample values).
+    """
+    n = len(centered)
+    if (1 << n) <= (1 << _EXACT_SIGN_LIMIT):
+        return [
+            statistics.fmean(sign * value for sign, value in zip(signs, centered))
+            for signs in itertools.product((-1.0, 1.0), repeat=n)
+        ]
+    digest = hashlib.sha256(repr(tuple(centered)).encode("utf-8")).digest()
+    rng = random.Random(int.from_bytes(digest[:8], "big"))
+    bitmask = (1 << n) - 1
+    values = []
+    for _ in range(_SIGN_FLIP_SAMPLES):
+        bits = rng.getrandbits(64) & bitmask
+        values.append(sum(
+            (value if bits >> index & 1 else -value)
+            for index, value in enumerate(centered)) / n)
+    return values
+
+
 def _quantile(values: list[float], probability: float) -> float:
     """Conservative nearest-rank quantile, deterministic for small samples."""
     if not values:
@@ -183,13 +219,10 @@ def _complete_pairs(
 
 
 def _exact_centered_interval(log_ratios: list[float], alpha: float) -> tuple[float, float]:
-    """Exact sign-flip interval for the mean, using centered residuals."""
+    """Sign-flip interval for the mean; sampled beyond the exact limit."""
     mean = statistics.fmean(log_ratios)
     residuals = [x - mean for x in log_ratios]
-    permutations = [
-        statistics.fmean(sign * value for sign, value in zip(signs, residuals))
-        for signs in itertools.product((-1.0, 1.0), repeat=len(residuals))
-    ]
+    permutations = _sign_flip_null(residuals)
     lo_noise = _quantile(permutations, alpha / 2)
     hi_noise = _quantile(permutations, 1 - alpha / 2)
     return mean - hi_noise, mean - lo_noise
@@ -198,14 +231,11 @@ def _exact_centered_interval(log_ratios: list[float], alpha: float) -> tuple[flo
 def _one_sided_p(log_ratios: list[float], null: float, side: str) -> float:
     centered = [x - null for x in log_ratios]
     observed = statistics.fmean(centered)
-    values = [
-        statistics.fmean(sign * value for sign, value in zip(signs, centered))
-        for signs in itertools.product((-1.0, 1.0), repeat=len(centered))
-    ]
+    values = sorted(_sign_flip_null(centered))
     if side == "lower":
-        hits = sum(v <= observed + 1e-15 for v in values)
+        hits = bisect.bisect_right(values, observed + 1e-15)
     else:
-        hits = sum(v >= observed - 1e-15 for v in values)
+        hits = len(values) - bisect.bisect_left(values, observed - 1e-15)
     return hits / len(values)
 
 

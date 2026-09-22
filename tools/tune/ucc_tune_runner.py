@@ -91,8 +91,12 @@ _VALID_COLLECTIVES = frozenset({
 # Collectives that do not have a message-size dimension (print "N/A" for count/size).
 _SIZELESS_COLLECTIVES = frozenset({"barrier"})
 
-# Collectives that take a reduction op (-o flag).
-_REDUCTION_COLLECTIVES = frozenset({"allreduce", "reduce", "reduce_scatter"})
+# Collectives that take a reduction op (-o flag).  perftest fills
+# coll_args.op for each of these (tools/perf/ucc_pt_coll_*.cc set
+# has_reduction_ and assign coll_args.op), and defaults to SUM when -o is
+# omitted — so leaving one out silently benchmarks the wrong workload.
+_REDUCTION_COLLECTIVES = frozenset(
+    {"allreduce", "reduce", "reduce_scatter", "reduce_scatterv"})
 
 _VALID_MEM_TYPES = frozenset({"host", "cuda", "rocm", "cuda-mng"})
 

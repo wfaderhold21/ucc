@@ -8,7 +8,8 @@ the external launcher selects the right UCC_CONFIG_FILE by comparing the
 fingerprint of the live allocation against fingerprints stored with each conf.
 
 Fields collected:
-  ucc_version   — from `ucc_info -v`  ("X.Y.Z revision <hash>")
+  ucc_version   — from `ucc_info -v`  ("# UCC version=X.Y.Z revision <hash>")
+                  (the revision is captured separately as ucc_revision)
   ucx_version   — from `ucx_info -v`  (first version line)
   cpu_model     — from /proc/cpuinfo (Linux) or sysctl (macOS)
   gpu_model     — from nvidia-smi (or "none")
@@ -52,10 +53,14 @@ class Fingerprint:
     hostname: str
     timestamp: str
     hash: str
+    # Same release version from different builds is the norm; without the git
+    # revision two materially different builds collide on one fingerprint hash.
+    ucc_revision: str = _UNKNOWN
 
     def summary(self) -> str:
         lines = [
             f"UCC     : {self.ucc_version}",
+            f"Rev     : {self.ucc_revision}",
             f"UCX     : {self.ucx_version}",
             f"CPU     : {self.cpu_model}",
             f"GPU     : {self.gpu_model}",
@@ -81,11 +86,18 @@ def _run(cmd: list, timeout_s: int = 10) -> str:
         return ""
 
 
-def _ucc_version(ucc_info_path: str) -> str:
-    """Parse 'UCC version=X.Y.Z revision ...' from `ucc_info -v`."""
+def _ucc_build_info(ucc_info_path: str) -> tuple[str, str]:
+    """Parse (version, revision) from `ucc_info -v`'s build-info banner."""
     out = _run([ucc_info_path, "-v"])
+    version = revision = _UNKNOWN
     m = re.search(r"UCC version=(\S+)", out)
-    return m.group(1) if m else _UNKNOWN
+    if m:
+        version = m.group(1)
+    # build_info.c prints "# UCC version=%s revision %s".
+    m = re.search(r"revision\s+(\S+)", out, re.IGNORECASE)
+    if m:
+        revision = m.group(1)
+    return version, revision
 
 
 def _ucx_version(ucx_info_path: str) -> str:
@@ -159,6 +171,7 @@ def _stable_hash(fp: "Fingerprint") -> str:
     """SHA-256 of the fields that identify a hardware/software configuration."""
     canonical = "|".join([
         fp.ucc_version,
+        fp.ucc_revision,
         fp.ucx_version,
         fp.cpu_model,
         fp.gpu_model,
@@ -180,13 +193,14 @@ def collect(
     Collect a platform fingerprint.  Never raises — missing tools produce
     "unknown" or "none" for the relevant fields.
     """
-    ucc_ver = _ucc_version(ucc_info_path)
+    ucc_ver, ucc_rev = _ucc_build_info(ucc_info_path)
     ucx_ver = _ucx_version(ucx_info_path)
     cpu = _cpu_model()
     gpu, driver, cuda = _gpu_info()
 
     fp = Fingerprint(
         ucc_version=ucc_ver,
+        ucc_revision=ucc_rev,
         ucx_version=ucx_ver,
         cpu_model=cpu,
         gpu_model=gpu,

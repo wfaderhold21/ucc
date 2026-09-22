@@ -193,9 +193,11 @@ def _collect_knob_overrides(
             if conflict:
                 warnings.append(f"Knob conflict for {env_var}; omitted")
                 continue
-            fields = [f"{_fmt_bytes(start)}-{_fmt_bytes(end)}:{mem}:{value}"
-                      for start, end, mem, value, _, _, _ in sorted(set(entries))]
-            knob_env[env_var] = f"[{','.join(fields)}]{metadata.default}"
+            joined = ",".join(
+                [f"{_fmt_bytes(start)}-{_fmt_bytes(end)}:{mem}:{value}"
+                 for start, end, mem, value, _, _, _ in sorted(set(entries))]
+                + [metadata.default])
+            knob_env[env_var] = joined
             continue
         # A scalar is eligible only for one cell and full measured domain;
         # otherwise setting it globally leaks into an unsupported regime.

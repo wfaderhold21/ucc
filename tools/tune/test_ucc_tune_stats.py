@@ -48,6 +48,17 @@ class TestPairedDecisions(unittest.TestCase):
         second = paired_log_ratio_ci(samples([.8, .82] * 5))
         self.assertEqual(first, second)
 
+    def test_sampled_interval_is_deterministic_beyond_exact_limit(self):
+        # 20 pairs exceeds the exact sign-flip enumeration cap; the sampled
+        # path must stay reproducible and keep its bounds consistent.
+        first = paired_log_ratio_ci(samples([.82, .86, .90, .94] * 5))
+        second = paired_log_ratio_ci(samples([.82, .86, .90, .94] * 5))
+        self.assertEqual(first, second)
+        ratio, ci_low, ci_high = first
+        self.assertLess(ci_low, ratio)
+        self.assertLess(ratio, ci_high)
+        self.assertLess(ci_high, 1.0)
+
     def test_nine_pairs(self):
         evidence = classify_evidence(samples([.5] * 9))
         self.assertEqual(evidence.decision, Decision.DEFAULT)

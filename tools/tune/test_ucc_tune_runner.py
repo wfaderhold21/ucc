@@ -63,6 +63,12 @@ class TestBuildCmd(unittest.TestCase):
         self.assertIn("-o", cmd)
         self.assertEqual(cmd[cmd.index("-o") + 1], "sum")
 
+    def test_reduction_op_passed_for_reduce_scatterv(self):
+        cmd = _build_cmd(self._spec(collective="reduce_scatterv",
+                                    reduction_op="max"))
+        self.assertIn("-o", cmd)
+        self.assertEqual(cmd[cmd.index("-o") + 1], "max")
+
     def test_reduction_op_excluded_for_bcast(self):
         cmd = _build_cmd(RunSpec(collective="bcast"))
         self.assertNotIn("-o", cmd)

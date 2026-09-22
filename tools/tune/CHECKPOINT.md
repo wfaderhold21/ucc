@@ -122,13 +122,15 @@ UCC TUNE grammar uses `"cuda-managed"` (from `ucc_mc_base.c`), not
 
 ### `ucc_tune_fingerprint.py` — platform identity
 
-Collects: UCC version (`ucc_info -v`), UCX version (`ucx_info -v`), CPU model
+Collects: UCC version **and git revision** (`ucc_info -v` prints
+`# UCC version=<v> revision <hash>`), UCX version (`ucx_info -v`), CPU model
 (`/proc/cpuinfo` or `sysctl`), GPU model/driver/CUDA (`nvidia-smi`). Never
 raises — missing tools produce `"unknown"` or `"none"`.
 
-SHA-256 hash over the stable fields (version strings + hw model) for output
-file naming and future DB lookup. The hash does **not** include hostname or
-timestamp.
+SHA-256 hash over the stable fields (UCC version + revision + UCX version +
+hw model) for output file naming and future DB lookup — same release version
+from different builds therefore fingerprints apart. The hash does **not**
+include hostname or timestamp.
 
 ### `ucc_offline_tune.py` — top-level driver
 
@@ -255,9 +257,10 @@ rather than merged — the gap means we are not claiming coverage there.
 **Knob conflict resolution.** Knob env vars (`UCC_TL_UCP_ALLREDUCE_SRA_KN_RADIX`)
 are global, not range-scoped. When different ranges have different optimal
 radix values, we pick the value from the largest range (most bytes covered)
-and record the conflict. This is a known MVP limitation; the `UINT_RANGED`
-config type may support range-based values, but the string format is not
-documented and was not used here.
+and record the conflict. Range-scoped (`UINT_RANGED`) knobs are emitted in
+the parser's accepted form — comma-separated `munit-munit:mtype:value`
+entries ending with the default (e.g. `4k-4100:host:2,auto`, per
+`ucc_config_sscanf_uint_ranged()` and `test/gtest/utils/test_parser.cc`).
 
 **External launcher over `ucc.conf` sections.** Native `ucc.conf` section
 matching is CPU-vendor and team-size aware but does not match on GPU model,
@@ -302,11 +305,11 @@ select the right output directory manually.
    Whether the tuned algorithm selection propagates correctly to those paths
    was not verified.
 
-6. **Knob range syntax (`UINT_RANGED`) not used.** For knobs like
-   `UCC_TL_UCP_ALLREDUCE_KN_RADIX` that are declared `UINT_RANGED`, the UCC
-   config type may accept a range-based string to specify different values
-   per message size. Using this would eliminate the knob conflict problem but
-   the exact format was not found in the source and is not used here.
+6. **Knob range syntax (`UINT_RANGED`) partially used.** Range-declared knobs
+   such as `UCC_TL_UCP_ALLREDUCE_KN_RADIX` are emitted as comma-separated
+   `munit-munit:mtype:value` entries plus a trailing default, the format
+   accepted by `ucc_config_sscanf_uint_ranged()`. Bracketed `[...]` wrappers
+   are rejected by that parser, so the emitter must never produce them.
 
 7. **No resume/checkpoint for interrupted sweeps.** A large sweep (many cells,
    many sizes, many reps) can run for hours. If interrupted, it restarts from

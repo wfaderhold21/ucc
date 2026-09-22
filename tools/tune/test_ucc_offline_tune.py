@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Tests for scoped emission and exact-config validation."""
 
+import dataclasses
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,16 +16,18 @@ from ucc_offline_tune import (
     emit_conf, print_cost_model, trim_failed_ranges, validate,
     validate_with_trimming, run_tuning, write_findings, _compute_cell_budget,
 )
-from ucc_tune_fingerprint import Fingerprint
+from ucc_tune_fingerprint import Fingerprint, _stable_hash
 from ucc_tune_runner import PairedRunResult
 from ucc_tune_space import AlgInfo
-from ucc_tune_stats import ArmSample, Decision, classify_evidence
+from ucc_tune_stats import ArmSample, Decision, classify_cell, classify_evidence
 from ucc_tune_sweep import SizeDecision, SweepResult, SweepSpec, TuneRange
 
+def fingerprint(revision="0123456789ab"):
+    fp = Fingerprint("1.4", "1.17", "cpu", "gpu", "driver", "cuda",
+                     "host", "2026-08-05T00:00:00Z", "",
+                     ucc_revision=revision)
+    return dataclasses.replace(fp, hash=_stable_hash(fp))
 
-def fingerprint():
-    return Fingerprint("1.4", "1.17", "cpu", "gpu", "driver", "cuda",
-                       "host", "2026-08-05T00:00:00Z", "abc")
 
 
 def tune_range(start=4096, end=4100, knobs=None, alg="knomial"):
@@ -98,7 +102,7 @@ class TestKnobEmission(unittest.TestCase):
                                                                {self.RADIX: "4"})])]
         env, warnings = _collect_knob_overrides(results)
         self.assertEqual(warnings, [])
-        self.assertEqual(env[self.RADIX], "[4k-4100:host:2,8k-8196:cuda:4]auto")
+        self.assertEqual(env[self.RADIX], "4k-4100:host:2,8k-8196:cuda:4,auto")
 
     def test_ranged_knob_is_omitted_across_teams(self):
         results = [sweep_result(team=8, ranges=[tune_range(knobs={self.RADIX: "4"})]),
@@ -135,6 +139,47 @@ class TestKnobEmission(unittest.TestCase):
         env, warnings = _collect_knob_overrides([host, cuda])
         self.assertNotIn("UNKNOWN_SCALAR", env)
         self.assertTrue(warnings)
+
+
+class TestFingerprintRevision(unittest.TestCase):
+    def test_parses_version_and_revision_from_build_banner(self):
+        import ucc_tune_fingerprint
+        banner = ("# UCC version=1.7.0 revision deadbeefcafe\n"
+                   "# Configured with: --prefix=/opt/ucc\n")
+        with patch("ucc_tune_fingerprint._run", return_value=banner):
+            self.assertEqual(ucc_tune_fingerprint._ucc_build_info("ucc_info"),
+                             ("1.7.0", "deadbeefcafe"))
+
+    def test_collected_fingerprints_differ_by_revision(self):
+        import ucc_tune_fingerprint
+
+        def run_for(revision):
+            def run(cmd, **_kwargs):
+                if cmd[0] == "ucc_info":
+                    return f"# UCC version=1.7.0 revision {revision}\n"
+                return ""
+            return run
+
+        with patch("ucc_tune_fingerprint._run", side_effect=run_for("aaaa1111")):
+            first = ucc_tune_fingerprint.collect()
+        with patch("ucc_tune_fingerprint._run", side_effect=run_for("bbbb2222")):
+            second = ucc_tune_fingerprint.collect()
+        self.assertEqual(first.ucc_version, second.ucc_version)
+        self.assertNotEqual(first.ucc_revision, second.ucc_revision)
+        self.assertNotEqual(first.hash, second.hash)
+
+    def test_proof_mode_bounded_analysis_after_max_pairs(self):
+        # 20 pairs is the supported maximum; exhaustive sign-flip enumeration
+        # would leave this cell computing for minutes after measurement ends.
+        defaults = [ArmSample(p, "AB" if p % 2 else "BA", "D", 100.0)
+                    for p in range(20)]
+        candidates = [ArmSample(p, "AB" if p % 2 else "BA", "A", 80.0)
+                      for p in range(20)]
+        strong = defaults + candidates
+        start = time.monotonic()
+        decisions = classify_cell([strong, strong])
+        self.assertLess(time.monotonic() - start, 30)
+        self.assertTrue(all(e.decision is Decision.WIN for e in decisions))
 
 
 class TestValidationProbes(unittest.TestCase):
