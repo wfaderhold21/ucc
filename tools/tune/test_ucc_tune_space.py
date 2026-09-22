@@ -253,6 +253,20 @@ class TestMsgSizeGrid(unittest.TestCase):
         with self.assertRaises(ValueError):
             msg_size_grid(8, 1024, factor=1)
 
+    def test_zero_min_raises_instead_of_hanging(self):
+        # `s *= factor` keeps 0 at 0: without the guard the loop never ends.
+        with self.assertRaises(ValueError):
+            msg_size_grid(0, 1024, factor=2)
+
+    def test_negative_min_raises_instead_of_hanging(self):
+        # Negative steps grow away from a positive max, staying below it.
+        with self.assertRaises(ValueError):
+            msg_size_grid(-8, 1024, factor=2)
+
+    def test_unordered_bounds_raise(self):
+        with self.assertRaises(ValueError):
+            msg_size_grid(1024, 8, factor=2)
+
     def test_default_grid_starts_at_8(self):
         grid = msg_size_grid()
         self.assertEqual(grid[0], 8)

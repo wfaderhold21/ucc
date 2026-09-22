@@ -39,10 +39,10 @@ from pathlib import Path
 from typing import Optional
 
 from ucc_tune_fingerprint import Fingerprint, collect as collect_fingerprint
-from ucc_tune_runner import RunSpec, bind_launcher_team_size, measure, measure_paired
+from ucc_tune_runner import (RunSpec, bind_launcher_team_size,
+                             is_sizeless_collective, measure, measure_paired)
 from ucc_tune_space import (
     bytes_to_count,
-    competition_env,
     dtype_size,
     knob_metadata,
     msg_size_grid,
@@ -439,7 +439,7 @@ def validate(
     n_warmup: int = 20,
 ) -> list:    # list[ValidationPoint]
     """
-    Compare the exact provisional configuration with default using fresh pairs.
+    Compare the exact emitted configuration with the unmodified environment.
     This performance gate does not substitute for the separate correctness gate.
     """
     # Build the full tuned env: all tune vars + knob vars.
@@ -464,10 +464,15 @@ def validate(
         for probe in probes:
             size = probe.size_bytes
             count = bytes_to_count(size, spec.datatype)
-            comp_env = competition_env(spec.component)
-
-            tuned_env = {**comp_env, **tuned_env_base}
-            default_env = dict(comp_env)
+            # Validate what actually ships.  The default arm runs UCC
+            # unmodified (ambient environment); the tuned arm runs exactly the
+            # variables emit_conf() writes.  competition_env() isolation is a
+            # sweep-time measurement aid that is absent from the artifact, so
+            # injecting it here would certify a configuration nobody deploys
+            # (e.g. an inf score that forces this component over a faster
+            # global default would still pass).
+            tuned_env = dict(tuned_env_base)
+            default_env: dict = {}
 
             rs_tuned = RunSpec(
                 collective=spec.collective,
@@ -738,7 +743,8 @@ def validate_screening(
         if not result.tune_ranges:
             continue
         spec = result.spec
-        comp_env = competition_env(spec.component)
+        # Screening compares the emitted configuration against unmodified UCC,
+        # matching validate(); isolation vars are not part of the artifact.
         for tr in result.tune_ranges:
             for size in sorted({tr.start_bytes, tr.end_bytes}):
                 count = bytes_to_count(size, spec.datatype)
@@ -748,14 +754,14 @@ def validate_screening(
                     reduction_op=spec.reduction_op,
                     n_reps=n_reps, n_iter=n_iter, n_warmup=n_warmup,
                     persistent=spec.persistent,
-                    extra_env={**comp_env, **tuned_env_base},
+                    extra_env=dict(tuned_env_base),
                     mpi_launcher=list(spec.mpi_launcher),
                     requested_team_size=spec.team_size,
                     executed_team_size=spec.executed_team_size,
                     perftest_path=spec.perftest_path,
                     timeout_s=spec.timeout_s,
                 )
-                rs_default = dataclasses.replace(rs_tuned, extra_env=dict(comp_env))
+                rs_default = dataclasses.replace(rs_tuned, extra_env={})
                 tuned_result = measure_or_none(rs_tuned)
                 default_result = measure_or_none(rs_default)
                 default_median = default_result.median_us if default_result else None
@@ -1356,6 +1362,17 @@ def main(argv=None) -> int:
         parser.error("--max-boundary-probes must be between 0 and 12")
     if args.max_confirmation_points <= 0:
         parser.error("--max-confirmation-points must be positive")
+
+    collectives = [c.strip() for c in args.collective.split(",")]
+    sizeless = [c for c in collectives if is_sizeless_collective(c)]
+    if sizeless:
+        parser.error(
+            "--collective without a message-size dimension (perftest reports "
+            f"N/A) cannot be range-tuned: {', '.join(sizeless)}")
+    if args.min_bytes < 1:
+        parser.error("--min-bytes must be positive")
+    if args.max_bytes < args.min_bytes:
+        parser.error("--max-bytes must be >= --min-bytes")
     boundary_resolution = 256 if args.proof_mode else args.boundary_resolution_bytes
     boundary_probes = 12 if args.proof_mode else args.max_boundary_probes
     confirmation_points = (
@@ -1385,7 +1402,6 @@ def main(argv=None) -> int:
     logger.info("Fingerprint:\n%s", fingerprint.summary())
 
     # Build search space from CLI args
-    collectives = [c.strip() for c in args.collective.split(",")]
     mem_types   = [m.strip() for m in args.mem_type.split(",")]
     sizes       = msg_size_grid(args.min_bytes, args.max_bytes, args.factor)
 
@@ -1510,8 +1526,18 @@ def main(argv=None) -> int:
         "run has no supplied default/tuned correctness evidence."
     )
 
+    # Cells whose launches all failed (transport, launcher, or perftest) are a
+    # failed run, not a clean "default was already best" no-op: such a cell
+    # has no ranges and therefore no validation points to fail on.
+    unmeasured = [result for result in results if not result.size_decisions]
+    if unmeasured:
+        logger.error(
+            "%d/%d swept cells produced no measurements — nothing was tuned; "
+            "see tuning_summary.txt for the per-cell failures",
+            len(unmeasured), len(results))
+
     fail_validation = any(not v.passed for v in validation_points)
-    return 1 if fail_validation else 0
+    return 1 if (fail_validation or unmeasured) else 0
 
 
 if __name__ == "__main__":

@@ -30,15 +30,24 @@ def tune_range(start=4096, end=4100, knobs=None, alg="knomial"):
     return TuneRange(start, end, alg, 0, knobs or {})
 
 
+def win_decision(size=4096):
+    return SizeDecision(
+        size_bytes=size, should_override=True, winner_name="knomial",
+        winner_id=0, winner_median_us=8.0, default_median_us=10.0,
+        margin=0.2, knob_overrides={}, policy=Decision.WIN, evidence=None,
+        actual_size_bytes=size, source="screening-margin")
+
+
 def sweep_result(*, ranges=None, mem="host", team=8, all_teams=None,
                  sizes=None, collective="allreduce", component="tl/ucp",
-                 datatype="float32", reduction_op="sum"):
+                 datatype="float32", reduction_op="sum", decisions=None):
     spec = SweepSpec(
         component, collective, mem, team, sizes or [4096, 4100, 16384],
         [AlgInfo(0, "knomial", "")], all_team_sizes=all_teams or [team],
         datatype=datatype, reduction_op=reduction_op,
     )
-    return SweepResult(spec, [], ranges or [], [])
+    return SweepResult(spec, decisions if decisions is not None else [],
+                       ranges or [], [])
 
 
 def paired(ratio=.8):
@@ -158,6 +167,31 @@ class TestValidationProbes(unittest.TestCase):
         self.assertTrue(points)
         self.assertTrue(all(point.passed for point in points))
         self.assertTrue(any(not point.inside for point in points))
+
+    @patch("ucc_offline_tune.measure_paired")
+    def test_arms_are_the_deployed_config_and_unmodified_ucc(self, measure):
+        """The artifact carries no competition-isolation vars, so validating an
+        isolated arm would certify a configuration nobody deploys."""
+        result = sweep_result(
+            ranges=[tune_range(knobs={"UCC_TL_UCP_ALLREDUCE_KN_RADIX": "2"})],
+            sizes=[4092, 4096, 4100, 4104])
+        tokens = _collect_tune_tokens([result])
+        knob_env, _ = _collect_knob_overrides([result])
+        self.assertEqual(tokens["UCC_TL_UCP_TUNE"],
+                         ["allreduce:4k-4100:host:[8-8]:inf:@knomial"])
+        self.assertTrue(knob_env)
+        emitted = {var: "#".join(values) for var, values in tokens.items()}
+        emitted.update(knob_env)
+        seen = []
+        measure.side_effect = lambda default, tuned, **kwargs: (
+            seen.append((default, tuned)) or paired())
+        validate([result], tokens, knob_env, n_reps=10)
+        self.assertTrue(seen)
+        for default_spec, tuned_spec in seen:
+            self.assertEqual(tuned_spec.extra_env, emitted)
+            self.assertEqual(default_spec.extra_env, {})
+            self.assertNotIn("UCC_TLS", tuned_spec.extra_env)
+            self.assertNotIn("UCC_CLS", tuned_spec.extra_env)
 
     def test_trim_then_remove_cap(self):
         result = sweep_result(ranges=[tune_range(4096, 8192)], sizes=[4096, 8192])
@@ -340,7 +374,8 @@ class TestCliSafety(unittest.TestCase):
         from ucc_offline_tune import main
         collect.return_value = fingerprint()
         algs.return_value = {"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}}
-        run.return_value = ([sweep_result(ranges=[tune_range()])], [])
+        run.return_value = ([sweep_result(ranges=[tune_range()],
+                                          decisions=[win_decision(4096)])], [])
         emit.return_value = {"conf": Path("/tmp/c"), "sh": Path("/tmp/s"),
                              "fingerprint": Path("/tmp/f"), "results": Path("/tmp/r")}
         summary.return_value = Path("/tmp/summary")
@@ -350,6 +385,53 @@ class TestCliSafety(unittest.TestCase):
                   "--no-validate"]),
             0,
         )
+
+    @patch("ucc_offline_tune.write_findings")
+    @patch("ucc_offline_tune.write_summary")
+    @patch("ucc_offline_tune.emit_conf")
+    @patch("ucc_offline_tune.run_tuning")
+    @patch("ucc_offline_tune.run_ucc_info_algs")
+    @patch("ucc_offline_tune.collect_fingerprint")
+    def test_unmeasured_cells_return_one(self, collect, algs, run, emit,
+                                         summary, findings):
+        """Launcher/perftest failures must not look like a clean no-op run."""
+        from ucc_offline_tune import main
+        collect.return_value = fingerprint()
+        algs.return_value = {"tl/ucp": {"allreduce": [AlgInfo(0, "knomial", "")]}}
+        run.return_value = ([sweep_result()], [
+            "tl/ucp/allreduce mem=host team_size=8: NO MEASUREMENTS"])
+        emit.return_value = {"conf": Path("/tmp/c"), "sh": Path("/tmp/s"),
+                             "fingerprint": Path("/tmp/f"), "results": Path("/tmp/r")}
+        summary.return_value = Path("/tmp/summary")
+        findings.return_value = {"json": Path("/tmp/fj"), "md": Path("/tmp/fm")}
+        self.assertEqual(
+            main(["--component", "tl/ucp", "--collective", "allreduce",
+                  "--no-validate"]),
+            1,
+        )
+
+    @patch("ucc_offline_tune.collect_fingerprint")
+    def test_sizeless_collective_rejected_before_stage_zero(self, fingerprint):
+        from ucc_offline_tune import main
+        with self.assertRaises(SystemExit):
+            main(["--component", "tl/ucp", "--collective", "barrier"])
+        fingerprint.assert_not_called()
+
+    @patch("ucc_offline_tune.collect_fingerprint")
+    def test_nonpositive_min_bytes_rejected_before_stage_zero(self, fingerprint):
+        from ucc_offline_tune import main
+        with self.assertRaises(SystemExit):
+            main(["--component", "tl/ucp", "--collective", "allreduce",
+                  "--min-bytes", "0"])
+        fingerprint.assert_not_called()
+
+    @patch("ucc_offline_tune.collect_fingerprint")
+    def test_inverted_byte_bounds_rejected_before_stage_zero(self, fingerprint):
+        from ucc_offline_tune import main
+        with self.assertRaises(SystemExit):
+            main(["--component", "tl/ucp", "--collective", "allreduce",
+                  "--min-bytes", "4096", "--max-bytes", "8"])
+        fingerprint.assert_not_called()
 
 
 class TestCellLaunchers(unittest.TestCase):

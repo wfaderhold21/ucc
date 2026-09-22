@@ -172,6 +172,14 @@ class TestAttribution(unittest.TestCase):
 
 
 class TestSweepCell(unittest.TestCase):
+    def test_sizeless_collective_is_rejected(self):
+        # barrier reports count/size N/A, so the decision, the emitted range,
+        # and its probes would be keyed on a size the workload never has.
+        with self.assertRaisesRegex(ValueError, "no message-size dimension"):
+            sweep_cell(_spec(collective="barrier"))
+        with self.assertRaisesRegex(ValueError, "no message-size dimension"):
+            sweep_cell(_spec(collective="barrier", proof_mode=True))
+
     @patch("ucc_tune_sweep.knobs_for",
            return_value=(Knob("K", "", "auto", ("4",)),))
     @patch("ucc_tune_sweep.confirm_knob")

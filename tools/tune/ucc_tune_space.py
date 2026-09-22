@@ -490,6 +490,13 @@ def msg_size_grid(
     """
     if factor < 2:
         raise ValueError(f"factor must be >= 2, got {factor}")
+    if min_bytes < 1:
+        # 0 never advances under `s *= factor`; negatives grow away from the
+        # positive max.  Either way the loop below would spin forever.
+        raise ValueError(f"min_bytes must be positive, got {min_bytes}")
+    if max_bytes < min_bytes:
+        raise ValueError(
+            f"max_bytes ({max_bytes}) must be >= min_bytes ({min_bytes})")
     sizes: list[int] = []
     s = min_bytes
     while s <= max_bytes:

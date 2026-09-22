@@ -106,6 +106,16 @@ _VALID_DATATYPES = frozenset({
 _VALID_OPS = frozenset({"sum", "prod", "min", "max", "avg"})
 
 
+def is_sizeless_collective(collective: str) -> bool:
+    """True when perftest reports N/A (count 0, size 0) for this collective.
+
+    Such collectives have no message-size dimension: every requested size is
+    measured as the same size-0 workload, so byte-keyed TUNE ranges can never
+    select the measured winner at their recorded size.
+    """
+    return collective in _SIZELESS_COLLECTIVES
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------

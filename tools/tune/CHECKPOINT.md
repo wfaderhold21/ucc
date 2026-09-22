@@ -151,10 +151,15 @@ timestamp.
   Conflict resolution: the value from the largest-span range wins.
 
 **`validate(...)`** — Stage 4:
-- Runs perftest at ≤3 representative sizes per cell with and without the
-  generated config.
+- Runs perftest at ≤3 representative sizes per cell comparing the unmodified
+  environment against exactly the variables `emit_conf()` writes.
+  `competition_env()` isolation stays a sweep-time measurement aid: it is absent
+  from the artifact, so validating with it would certify a configuration nobody
+  deploys (a competing component could still win, or an `inf` score could force
+  this component over a faster global default).
 - Reports `PASS` when speedup > `margin_threshold`, `FAIL` otherwise.
-- Returns exit code 1 if any validation point fails.
+- Returns exit code 1 if any validation point fails, or if a swept cell
+  produced no measurements at all (launcher, transport, or perftest failure).
 - **Does not validate buffer correctness.** `ucc_perftest -c` selects the
   collective; it does not check output buffers. Run MPI/gtest coverage
   separately before deploying generated configs.
@@ -239,7 +244,8 @@ A full per-size-per-alg-per-knob grid would be combinatorially impractical.
 **Competition control via `UCC_TLS`/`UCC_CLS`.** Forcing `UCC_TL_UCP_TUNE`
 alone does not guarantee TL/UCP wins if CUDA/NCCL/HIER components score
 higher. `competition_env()` restricts to the target component for unambiguous
-isolated measurement.
+isolated measurement — during the sweep only; Stage 4 measures the emitted
+configuration against unmodified UCC.
 
 **No-override gaps.** When a size point falls within the margin threshold (UCC
 default is good enough), it produces no TUNE token. A no-override gap between
@@ -276,6 +282,11 @@ select the right output directory manually.
    tuning may not behave uniformly across `allgatherv`, `scatterv`, rooted
    `reduce`, or asymmetric-memory cases. The current sweep treats them
    identically to symmetric collectives.
+
+   Sizeless collectives (`barrier`) are the degenerate case of the same
+   problem: perftest reports count/size `N/A`, so a byte-keyed range could never
+   select the measured winner. `sweep_cell()` rejects them and the CLI refuses
+   `--collective barrier` instead of emitting an inert range.
 
 3. **Datatype and reduction op not in score map.** The TUNE string does not
    encode datatype or reduction op. A tuned radix for `float32/sum` may not

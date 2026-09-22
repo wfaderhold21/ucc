@@ -7,7 +7,8 @@ import dataclasses
 import logging
 from typing import Callable, Optional
 
-from ucc_tune_runner import RunResult, RunSpec, measure, measure_paired
+from ucc_tune_runner import (RunResult, RunSpec, is_sizeless_collective,
+                             measure, measure_paired)
 from ucc_tune_space import (
     AlgInfo, Knob, bytes_to_count, competition_env, dtype_size, knobs_for,
     tune_env_var,
@@ -430,6 +431,14 @@ def _sweep_cell_screening(spec: SweepSpec) -> SweepResult:
 
 def sweep_cell(spec: SweepSpec) -> SweepResult:
     """Dispatch to the screening (default) or paired-confirmation (proof) path."""
+    if is_sizeless_collective(spec.collective):
+        # perftest reports count/size N/A (0) for this collective, so the
+        # measured workload carries none of the grid size the decision, the
+        # emitted range, and its validation probes would be keyed on.  Reject
+        # rather than emit ranges that can never select the measured winner.
+        raise ValueError(
+            f"{spec.collective} has no message-size dimension (perftest reports "
+            "N/A); byte-range tuning cannot express or validate it")
     if spec.proof_mode:
         return _sweep_cell_proof(spec)
     return _sweep_cell_screening(spec)
