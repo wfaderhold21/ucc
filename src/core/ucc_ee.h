@@ -31,4 +31,10 @@ typedef struct ucc_event_desc {
 ucc_status_t ucc_ee_get_event_internal(ucc_ee_h ee, ucc_ev_t **ev, ucc_queue_head_t *queue);
 
 ucc_status_t ucc_ee_set_event_internal(ucc_ee_h ee, ucc_ev_t *ev, ucc_queue_head_t *queue);
+
+/* Process-global split-reduce socket core budget (0 = unset).  Set once
+ * by the core from the first team's topology, read by executors that
+ * cannot call back into the core dispatch path. */
+int  ucc_host_get_split_socket_budget(void);
+void ucc_host_set_split_socket_budget(int budget);
 #endif

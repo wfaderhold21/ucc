@@ -67,6 +67,13 @@ uint64_t ucc_ec_cpu_pool_reduce_count(void);
 uint64_t ucc_ec_cpu_inline_reduce_count(void);
 uint64_t ucc_ec_cpu_split_reduce_count(void);
 
+/* Effective worker ceiling for split-reduce: the core socket budget
+ * (ucc_host_get_split_socket_budget) if set, else the pool max. */
+int ucc_ec_cpu_split_socket_max(void);
+
+/* Maximum worker threads the split-reduce pool may hold per rank. */
+#define UCC_EC_CPU_REDUCE_MAX_WORKERS 8
+
 /* Wall time / element volume of reduces run synchronously in task_post. */
 uint64_t ucc_ec_cpu_sync_reduce_ns(void);
 uint64_t ucc_ec_cpu_sync_reduce_elems(void);

@@ -496,7 +496,7 @@ ucc_status_t ucc_ec_cpu_reduce_chunk(void * const * restrict srcs,
  * already running, which keeps the function safe to call from any
  * thread (e.g. several progress threads under UCC_THREAD_MULTIPLE).
  */
-#define UCC_EC_CPU_REDUCE_MAX_WORKERS 8
+/* UCC_EC_CPU_REDUCE_MAX_WORKERS lives in ec_cpu.h. */
 #define UCC_EC_CPU_REDUCE_WORKER_STACK (256 * 1024)
 
 static pthread_t     ucc_ec_cpu_reduce_workers[UCC_EC_CPU_REDUCE_MAX_WORKERS];
@@ -657,8 +657,9 @@ static int ucc_ec_cpu_reduce_pool_get(void)
     pthread_mutex_lock(&ucc_ec_cpu_reduce_mu);
     if (ucc_ec_cpu_reduce_pool_size == 0) {
         int i;
+        int pool_max = ucc_ec_cpu_split_socket_max();
 
-        for (i = 0; i < UCC_EC_CPU_REDUCE_MAX_WORKERS; i++) {
+        for (i = 0; i < pool_max; i++) {
             pthread_attr_t attr;
             int ret;
 
@@ -704,8 +705,8 @@ static int ucc_ec_cpu_reduce_pool_get(void)
                 }
             }
         }
-        if (i == UCC_EC_CPU_REDUCE_MAX_WORKERS) {
-            ucc_ec_cpu_reduce_pool_size = UCC_EC_CPU_REDUCE_MAX_WORKERS;
+        if (i == pool_max) {
+            ucc_ec_cpu_reduce_pool_size = pool_max;
         }
     }
     size = ucc_ec_cpu_reduce_pool_size;

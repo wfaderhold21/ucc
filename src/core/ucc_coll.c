@@ -9,6 +9,7 @@
 #include "ucc_context.h"
 #include "components/mc/ucc_mc.h"
 #include "components/ec/ucc_ec.h"
+#include "components/topo/ucc_topo.h"
 #include "components/cl/ucc_cl.h"
 #include "utils/ucc_malloc.h"
 #include "utils/ucc_log.h"
@@ -169,6 +170,108 @@ static ucc_status_t ucc_coll_args_check_mem_type(ucc_coll_args_t *coll_args,
      UCC_COLL_TYPE_REDUCE |          \
      UCC_COLL_TYPE_SCATTER)
 
+/*
+ * Derive the per-rank split-reduce worker ceiling from the first team's
+ * topology, once per process.  With P ranks sharing a socket of S cores,
+ * every rank (symmetrically) uses at most (S - P) / P worker cores, so
+ * P callers + P*workers <= S and the per-rank socket-window pinning can
+ * never collide across ranks on the same socket.  Exposed to the CPU EC
+ * (which is a separate plugin, so core cannot call into it directly)
+ * via the process-global ucc_host_split_socket_budget.
+ */
+static int ucc_host_split_socket_budget = 0; /* 0 = not set */
+
+int ucc_host_get_split_socket_budget(void)
+{
+    return ucc_host_split_socket_budget;
+}
+
+void ucc_host_set_split_socket_budget(int budget)
+{
+    ucc_host_split_socket_budget = budget;
+}
+
+static void ucc_collective_cpu_socket_budget(ucc_team_h team)
+{
+    static int     computed = 0;
+    ucc_topo_t    *topo;
+    long           online;
+    int            n_sockets = 0;
+    int            socket_cores;
+    int            ppn_socket;
+    int            budget;
+    int            i, j;
+    int           *pkg_ids = NULL;
+    char           path[128];
+    FILE          *f;
+
+    if (computed) {
+        return;
+    }
+    computed = 1;
+    if (team == NULL || team->topo == NULL) {
+        return;
+    }
+    topo = team->topo;
+    ppn_socket = (int)ucc_topo_max_socket_size(topo);
+    if (ppn_socket < 1) {
+        return;
+    }
+    online = sysconf(_SC_NPROCESSORS_ONLN);
+    if (online <= 0) {
+        return;
+    }
+    /* Count distinct physical packages (sockets) among the online CPUs of
+     * this node, mirroring ucc_ec_cpu_split_pin's sysfs walk. */
+    pkg_ids = ucc_malloc(online * sizeof(int), "cpu pkg ids");
+    if (pkg_ids == NULL) {
+        return;
+    }
+    for (i = 0; i < online; i++) {
+        int seen = 0;
+        int pkg;
+
+        if (snprintf(path, sizeof(path),
+                     "/sys/devices/system/cpu/cpu%d/topology/"
+                     "physical_package_id", i) >= (int)sizeof(path)) {
+            continue;
+        }
+        f = fopen(path, "r");
+        if (f == NULL) {
+            continue;
+        }
+        if (fscanf(f, "%d", &pkg) != 1) {
+            fclose(f);
+            continue;
+        }
+        fclose(f);
+        for (j = 0; j < n_sockets; j++) {
+            if (pkg_ids[j] == pkg) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen) {
+            pkg_ids[n_sockets++] = pkg;
+        }
+    }
+    ucc_free(pkg_ids);
+    if (n_sockets < 1) {
+        return;
+    }
+    socket_cores = (int)(online / n_sockets);
+    if (socket_cores < 1) {
+        return;
+    }
+    budget = (socket_cores - ppn_socket) / ppn_socket;
+    if (budget < 1) {
+        budget = 1;
+    }
+    ucc_debug("socket budget: ppn_socket=%d socket_cores=%d budget=%d",
+              ppn_socket, socket_cores, budget);
+    ucc_host_set_split_socket_budget(budget);
+}
+
 UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_init,
                       (coll_args, request, team), ucc_coll_args_t *coll_args,
                       ucc_coll_req_h *request, ucc_team_h team)
@@ -315,6 +418,7 @@ UCC_CORE_PROFILE_FUNC(ucc_status_t, ucc_collective_init,
             coll_ee_type = UCC_EE_ROCM_STREAM;
             break;
         case UCC_MEMORY_TYPE_HOST:
+            ucc_collective_cpu_socket_budget(team);
             coll_ee_type = UCC_EE_CPU_THREAD;
             break;
         default:

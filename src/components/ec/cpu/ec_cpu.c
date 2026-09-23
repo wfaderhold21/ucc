@@ -5,6 +5,7 @@
  */
 
 #include "ec_cpu.h"
+#include "core/ucc_ee.h"
 #include "utils/arch/cpu.h"
 #include "utils/ucc_atomic.h"
 #include "components/mc/ucc_mc.h"
@@ -169,23 +170,48 @@ uint64_t ucc_ec_cpu_sync_reduce_elems(void)
     return ucc_ec_cpu_sync_elems_total;
 }
 
+/* Socket-budget ceiling on split width.  Computed once in the core
+ * (ucc_collective_cpu_socket_budget, see ucc_host_get_split_socket_budget)
+ * from the first team's topology: with R ranks on the caller's socket of S
+ * cores, each rank may use at most max(1, (S - R) / R) worker cores so
+ * that R callers + R*workers <= S and the per-rank socket-window pinning
+ * never collides across ranks.  0 = not set (no ceiling). */
+/* Effective worker ceiling: the core socket budget, if set, else the pool
+ * max. */
+int ucc_ec_cpu_split_socket_max(void)
+{
+    int budget = ucc_host_get_split_socket_budget();
+
+    if (budget > 0) {
+        return (budget < UCC_EC_CPU_REDUCE_MAX_WORKERS)
+                   ? budget
+                   : UCC_EC_CPU_REDUCE_MAX_WORKERS;
+    }
+    return UCC_EC_CPU_REDUCE_MAX_WORKERS;
+}
+
 /* Split width: REDUCE_NUM_THREADS, or one thread per online core. */
 static int ucc_ec_cpu_split_threads(void)
 {
-    long n;
+    int n_thr;
+    int socket_max;
 
     if (EC_CPU_CONFIG->reduce_num_threads > 0) {
         return (int)EC_CPU_CONFIG->reduce_num_threads;
     }
-    n = sysconf(_SC_NPROCESSORS_ONLN);
-    if (n <= 0) {
-        return 1;
+    {
+        long n = sysconf(_SC_NPROCESSORS_ONLN);
+        if (n <= 0) {
+            return 1;
+        }
+        /* Capped at 4: on a 2x60-core Xeon 8580 a 6.3M-element reduce took
+         * 100ms at 4 threads and 96ms at 8, so the fourth thread is already
+         * near the memory-bandwidth ceiling.  Staying low matters at high
+         * ppn, where every rank spawns its own split threads. */
+        n_thr = (n > 4) ? 4 : (int)n;
     }
-    /* Capped at 4: on a 2x60-core Xeon 8580 a 6.3M-element reduce took
-     * 100ms at 4 threads and 96ms at 8, so the fourth thread is already
-     * near the memory-bandwidth ceiling.  Staying low matters at high
-     * ppn, where every rank spawns its own split threads. */
-    return (n > 4) ? 4 : (int)n;
+    socket_max = ucc_ec_cpu_split_socket_max();
+    return (socket_max < n_thr) ? socket_max : n_thr;
 }
 
 /*
@@ -207,6 +233,12 @@ static int ucc_ec_cpu_split_threads_by_bytes(size_t bytes)
     max_t = (EC_CPU_CONFIG->reduce_num_threads > 0)
                 ? (long)EC_CPU_CONFIG->reduce_num_threads
                 : 8; /* equal to UCC_EC_CPU_REDUCE_MAX_WORKERS */
+    {
+        int socket_max = ucc_ec_cpu_split_socket_max();
+        if (socket_max < max_t) {
+            max_t = socket_max;
+        }
+    }
     /* ceil(bytes / (per_mb * MiB)), clamped to [1, max_t] */
     t = (long)((bytes + (per_mb * 1048576UL) - 1) / (per_mb * 1048576UL));
     if (t < 1) {
