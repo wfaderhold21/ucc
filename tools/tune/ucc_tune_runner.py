@@ -27,6 +27,8 @@ import subprocess
 from typing import Optional
 
 from ucc_tune_stats import ArmSample, PairedEvidence, classify_evidence
+from ucc_tune_space import (CollectiveCountPlan, count_plan_from_count,
+                             is_team_independent)
 
 logger = logging.getLogger(__name__)
 
@@ -433,6 +435,25 @@ def _build_cmd(spec: RunSpec) -> list:
 # Core measurement functions
 # ---------------------------------------------------------------------------
 
+def _plan_for(spec: RunSpec) -> CollectiveCountPlan:
+    """The measurement's count/score-map/print plan for an instantiated spec.
+
+    A spec without a bound team size is only sound for collectives whose
+    counts do not scale with the team; for the team-scaled ones, assuming a
+    single rank would mislabel every score-map key, so fail closed instead.
+    """
+    team = spec.executed_team_size or spec.requested_team_size
+    if team is None:
+        if not is_team_independent(spec.collective):
+            raise ValueError(
+                f"{spec.collective} is team-scaled: its score-map key depends "
+                "on the team size, so requested/executed team size must be set "
+                "before measuring it")
+        team = 1
+    return count_plan_from_count(spec.collective, spec.datatype, spec.count,
+                                  team)
+
+
 def _run_once(spec: RunSpec) -> Optional[SingleRunSample]:
     """Run perftest once and return the parsed timing sample, or None on failure."""
     if (spec.requested_team_size is not None
@@ -481,9 +502,12 @@ def _run_once(spec: RunSpec) -> Optional[SingleRunSample]:
         logger.warning("Could not parse perftest output:\n%s", proc.stdout[:500])
         return sample
     if spec.readback_log_level is not None:
+        # UCC matches the score map against ucc_coll_args_msgsize(), which for
+        # several collectives is neither the printed Size column nor count*dt
+        # (see CollectiveCountPlan).  Probe with the key it actually uses.
         hit = parse_score_map(
             proc.stderr + "\n" + proc.stdout,
-            spec.collective, spec.mem_type, sample.size_bytes,
+            spec.collective, spec.mem_type, _plan_for(spec).score_map_bytes,
         )
         if hit is not None:
             component, fn_name = hit
@@ -655,15 +679,21 @@ def measure_paired(
         if sample is None:
             return ArmSample(pair_id, order, arm, None, False,
                              "measurement failed", seed)
-        expected_count = 0 if spec.collective in _SIZELESS_COLLECTIVES else spec.count
-        if sample.count != expected_count:
+        # The Count column is generator->get_src_count(), which perftest
+        # team-scales for several collectives; comparing it to spec.count
+        # rejected every team-scaled sample at team > 1 and accepted samples
+        # whose workload differed from the one intended.  Compare against the
+        # collective's expected printed count, and attribute the sample to the
+        # score-map key size rather than the printed size.
+        plan = _plan_for(spec)
+        if sample.count != plan.expected_print_count:
             return ArmSample(pair_id, order, arm, sample.avg_us, False,
-                             "wrong element count", seed, sample.size_bytes)
+                             "wrong element count", seed, plan.score_map_bytes)
         if not math.isfinite(sample.avg_us) or sample.avg_us <= 0:
             return ArmSample(pair_id, order, arm, sample.avg_us, False,
-                             "non-positive timing", seed, sample.size_bytes)
+                             "non-positive timing", seed, plan.score_map_bytes)
         return ArmSample(pair_id, order, arm, sample.avg_us, True, None,
-                         seed, sample.size_bytes)
+                         seed, plan.score_map_bytes)
 
     while attempts < max_attempts and complete < max_pairs:
         if attempts >= first_batch_attempts and complete < min_pairs:

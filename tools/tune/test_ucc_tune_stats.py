@@ -192,5 +192,77 @@ class TestRetainedClassificationFixtures(unittest.TestCase):
         self.assertEqual(evidence.decision, Decision.DEFAULT)
 
 
+
+def labeled_samples(ratios, arms=("D", "A")):
+    """Paired samples under caller-chosen arm labels."""
+    result = []
+    for pair_id, ratio in enumerate(ratios):
+        order = "AB" if pair_id % 2 == 0 else "BA"
+        result.extend((ArmSample(pair_id, order, arms[0], 100.0),
+                        ArmSample(pair_id, order, arms[1], 100.0 * ratio)))
+    return result
+
+
+class TestClassifyCellArmPairs(unittest.TestCase):
+    """A cell mixes arm vocabularies: plain D/A and knob-attribution A0/A1.
+
+    confirm_knob() measures its knob-effect gate as A1 vs A0 so the three
+    attribution gates stay distinguishable.  Classifying those samples against
+    the cell-wide D/A labels found neither arm, so every knob hypothesis was
+    reclassified "missing default arm" and no knob could ever survive.
+    """
+
+    def test_each_group_uses_the_labels_it_was_measured_under(self):
+        algorithm = labeled_samples([.80] * 10)
+        knob_effect = labeled_samples([.80] * 10, arms=("A0", "A1"))
+        outcomes = classify_cell(
+            [algorithm, knob_effect],
+            hypothesis_ids=("algorithm:1", "knob:knob-effect"),
+            arm_pairs=(("D", "A"), ("A0", "A1")), min_pairs=10)
+        self.assertEqual([outcome.decision for outcome in outcomes],
+                         [Decision.WIN, Decision.WIN])
+        self.assertEqual([outcome.reason for outcome in outcomes],
+                         ["upper confidence bound proves material win",
+                         "upper confidence bound proves material win"])
+
+    def test_shared_labels_reject_foreign_arm_vocabularies(self):
+        # The gate itself is not loosened: samples labelled A0/A1 classified
+        # against D/A must still be refused, which is exactly what happened to
+        # every knob hypothesis before per-group labels existed.
+        outcomes = classify_cell(
+            [labeled_samples([.80] * 10, arms=("A0", "A1"))],
+            hypothesis_ids=("knob:knob-effect",), min_pairs=10)
+        self.assertEqual(outcomes[0].decision, Decision.DEFAULT)
+        self.assertEqual(outcomes[0].reason, "missing default arm")
+
+    def test_shared_labels_can_be_overridden_for_the_whole_cell(self):
+        outcomes = classify_cell(
+            [labeled_samples([.80] * 10, arms=("X", "Y"))],
+            hypothesis_ids=("screening",), min_pairs=10,
+            default_arm="X", candidate_arm="Y")
+        self.assertEqual(outcomes[0].decision, Decision.WIN)
+
+    def test_holm_step_down_still_governs_mixed_labels(self):
+        strong = labeled_samples([.50] * 10)
+        marginal = labeled_samples([.985] * 10, arms=("A0", "A1"))
+        outcomes = classify_cell(
+            [strong, marginal], hypothesis_ids=("a", "b"),
+            arm_pairs=(("D", "A"), ("A0", "A1")), min_pairs=10)
+        self.assertEqual(outcomes[0].decision, Decision.WIN)
+        self.assertNotEqual(outcomes[1].decision, Decision.WIN)
+
+    def test_arm_pair_count_must_match_the_family(self):
+        with self.assertRaisesRegex(ValueError, "arm_pairs must match"):
+            classify_cell([labeled_samples([.8] * 10)] * 2,
+                          arm_pairs=(("D", "A"),), min_pairs=10)
+
+    def test_arm_pair_labels_must_be_distinct_and_present(self):
+        group = labeled_samples([.8] * 10)
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            classify_cell([group], arm_pairs=(("A", "A"),), min_pairs=10)
+        with self.assertRaisesRegex(ValueError, "pairs of arm names"):
+            classify_cell([group], arm_pairs=(("A",),), min_pairs=10)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,11 +6,16 @@ import unittest
 from ucc_tune_space import (
     AlgInfo,
     bytes_to_count,
+    collective_count_plan,
     competition_env,
+    count_plan_from_count,
     dtype_size,
+    is_team_independent,
+    is_unkeyable_collective,
     knobs_for,
     msg_size_grid,
     parse_ucc_info_algs,
+    score_map_key_quantum,
     tune_env_var,
 )
 
@@ -314,6 +319,121 @@ class TestBytesToCount(unittest.TestCase):
 
     def test_float64(self):
         self.assertEqual(bytes_to_count(8192, "float64"), 1024)
+
+
+class TestComplexDtypeWidths(unittest.TestCase):
+    """ucc_dt.c:10-28 is the authority; only the *name* float128 is remapped.
+
+    tools/perf/ucc_pt_config.cc maps "float128" to UCC_DT_FLOAT64, but
+    "float128_complex" to the real 128-bit complex type, which ucc_dt_size()
+    reports as 32.  Listing 16 doubled every count and labelled measured ranges
+    with half the bytes perftest actually exercised.
+    """
+
+    def test_float128_complex_is_thirty_two_bytes(self):
+        self.assertEqual(dtype_size("float128_complex"), 32)
+
+    def test_float128_name_stays_at_the_float64_width(self):
+        self.assertEqual(dtype_size("float128"), 8)
+
+    def test_count_uses_the_true_complex_width(self):
+        self.assertEqual(bytes_to_count(4096, "float128_complex"), 128)
+
+
+class TestCollectiveCountPlan(unittest.TestCase):
+    """Score-map keys follow ucc_coll_args_msgsize(), not count * dtype_size.
+
+    Ground truth: src/utils/ucc_coll_utils.c:383 together with the counts that
+    tools/perf/ucc_pt_coll_*.cc init_args() and the exponential generator
+    install, and the Count column provenance in ucc_pt_benchmark.cc:171
+    (print_time receives generator->get_src_count()).
+    """
+
+    def test_allgather_key_is_team_scaled_while_print_is_not(self):
+        plan = collective_count_plan("allgather", "float32", 64, 8)
+        self.assertEqual(plan.count, 2)                    # -b, not 64 // 4
+        self.assertEqual(plan.score_map_bytes, 64)         # the key ranges match
+        self.assertEqual(plan.expected_print_count, 2)
+        self.assertEqual(plan.expected_print_size_bytes, 8)  # prints half the key
+
+    def test_reduce_scatter_prints_a_team_scaled_source_count(self):
+        plan = collective_count_plan("reduce_scatter", "float32", 64, 8)
+        self.assertEqual(plan.count, 16)
+        self.assertEqual(plan.score_map_bytes, 64)
+        self.assertEqual(plan.expected_print_count, 128)
+        self.assertEqual(plan.expected_print_size_bytes, 512)
+
+    def test_alltoall_scales_both_key_and_print(self):
+        plan = collective_count_plan("alltoall", "float32", 64, 8)
+        self.assertEqual((plan.count, plan.score_map_bytes,
+                          plan.expected_print_count,
+                          plan.expected_print_size_bytes), (2, 64, 16, 64))
+
+    def test_allreduce_stays_unscaled(self):
+        plan = collective_count_plan("allreduce", "float32", 4096, 8)
+        self.assertEqual((plan.count, plan.score_map_bytes,
+                          plan.expected_print_size_bytes), (1024, 4096, 4096))
+
+    def test_variable_collectives_key_on_total_dst_counts(self):
+        for coll in ("allgatherv", "reduce_scatterv"):
+            with self.subTest(coll=coll):
+                plan = collective_count_plan(coll, "float32", 64, 8)
+                self.assertEqual(plan.count, 2)
+                self.assertEqual(plan.score_map_bytes, 64)
+
+    def test_rooted_collectives_are_rank_consistent_under_perftest(self):
+        # ucc_coll_args_msgsize multiplies the non-root side by the team size,
+        # which cancels perftest's own per-rank scaling, so one key serves all
+        # ranks and byte ranges remain expressible.
+        for coll in ("gather", "scatter", "reduce", "bcast"):
+            with self.subTest(coll=coll):
+                plan = collective_count_plan(coll, "float32", 100, 8)
+                self.assertEqual(plan.score_map_bytes % plan.key_quantum, 0)
+                self.assertLessEqual(plan.score_map_bytes, 100)
+                self.assertGreater(plan.score_map_bytes, 100 - plan.key_quantum)
+
+    def test_key_is_floored_to_its_own_quantum(self):
+        plan = collective_count_plan("allgather", "float32", 100, 8)
+        self.assertEqual(plan.key_quantum, 32)
+        self.assertEqual(plan.score_map_bytes, 96)
+
+    def test_sizeless_collective_has_no_key(self):
+        plan = collective_count_plan("barrier", "float32", 4096, 8)
+        self.assertEqual((plan.score_map_bytes, plan.expected_print_count), (0, 0))
+
+    def test_unkeyable_collectives_are_refused(self):
+        # UCC_MSG_SIZE_ASYMMETRIC means the local arguments do not determine a
+        # size at all, so a byte range could neither select nor validate work.
+        for coll in ("alltoallv", "gatherv", "scatterv"):
+            with self.subTest(coll=coll):
+                self.assertTrue(is_unkeyable_collective(coll))
+                with self.assertRaisesRegex(ValueError, "UCC_MSG_SIZE_ASYMMETRIC"):
+                    collective_count_plan(coll, "float32", 4096, 8)
+
+    def test_unknown_collective_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "no score-map count model"):
+            collective_count_plan("allgatherx", "float32", 64, 8)
+
+    def test_team_size_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            collective_count_plan("allgather", "float32", 64, 0)
+
+    def test_count_driven_view_agrees_with_size_driven_view(self):
+        plan = count_plan_from_count("alltoall", "float32", 2, 8)
+        self.assertEqual(plan.score_map_bytes, 64)
+        self.assertEqual(plan.expected_print_size_bytes, 64)
+        self.assertEqual(plan.expected_print_count, 16)
+
+    def test_public_quantum_helper_matches_the_plan(self):
+        self.assertEqual(score_map_key_quantum("alltoall", "float32", 8), 32)
+        self.assertEqual(score_map_key_quantum("allreduce", "float32", 8), 4)
+
+    def test_team_independence_classification(self):
+        self.assertTrue(is_team_independent("allreduce"))
+        self.assertTrue(is_team_independent("barrier"))
+        self.assertFalse(is_team_independent("allgather"))
+        self.assertFalse(is_team_independent("reduce_scatter"))
+        self.assertFalse(is_team_independent("alltoallv"))
 
 
 if __name__ == "__main__":

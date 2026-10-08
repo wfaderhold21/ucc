@@ -19,13 +19,21 @@ def _run(us, cv=0.01):
     return RunResult(MagicMock(), [sample], us, 0, cv, 1, 0, 0, cv > .1)
 
 
-def _evidence(ratio=.8, n=10, decision=None):
+def _evidence(ratio=.8, n=10, decision=None, arms=("D", "A")):
+    """Paired evidence with the arm labels the caller's measurement really used.
+
+    confirm_knob() measures the knob-effect gate under the A0/A1 labels so the
+    three attribution gates stay distinguishable; a fixture that labelled every
+    gate D/A let cell-wide classification find "missing default arm" for the
+    knob hypotheses while the tests still passed, so the labels are a parameter
+    here rather than a constant.
+    """
     samples = []
     for i in range(n):
         order = "AB" if i % 2 == 0 else "BA"
-        samples.extend((ArmSample(i, order, "D", 100),
-                        ArmSample(i, order, "A", 100 * ratio)))
-    result = classify_evidence(samples)
+        samples.extend((ArmSample(i, order, arms[0], 100),
+                        ArmSample(i, order, arms[1], 100 * ratio)))
+    result = classify_evidence(samples, default_arm=arms[0], candidate_arm=arms[1])
     if decision is not None:
         result = __import__("dataclasses").replace(result, decision=decision)
     return result
@@ -187,8 +195,11 @@ class TestSweepCell(unittest.TestCase):
     @patch("ucc_tune_sweep.measure", return_value=_run(8))
     def test_knob_gates_join_family_and_budget(self, _measure, _paired,
                                                confirm, _knobs):
-        confirm.return_value = ("4", (_evidence(.8), _evidence(.8),
-                                       _evidence(.8)))
+        # The three gates as production measures them: the knob-effect gate
+        # carries the A0/A1 labels, the algorithm and joint gates are D/A.
+        confirm.return_value = ("4", (_evidence(.8),
+                                      _evidence(.8, arms=("A0", "A1")),
+                                      _evidence(.8)))
         result = sweep_cell(_spec(proof_mode=True, max_confirmation_points=4))
         decision = result.size_decisions[0]
         self.assertEqual(decision.knob_overrides, {"K": "4"})

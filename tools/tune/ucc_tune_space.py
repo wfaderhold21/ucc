@@ -519,8 +519,10 @@ _DT_SIZE: dict[str, int] = {
     "int128": 16, "uint128": 16,
     # float128 maps to float64 in UCC
     "float128": 8,
-    # complex types
-    "float32_complex": 8, "float64_complex": 16, "float128_complex": 16,
+    # complex types: two elements of the base float type.  ucc_dt.c sizes
+    # UCC_DT_FLOAT128_COMPLEX at 32 (perftest maps the *name* float128 to
+    # UCC_DT_FLOAT64, but float128_complex to the real 128-bit complex).
+    "float32_complex": 8, "float64_complex": 16, "float128_complex": 32,
 }
 
 
@@ -541,6 +543,172 @@ def bytes_to_count(size_bytes: int, datatype: str) -> int:
     """
     sz = dtype_size(datatype)
     return max(1, size_bytes // sz)
+
+
+# ---------------------------------------------------------------------------
+# Collective-specific score-map size accounting
+# ---------------------------------------------------------------------------
+#
+# UCC keys its score-map lookup on ucc_coll_args_msgsize() (src/utils/
+# ucc_coll_utils.c:383), computed from the *specific* src/dst info counts
+# that ucc_perftest's collective task files and the exponential generator
+# install.  `count * dtype_size` is NOT universal: for allgather and alltoall
+# the destination count is team-scaled, and reduce_scatter prints a
+# team-scaled source count.  Two independent multipliers follow from the
+# perftest_count C passed via -b/-e (the generator's current_count):
+#
+#   key_m:    score_map_bytes = C * key_m * dt_size — the exact key
+#             ucc_coll_score_map_lookup() probes at team-create time.  TUNE
+#             range boundaries are stated in this domain, so they must be the
+#             value the tuner measures and labels, not the printed size.
+#   print_m:  Count column = C * print_m; ucc_pt_benchmark.cc:171 prints
+#             generator->get_src_count(), which is team-scaled for several
+#             collectives and therefore must never be compared to the -b
+#             value when validating a sample's element count.
+#
+# Entries were derived from (and are only valid for) these sources:
+#   src/utils/ucc_coll_utils.c          ucc_coll_args_msgsize()
+#   tools/perf/generator/ucc_pt_generator_exp.cc
+#     get_src_count / get_dst_count / get_src_counts / get_dst_counts
+#   tools/perf/ucc_pt_coll_*.cc         init_args() count installation
+#   tools/perf/ucc_pt_benchmark.cc      print_time() column provenance
+@dataclasses.dataclass(frozen=True)
+class CollectiveCountPlan:
+    """Count/score-map/print relationship for one perftest measurement.
+
+    ``count`` is the value handed to -b/-e.  ``score_map_bytes`` is what UCC
+    matches TUNE ranges against; ``expected_print_count``/``expected_print_
+    size_bytes`` are what the Count/Size columns must show for the sample to
+    be attributable to this measurement.
+    """
+
+    collective: str
+    datatype: str
+    team_size: int
+    count: int
+    key_m: int
+    print_m: int
+
+    @property
+    def dt_size(self) -> int:
+        return dtype_size(self.datatype)
+
+    @property
+    def score_map_bytes(self) -> int:
+        return self.count * self.key_m * self.dt_size
+
+    @property
+    def key_quantum(self) -> int:
+        """Smallest distinguishable score-map step; probe/edge alignment unit."""
+        return self.key_m * self.dt_size
+
+    @property
+    def expected_print_count(self) -> int:
+        return self.count * self.print_m
+
+    @property
+    def expected_print_size_bytes(self) -> int:
+        return self.expected_print_count * self.dt_size
+
+
+# collective -> (key_m(N), print_m(N)) with N = team size, or None when UCC
+# cannot derive the size locally at all (ucc_coll_args_msgsize returns
+# UCC_MSG_SIZE_ASYMMETRIC for alltoallv/gatherv/scatterv: the counts arrays
+# differ per rank, so no byte-range key exists and ranges would collapse
+# onto the single asymmetric sentinel entry).
+_COUNT_MULTIPLIERS: dict[str, Optional[tuple]] = {
+    # key = dst.info.count * dt;   print = get_src_count() * dt
+    "allreduce":          (lambda n: 1, lambda n: 1),    # coll_allreduce.cc:54, gen_exp:74
+    "bcast":              (lambda n: 1, lambda n: 1),    # coll_bcast.cc:45 (src key), gen_exp:40
+    "allgather":          (lambda n: n, lambda n: 1),    # coll_allgather.cc:106-111, gen_exp:37
+    "allgatherv":         (lambda n: n, lambda n: 1),    # total of uniform dst counts, gen_exp:162
+    "alltoall":           (lambda n: n, lambda n: n),    # coll_alltoall.cc:179, gen_exp:71,54
+    "reduce_scatter":     (lambda n: 1, lambda n: n),    # dst=count key; printed src is team-scaled
+    "reduce_scatterv":    (lambda n: n, lambda n: n),    # total uniform dst counts; src team-scaled
+    "gather":             (lambda n: n, lambda n: 1),    # root dst=C*N, non-root src*N: same key
+    "scatter":            (lambda n: n, lambda n: n),    # root src=C*N, non-root dst*N: same key
+    "reduce":             (lambda n: 1, lambda n: 1),    # perftest sets src=dst=C on every rank
+    "barrier":            (lambda n: 0, lambda n: 0),    # sizeless: perftest prints N/A
+    "alltoallv":          None,
+    "gatherv":            None,
+    "scatterv":           None,
+}
+
+# Collectives whose score-map key UCC cannot compute from local arguments.
+UNKEYABLE_COLLECTIVES = frozenset(
+    name for name, entry in _COUNT_MULTIPLIERS.items() if entry is None)
+
+
+def is_unkeyable_collective(collective: str) -> bool:
+    """True when ucc_coll_args_msgsize() yields UCC_MSG_SIZE_ASYMMETRIC."""
+    return collective in UNKEYABLE_COLLECTIVES
+
+
+def is_team_independent(collective: str) -> bool:
+    """True when neither the score-map key nor the printed count scales
+    with the team size (so the plan does not depend on knowing it)."""
+    entry = _COUNT_MULTIPLIERS.get(collective)
+    if entry is None:
+        return False
+    key_fn, print_fn = entry
+    # Linear in n, so probing the multipliers at distinct team sizes is
+    # decisive: a team-scaled entry differs at every pair of sizes.
+    return (len({key_fn(1), key_fn(2), key_fn(7)}) == 1
+            and len({print_fn(1), print_fn(2), print_fn(7)}) == 1)
+
+
+def _plan_multipliers(collective: str, team_size: int) -> tuple:
+    if collective not in _COUNT_MULTIPLIERS:
+        raise ValueError(f"no score-map count model for collective {collective!r}")
+    if _COUNT_MULTIPLIERS[collective] is None:
+        raise ValueError(
+            f"{collective} has no local score-map key "
+            "(ucc_coll_args_msgsize returns UCC_MSG_SIZE_ASYMMETRIC); "
+            "byte-range tuning cannot express or validate it")
+    if team_size <= 0:
+        raise ValueError("team_size must be positive")
+    key_fn, print_fn = _COUNT_MULTIPLIERS[collective]
+    return key_fn(team_size), print_fn(team_size)
+
+
+def score_map_key_quantum(collective: str, datatype: str,
+                          team_size: int) -> int:
+    """Bytes per distinguishable score-map step for this collective and team.
+
+    Range boundaries, refined boundaries, and validation probes must be stated
+    on this grid: two sizes closer than one quantum are the same entry to UCC,
+    so probing below it measures a workload the policy cannot distinguish.
+    """
+    key_m, _ = _plan_multipliers(collective, team_size)
+    return key_m * dtype_size(datatype)
+
+
+def count_plan_from_count(collective: str, datatype: str, count: int,
+                           team_size: int) -> CollectiveCountPlan:
+    """Describe an already-chosen -b count (the runner's validation view)."""
+    key_m, print_m = _plan_multipliers(collective, team_size)
+    if count < 0:
+        raise ValueError("count cannot be negative")
+    return CollectiveCountPlan(collective=collective, datatype=datatype,
+                               team_size=team_size, count=count,
+                               key_m=key_m, print_m=print_m)
+
+
+def collective_count_plan(collective: str, datatype: str, size_bytes: int,
+                           team_size: int) -> CollectiveCountPlan:
+    """Plan the -b count whose score-map key best matches ``size_bytes``.
+
+    The count is floored to the key quantum (never below one element), so
+    ``plan.score_map_bytes`` is the exact key the measurement exercises and
+    the value every range boundary, probe, and decision must be labelled
+    with.  For key_m == 1 this reduces to the classic element-aligned floor.
+    """
+    key_m, print_m = _plan_multipliers(collective, team_size)
+    quantum = key_m * dtype_size(datatype)
+    count = 1 if quantum == 0 else max(1, size_bytes // quantum)
+    return CollectiveCountPlan(collective=collective, datatype=datatype,
+                               team_size=team_size, count=count,
+                               key_m=key_m, print_m=print_m)
 
 
 # ---------------------------------------------------------------------------

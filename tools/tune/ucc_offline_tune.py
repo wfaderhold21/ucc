@@ -43,12 +43,15 @@ from ucc_tune_runner import (RunSpec, bind_launcher_team_size,
                              is_sizeless_collective, measure, measure_paired)
 from ucc_tune_space import (
     bytes_to_count,
+    collective_count_plan,
     dtype_size,
+    is_unkeyable_collective,
     knob_metadata,
     msg_size_grid,
     parse_ucc_info_algs,
     run_ucc_info_algs,
     run_ucc_info_raw,
+    score_map_key_quantum,
     tune_env_var,
 )
 from ucc_tune_stats import Decision, PairedEvidence
@@ -456,16 +459,27 @@ def validate(
         if not result.tune_ranges:
             continue
         spec = result.spec
-
+        # Validate only what can reach the artifact.  _collect_tune_tokens()
+        # drops zero-width ranges (UCC's score-map grammar rejects start>=end),
+        # so probing one would demand that the emitted configuration select a
+        # policy it was never handed, and report the guaranteed miss as a leak.
+        emittable = [tr for tr in result.tune_ranges if tr.is_emittable]
+        if not emittable:
+            continue
         probes = _validation_probe_sizes(
-            result.tune_ranges, spec.msg_sizes_bytes,
+            emittable, spec.msg_sizes_bytes,
             datatype=spec.datatype,
             resolution_bytes=spec.boundary_resolution_bytes,
+            align_bytes=score_map_key_quantum(
+                spec.collective, spec.datatype,
+                spec.executed_team_size or spec.team_size or 1),
         )
 
         for probe in probes:
             size = probe.size_bytes
-            count = bytes_to_count(size, spec.datatype)
+            count = collective_count_plan(
+                spec.collective, spec.datatype, size,
+                spec.executed_team_size or spec.team_size or 1).count
             # Validate what actually ships.  The default arm runs UCC
             # unmodified (ambient environment); the tuned arm runs exactly the
             # variables emit_conf() writes.  competition_env() isolation is a
@@ -509,11 +523,20 @@ def validate(
             tuned_median = statistics.median(tuned_times) if tuned_times else None
             speedup = ((default_median - tuned_median) / default_median
                        if default_median and tuned_median is not None else None)
-            selected = any(tr.contains(size) for tr in result.tune_ranges)
+            # Compare against the ranges the artifact can actually carry: a
+            # dropped zero-width range is not a policy the configuration leaked.
+            selected = any(tr.contains(size) for tr in emittable)
             if probe.inside:
-                passed = bool(evidence.ci_high is not None and evidence.ci_high <= 1.0
-                              and evidence.decision != Decision.REGRESSION and selected)
-                reason = "inside upper confidence bound <= 1.0" if passed else "inside point unresolved or slower"
+                # An inside probe asserts the emitted policy is a win at that
+                # size.  ci_high <= 1.0 alone also passes a DEFAULT verdict --
+                # e.g. a ratio interval of 0.96..0.99, which classify_evidence
+                # rejected as inside the margin gate -- so "not a regression"
+                # would certify sizes where the policy was never proven faster.
+                passed = bool(evidence.decision == Decision.WIN
+                              and evidence.ci_high is not None
+                              and evidence.ci_high <= 1.0 and selected)
+                reason = ("inside point confirmed a win" if passed
+                          else "inside point is not a classified win")
             else:
                 # The exact inclusive range model must select no algorithm at
                 # an outside probe. Ranged knobs are checked by the same bounds
@@ -560,18 +583,26 @@ def validate(
 
 def _validation_probe_sizes(
     tune_ranges: list, all_sizes: list, *, datatype: str = "float32",
-    resolution_bytes: int = 1024,
+    resolution_bytes: int = 1024, align_bytes: Optional[int] = None,
 ) -> list[ValidationProbe]:
     """Return aligned inside/outside boundary, anchor, midpoint, and quartile probes."""
     if not all_sizes:
         return []
-    alignment = dtype_size(datatype)
-    domain_low = bytes_to_count(min(all_sizes), datatype) * alignment
-    domain_high = bytes_to_count(max(all_sizes), datatype) * alignment
+    # Probes step on the score-map key grid, not merely the element grid: for a
+    # team-scaled collective two sizes one element apart are the *same* UCC
+    # entry, so an element-stepped "just-outside" probe would re-measure the
+    # boundary it is supposed to sit outside of.
+    alignment = dtype_size(datatype) if align_bytes is None else align_bytes
+
+    def floor_unit(value: int) -> int:
+        return max(alignment, (value // alignment) * alignment)
+
+    domain_low = floor_unit(min(all_sizes))
+    domain_high = floor_unit(max(all_sizes))
     collected: dict[tuple[int, bool], set[str]] = {}
 
     def add(size: int, inside: bool, reason: str) -> None:
-        aligned = max(alignment, (size // alignment) * alignment)
+        aligned = floor_unit(size)
         if domain_low <= aligned <= domain_high:
             collected.setdefault((aligned, inside), set()).add(reason)
 
@@ -590,7 +621,7 @@ def _validation_probe_sizes(
             add(start + width // 4, True, "quartile-25")
             add(start + (3 * width) // 4, True, "quartile-75")
         for anchor in all_sizes:
-            aligned = bytes_to_count(anchor, datatype) * alignment
+            aligned = floor_unit(anchor)
             if start <= aligned <= end:
                 add(aligned, True, "original-anchor")
         for decision in tune_range.evidence_points:
@@ -748,8 +779,14 @@ def validate_screening(
         # Screening compares the emitted configuration against unmodified UCC,
         # matching validate(); isolation vars are not part of the artifact.
         for tr in result.tune_ranges:
+            if not tr.is_emittable:
+                # Never emitted, so there is no policy here to verify; probing it
+                # would compare the artifact against a token UCC never received.
+                continue
             for size in sorted({tr.start_bytes, tr.end_bytes}):
-                count = bytes_to_count(size, spec.datatype)
+                count = collective_count_plan(
+                    spec.collective, spec.datatype, size,
+                    spec.executed_team_size or spec.team_size or 1).count
                 rs_tuned = RunSpec(
                     collective=spec.collective, mem_type=spec.mem_type,
                     count=count, datatype=spec.datatype,
@@ -952,6 +989,12 @@ def compute_cost_model(
     total = 0
     skipped_cells = 0
     for comp, coll in pairs:
+        if is_unkeyable_collective(coll):
+            # UCC cannot derive the score-map key for these (--force-asymmetric
+            # cannot change that), so no byte range can express or validate the
+            # workload; measuring them would only bill time for inert policy.
+            skipped_cells += len(mem_types) * len(team_sizes)
+            continue
         if skip_asymmetric and coll in _ASYMMETRIC_COLLS:
             skipped_cells += len(mem_types) * len(team_sizes)
             continue
@@ -1179,6 +1222,14 @@ def run_tuning(
     done = 0
 
     for comp, coll in component_collective_pairs:
+        if is_unkeyable_collective(coll):
+            msg = (f"{comp}/{coll}: skipped collective with no locally derivable "
+                   "score-map size (ucc_coll_args_msgsize returns "
+                   "UCC_MSG_SIZE_ASYMMETRIC); byte-range tuning cannot express it")
+            logger.warning(msg)
+            skipped.append(msg)
+            done += len(mem_types) * len(team_sizes)
+            continue
         if skip_asymmetric and coll in _ASYMMETRIC_COLLS:
             msg = (f"{comp}/{coll}: skipped asymmetric collective "
                    "(use --force-asymmetric to include)")

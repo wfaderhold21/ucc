@@ -483,5 +483,58 @@ class TestMeasurePaired(unittest.TestCase):
             measure_paired(RunSpec("allreduce"), RunSpec("allreduce"), max_pairs=21)
 
 
+
+class TestTeamScaledSampleAttribution(unittest.TestCase):
+    """The Count column is get_src_count(), which perftest team-scales.
+
+    ucc_pt_benchmark.cc:171 passes generator->get_src_count() to print_time, so
+    for several collectives the printed count is count * team_size.  Comparing
+    that column to RunSpec.count rejected every team-scaled sample at team > 1
+    ("wrong element count") while accepting samples whose workload was a
+    different size than the score-map key the ranges were labelled with.
+    """
+
+    @staticmethod
+    def _spec(collective, count, **kwargs):
+        values = dict(collective=collective, count=count, datatype="float32",
+                      requested_team_size=8, executed_team_size=8)
+        values.update(kwargs)
+        return RunSpec(**values)
+
+    @patch("ucc_tune_runner._run_once")
+    def test_team_scaled_printed_count_is_attributed_to_the_key(self, run_once):
+        # -b 2 allgather at team 8: UCC keys on 2 * 8 * 4 = 64 bytes while the
+        # row prints the unscaled source count (2 / 8 bytes).
+        run_once.side_effect = lambda spec: SingleRunSample(2, 8, 10.0, 9.0, 11.0)
+        result = measure_paired(
+            self._spec("allgather", 2, extra_env={"ARM": "D"}),
+            self._spec("allgather", 2, extra_env={"ARM": "A"}), seed=3)
+        self.assertEqual(result.complete_pairs, 10)
+        self.assertTrue(all(sample.ok for sample in result.samples))
+        self.assertEqual({sample.size_bytes for sample in result.samples}, {64})
+
+    @patch("ucc_tune_runner._run_once")
+    def test_printed_count_from_a_different_workload_is_rejected(self, run_once):
+        # reduce_scatter at team 8 must print 16 * 8 = 128; a row still showing
+        # the -b value measured a buffer eight times smaller than intended.
+        run_once.side_effect = lambda spec: SingleRunSample(16, 64, 10.0, 9.0, 11.0)
+        result = measure_paired(
+            self._spec("reduce_scatter", 16, extra_env={"ARM": "D"}),
+            self._spec("reduce_scatter", 16, extra_env={"ARM": "A"}), seed=3)
+        self.assertEqual(result.complete_pairs, 0)
+        self.assertEqual({sample.failure for sample in result.samples},
+                         {"wrong element count"})
+        self.assertEqual(result.evidence.decision.value, "DEFAULT")
+
+    def test_team_scaled_spec_requires_a_bound_team_size(self):
+        from ucc_tune_runner import _plan_for
+        with self.assertRaisesRegex(ValueError, "team-scaled"):
+            _plan_for(RunSpec("allgather", count=2, datatype="float32"))
+        # Unscaled collectives need no team size to be described correctly.
+        self.assertEqual(_plan_for(RunSpec("allreduce", count=1024,
+                                           datatype="float32")).score_map_bytes,
+                          4096)
+
+
 if __name__ == "__main__":
     unittest.main()

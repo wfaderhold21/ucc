@@ -10,8 +10,9 @@ from typing import Callable, Optional
 from ucc_tune_runner import (RunResult, RunSpec, is_sizeless_collective,
                              measure, measure_paired)
 from ucc_tune_space import (
-    AlgInfo, Knob, bytes_to_count, competition_env, dtype_size, knobs_for,
-    tune_env_var,
+    AlgInfo, CollectiveCountPlan, Knob, collective_count_plan,
+    competition_env, dtype_size, is_team_independent, is_unkeyable_collective,
+    knobs_for, score_map_key_quantum, tune_env_var,
 )
 from ucc_tune_stats import (CellKey, Decision, PairedEvidence, ProofBudget,
                             classify_cell)
@@ -20,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 # UCC TUNE grammar accepts the stringified enum suffix (underscore), not the
 # hyphenated display name.  ucc_mem_type_from_str() (src/utils/ucc_coll_utils.c)
-# STR_TYPE_CHECKs "cuda_managed"; the hyphenated "cuda-managed" is only the
 # display name in ucc_mem_type_str() (src/components/mc/base/ucc_mc_base.c) and
 # is REJECTED by the score parser, which discards the entire TUNE value.
 _PERFTEST_TO_TUNE_MEM = {
@@ -208,10 +208,39 @@ def _default_env(spec: SweepSpec) -> dict:
     return competition_env(spec.component)
 
 
+def _cell_team(spec: SweepSpec) -> int:
+    """Team size the cell's counts scale by.
+
+    Collectives whose source/destination counts are team-scaled cannot be
+    sized without knowing it: guessing one rank would mislabel every
+    score-map key, so fail closed instead of measuring the wrong workload.
+    """
+    team = spec.executed_team_size
+    if team is not None:
+        return team
+    if not is_team_independent(spec.collective):
+        raise ValueError(
+            f"{spec.collective} scales its counts by the team size; bind the "
+            "cell to an executed team size before measuring it")
+    return 1
+
+
+def _plan(spec: SweepSpec, size_bytes: int) -> CollectiveCountPlan:
+    """Count/score-map plan mapping a grid size onto one perftest run."""
+    return collective_count_plan(spec.collective, spec.datatype, size_bytes,
+                                  _cell_team(spec))
+
+
+def _key_quantum(spec: SweepSpec) -> int:
+    """Smallest distinguishable score-map step; boundary/probe alignment unit."""
+    return score_map_key_quantum(spec.collective, spec.datatype,
+                                 _cell_team(spec))
+
+
 def _run_spec_for(spec: SweepSpec, size_bytes: int, extra_env: dict) -> RunSpec:
     return RunSpec(
         collective=spec.collective, mem_type=spec.mem_type,
-        count=bytes_to_count(size_bytes, spec.datatype), datatype=spec.datatype,
+        count=_plan(spec, size_bytes).count, datatype=spec.datatype,
         reduction_op=spec.reduction_op, n_reps=spec.n_reps,
         n_iter=spec.n_iter, n_warmup=spec.n_warmup,
         persistent=spec.persistent, extra_env=extra_env,
@@ -317,7 +346,8 @@ def refine_boundaries(
     decisions: list[SizeDecision],
     confirm: Callable[[int, str, int], SizeDecision],
     *, datatype: str = "float32", resolution_bytes: int = 1024,
-    max_probes: int = 4, budget: Optional[ProofBudget] = None,
+    align_bytes: Optional[int] = None, max_probes: int = 4,
+    budget: Optional[ProofBudget] = None,
 ) -> tuple[list[SizeDecision], ProofBudget]:
     """Fixed-resolution refinement of unlike adjacent policy brackets.
 
@@ -326,7 +356,7 @@ def refine_boundaries(
     """
     if budget is None:
         budget = ProofBudget()
-    align = dtype_size(datatype)
+    align = dtype_size(datatype) if align_bytes is None else align_bytes
     by_size = {d.actual_size_bytes or d.size_bytes: d for d in decisions}
     original = sorted(by_size)
     transitions = [(original[i], original[i + 1]) for i in range(len(original) - 1)
@@ -380,7 +410,7 @@ def _sweep_cell_screening(spec: SweepSpec) -> SweepResult:
     actual_seen: set[int] = set()
 
     for requested_size in spec.msg_sizes_bytes:
-        actual_size = bytes_to_count(requested_size, spec.datatype) * dtype_size(spec.datatype)
+        actual_size = _plan(spec, requested_size).score_map_bytes
         if actual_size in actual_seen:
             warnings.append(f"aligned duplicate {requested_size} -> {actual_size} deduplicated")
             continue
@@ -439,6 +469,16 @@ def sweep_cell(spec: SweepSpec) -> SweepResult:
         raise ValueError(
             f"{spec.collective} has no message-size dimension (perftest reports "
             "N/A); byte-range tuning cannot express or validate it")
+    if is_unkeyable_collective(spec.collective):
+        # ucc_coll_args_msgsize() cannot derive this collective's size from the
+        # local arguments (it returns UCC_MSG_SIZE_ASYMMETRIC), so every byte
+        # range would collapse onto the single asymmetric sentinel entry and
+        # could neither express nor validate the measured workload.
+        raise ValueError(
+            f"{spec.collective} has no locally derivable score-map size "
+            "(ucc_coll_args_msgsize returns UCC_MSG_SIZE_ASYMMETRIC); "
+            "byte-range tuning cannot express or validate it")
+    _cell_team(spec)
     if spec.proof_mode:
         return _sweep_cell_proof(spec)
     return _sweep_cell_screening(spec)
@@ -454,7 +494,7 @@ def _sweep_cell_proof(spec: SweepSpec) -> SweepResult:
     actual_seen: set[int] = set()
 
     for requested_size in spec.msg_sizes_bytes:
-        actual_size = bytes_to_count(requested_size, spec.datatype) * dtype_size(spec.datatype)
+        actual_size = _plan(spec, requested_size).score_map_bytes
         if actual_size in actual_seen:
             warnings.append(f"aligned duplicate {requested_size} -> {actual_size} deduplicated")
             continue
@@ -520,6 +560,7 @@ def _sweep_cell_proof(spec: SweepSpec) -> SweepResult:
 
     decisions, budget = refine_boundaries(
         decisions, confirm_boundary, datatype=spec.datatype,
+        align_bytes=_key_quantum(spec),
         resolution_bytes=spec.boundary_resolution_bytes,
         max_probes=spec.max_boundary_probes, budget=budget,
     )
@@ -527,14 +568,16 @@ def _sweep_cell_proof(spec: SweepSpec) -> SweepResult:
     # Freeze all evidence before making any emitted decision.  The complete
     # per-cell family consists of every collected algorithm anchor, refined
     # boundary, and D/A0, A1/A0, A1/D knob-attribution hypothesis.
-    family: list[tuple[str, PairedEvidence, SizeDecision, Optional[KnobHypothesis]]] = []
+    family: list[tuple[str, PairedEvidence, SizeDecision, Optional[KnobHypothesis],
+                       tuple[str, str]]] = []
     for decision in decisions:
         if decision.evidence is not None:
             hypothesis_id = (
                 f"algorithm:{decision.source}:{decision.actual_size_bytes}:"
                 f"{decision.winner_name}"
             )
-            family.append((hypothesis_id, decision.evidence, decision, None))
+            family.append((hypothesis_id, decision.evidence, decision, None,
+                           ("D", "A")))
 
     # Knob evidence is collected only at raw-WIN algorithm points, but no knob
     # or final algorithm decision is mutated until the one cell-wide Holm pass.
@@ -566,16 +609,23 @@ def _sweep_cell_proof(spec: SweepSpec) -> SweepResult:
                         audit = KnobHypothesis(hypothesis_id, knob.env_var,
                                                candidate, gate, evidence)
                         decision.knob_hypotheses.append(audit)
-                        family.append((hypothesis_id, evidence, decision, audit))
+                        # The knob-effect gate measured its two conditions under
+                        # the A0/A1 labels (confirm_knob renames them so the
+                        # three gates stay distinguishable); the algorithm and
+                        # joint gates are plain D/A comparisons.
+                        family.append((
+                            hypothesis_id, evidence, decision, audit,
+                            ("A0", "A1") if gate == "knob-effect" else ("D", "A")))
 
 
     if family:
         adjusted = classify_cell(
             [item[1].samples for item in family],
             hypothesis_ids=[item[0] for item in family],
+            arm_pairs=[item[4] for item in family],
             min_pairs=spec.min_pairs, min_speedup=spec.margin_threshold,
         )
-        for (_, _, decision, audit), evidence in zip(family, adjusted):
+        for (_, _, decision, audit, _arm_pair), evidence in zip(family, adjusted):
             if audit is None:
                 decision.evidence = evidence
                 decision.policy = evidence.decision

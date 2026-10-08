@@ -355,19 +355,48 @@ def holm_adjusted_alphas(p_values: Iterable[float], alpha: float = 0.05) -> tupl
 
 def classify_cell(
     sample_groups: Iterable[Iterable[ArmSample]], *,
-    hypothesis_ids: Optional[Iterable[str]] = None, **kwargs,
+    hypothesis_ids: Optional[Iterable[str]] = None,
+    arm_pairs: Optional[Iterable[tuple[str, str]]] = None, **kwargs,
 ) -> tuple[PairedEvidence, ...]:
-    """Classify all decisions in a cell with deterministic Holm correction."""
+    """Classify all decisions in a cell with deterministic Holm correction.
+
+    ``arm_pairs`` names the (default, candidate) arm labels of each group when
+    they are not the shared ``default_arm``/``candidate_arm``.  A proof-mode
+    cell mixes plain D/A comparisons with knob-attribution comparisons that
+    measure the same two conditions under the A0/A1 labels; classifying those
+    samples against D/A finds neither arm and reports every one of them as
+    "missing default arm", so no knob hypothesis can survive attribution.
+    """
     groups = tuple(tuple(group) for group in sample_groups)
     ids = tuple(hypothesis_ids) if hypothesis_ids is not None else tuple(
         f"hypothesis-{index:08d}" for index in range(len(groups)))
     if len(ids) != len(groups) or len(set(ids)) != len(ids):
         raise ValueError("hypothesis_ids must be unique and match sample_groups")
-    preliminary = tuple(classify_evidence(group, **kwargs) for group in groups)
+    shared_default = kwargs.pop("default_arm", "D")
+    shared_alt = kwargs.pop("candidate_arm", "A")
+    if arm_pairs is None:
+        pairs = ((shared_default, shared_alt),) * len(groups)
+    else:
+        pairs = tuple(tuple(pair) for pair in arm_pairs)
+        if len(pairs) != len(groups):
+            raise ValueError("arm_pairs must match sample_groups")
+        for pair in pairs:
+            if len(pair) != 2 or not all(pair):
+                raise ValueError("arm_pairs must be pairs of arm names")
+            if pair[0] == pair[1]:
+                raise ValueError("arm pair labels must differ")
+
+    def classify(group: tuple[ArmSample, ...], pair: tuple[str, str],
+                 **over) -> PairedEvidence:
+        return classify_evidence(group, default_arm=pair[0],
+                                 candidate_arm=pair[1], **over)
+
+    preliminary = tuple(classify(group, pair, **kwargs)
+                        for group, pair in zip(groups, pairs))
     p_values = [e.p_win if e.p_win is not None else 1.0 for e in preliminary]
     base_alpha = float(kwargs.get("adjusted_alpha", 0.05))
     ranked = sorted(range(len(preliminary)),
-                    key=lambda index: (p_values[index], ids[index]))
+                     key=lambda index: (p_values[index], ids[index]))
     alphas_list = [0.0] * len(preliminary)
     for rank, index in enumerate(ranked):
         alphas_list[index] = base_alpha / (len(preliminary) - rank)
@@ -375,8 +404,8 @@ def classify_cell(
     adjusted_kwargs = dict(kwargs)
     adjusted_kwargs.pop("adjusted_alpha", None)
     classified = [
-        classify_evidence(group, adjusted_alpha=cell_alpha, **adjusted_kwargs)
-        for group, cell_alpha in zip(groups, alphas)
+        classify(group, pair, adjusted_alpha=cell_alpha, **adjusted_kwargs)
+        for group, pair, cell_alpha in zip(groups, pairs, alphas)
     ]
     # Holm is step-down: after the first ordered hypothesis misses its gate,
     # no later hypothesis in that family can be accepted as a win.
